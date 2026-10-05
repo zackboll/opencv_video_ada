@@ -1,6 +1,9 @@
 # Tracking contract
 
-- `calcOpticalFlowPyrLK` is called with native flags = 0.
+- Unseeded `calcOpticalFlowPyrLK` uses flags = 0; the seeded overload uses only
+  `OPTFLOW_USE_INITIAL_FLOW`. No public raw flag word.
+- Seed correspondence is by iteration position with equal array lengths;
+  lower bounds may differ. Clone seeds privately before native mutation.
 - Point coordinates are Float32 because OpenCV requires 2-channel CV_32F points.
 - Input point array bounds are preserved in the returned Ada array.
 - `Tracked=False` is a normal result, not an exception.

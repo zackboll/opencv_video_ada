@@ -25,7 +25,31 @@ int main() {
                           << " next=" << result[i] << " error=" << error[i] << '\n';
             }
         }
-        std::cout << "PASS: independent OpenCV " << CV_VERSION << " oracle (8 tracks)\n";
+        const auto previous = texture(96), next = translated(previous, 12, 7);
+        const auto points = fixture_points(96);
+        auto seeds = points;
+        for (auto &p : seeds) p += cv::Point2f(12.25f, 6.75f);
+        std::vector<cv::Point2f> unseeded, seeded = seeds;
+        std::vector<unsigned char> status, plain_status;
+        std::vector<float> error, plain_error;
+        const cv::TermCriteria criteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 30, 0.01);
+        cv::calcOpticalFlowPyrLK(previous, next, points, unseeded, plain_status, plain_error,
+                                cv::Size(21,21), 0, criteria, 0);
+        cv::calcOpticalFlowPyrLK(previous, next, points, seeded, status, error,
+                                cv::Size(21,21), 0, criteria, cv::OPTFLOW_USE_INITIAL_FLOW);
+        for (size_t i = 0; i < points.size(); ++i) {
+            const auto expected = points[i] + cv::Point2f(12,7);
+            if (status[i] != 1 || cv::norm(seeded[i] - expected) > 0.05 ||
+                !std::isfinite(error[i]) || error[i] < 0 ||
+                (plain_status[i] && cv::norm(unseeded[i] - expected) < 5.0) ||
+                cv::norm(seeded[i] - seeds[i]) < 0.20)
+                throw std::runtime_error("seed consumption/refinement oracle failed");
+            std::cout << "seed oracle point " << i << " plain=" << unseeded[i]
+                      << " prediction=" << seeds[i] << " refined=" << seeded[i]
+                      << " error=" << error[i] << '\n';
+        }
+        std::cout << "PASS: independent OpenCV " << CV_VERSION
+                  << " oracle (8 unseeded + 4 distinguishing seeded tracks)\n";
         return 0;
     } catch (const std::exception &e) {
         std::cerr << "FAIL: " << e.what() << '\n';

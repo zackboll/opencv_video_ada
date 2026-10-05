@@ -49,9 +49,45 @@ rejected before the native call. Successful errors are finite nonnegative mean
 patch L1 differences, not displacement accuracy or confidence. Invalid native
 successful results raise `OpenCV_Error`; they are not silently normalized.
 
-OpenCV's native flags are fixed to zero in this first slice. Initial-flow guesses,
-LK minimum-eigenvalue output mode, prebuilt pyramids and UMat are deliberately
-excluded from the bootstrap.
+### Seeded initial-flow tracking (Task 002)
+
+The original overload remains unchanged: its initial next estimate is the previous
+point and its native flags are zero. The seeded overload uses a caller prediction
+as the initial next estimate, with only `cv::OPTFLOW_USE_INITIAL_FLOW`:
+
+```ada
+Tracks := OpenCV.Video.Track_PyrLK
+  (Previous_Image      => Previous,
+   Next_Image          => Current,
+   Points              => Points,
+   Initial_Next_Points => Predictions);
+```
+
+`Points` and `Predictions` must have equal lengths; correspondence is by iteration
+position, so ranges `5 .. 8` and `20 .. 23` are valid together. Results preserve
+`Points'Range`. Both inputs contain Float32 values (no Float64 narrowing), with
+finite coordinates bounded by `2**29`; neither needs to lie inside the image.
+There is no extra displacement bound. Empty pairs retain the empty-result
+contract after image/options validation; mismatched counts raise `OpenCV_Error`.
+
+The seeded declaration places defaulted `Options` **before** required
+`Initial_Next_Points`. This avoids making existing four-argument positional option
+aggregates ambiguous in Ada. Omit options with named `Initial_Next_Points` as above,
+or pass `(Previous, Current, Points, Options, Predictions)` positionally.
+
+Seeds aid optimization/convergence, **not correctness**: a successful LK status is
+not proof of the right correspondence. Predictions from camera-motion/navigation
+models may be useful; this binding has no IMU, estimator, or navigation dependency.
+Seeds and images remain unchanged. Failed tracks still return the original
+previous point and zero error, **not** the prediction. The shim clones seeds into
+private storage and publishes all three outputs only after successful validation.
+
+See [Task 002](docs/tasks/002-initial-flow-seeding.md) and its
+[qualification record](docs/task002-qualification.md). The existing `lk_synthetic`
+example is retained; the focused AUnit and independent native oracle demonstrate
+the distinguishing seeded fixture without another example executable.
+
+LK minimum-eigenvalue output mode, prebuilt pyramids and UMat remain excluded.
 
 ## Build
 

@@ -60,10 +60,12 @@ extern "C" const char *opencv_video_native_backend(void) { return "video"; }
 
 extern "C" const char *opencv_video_last_error(void) { return g_last_error; }
 
-extern "C" opencv_video_status opencv_video_track_pyr_lk(
+static opencv_video_status track_pyr_lk(
     const opencv_core_mat_handle *previous_image,
     const opencv_core_mat_handle *next_image,
     const opencv_core_mat_handle *previous_points,
+    const opencv_core_mat_handle *initial_next_points,
+    bool seeded,
     opencv_core_mat_handle *next_points,
     opencv_core_mat_handle *track_status,
     opencv_core_mat_handle *track_error,
@@ -78,6 +80,7 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk(
         const cv::Mat *previous = nullptr;
         const cv::Mat *next = nullptr;
         const cv::Mat *points = nullptr;
+        const cv::Mat *seeds = nullptr;
         cv::Mat *published_next = nullptr;
         cv::Mat *published_status = nullptr;
         cv::Mat *published_error = nullptr;
@@ -88,6 +91,10 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk(
         if (status != OPENCV_VIDEO_OK) return status;
         status = resolve_input(previous_points, &points, "previous points");
         if (status != OPENCV_VIDEO_OK) return status;
+        if (seeded) {
+            status = resolve_input(initial_next_points, &seeds, "initial next points");
+            if (status != OPENCV_VIDEO_OK) return status;
+        }
         status = resolve_output(next_points, &published_next, "next points");
         if (status != OPENCV_VIDEO_OK) return status;
         status = resolve_output(track_status, &published_status, "track status");
@@ -99,7 +106,8 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk(
             published_status == published_error ||
             published_next == previous || published_next == next || published_next == points ||
             published_status == previous || published_status == next || published_status == points ||
-            published_error == previous || published_error == next || published_error == points) {
+            published_error == previous || published_error == next || published_error == points ||
+            (seeded && (published_next == seeds || published_status == seeds || published_error == seeds))) {
             return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Aliased input/output headers");
         }
 
@@ -126,6 +134,11 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk(
             return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Image exceeds safe native arithmetic bounds");
         }
 
+        if (seeded && (seeds->dims != 2 || seeds->cols != 1 || seeds->type() != CV_32FC2 ||
+                       seeds->total() != points->total() || !seeds->isContinuous())) {
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                        "Seeds must be matching continuous N x 1 Float32 C2");
+        }
         if (points->empty()) {
             if (points->dims != 2 || points->type() != CV_32FC2 || points->total() != 0) {
                 return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Invalid empty point schema");
@@ -150,8 +163,23 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk(
                 return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Point exceeds safe native conversion bounds");
             }
         }
+        if (seeded) {
+            if (seeds->checkVector(2, CV_32F, true) != point_count) {
+                return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Seed count mismatch");
+            }
+            const auto *estimates = seeds->ptr<cv::Point2f>();
+            for (int i = 0; i < point_count; ++i) {
+                if (!std::isfinite(estimates[i].x) || !std::isfinite(estimates[i].y) ||
+                    std::abs(estimates[i].x) > 536870912.0f || std::abs(estimates[i].y) > 536870912.0f) {
+                    return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Seed exceeds safe native conversion bounds");
+                }
+            }
+        }
 
         cv::Mat computed_next;
+        // OpenCV mutates InputOutputArray even on paths that later fail. Never
+        // pass a borrowed seed or caller-visible output allocation to it.
+        if (seeded) computed_next = seeds->clone();
         cv::Mat computed_status;
         cv::Mat computed_error;
         const cv::TermCriteria criteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS,
@@ -165,7 +193,8 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk(
         cv::calcOpticalFlowPyrLK(*previous, *next, *points,
                                  computed_next, computed_status, computed_error,
                                  cv::Size(window_width, window_height), max_level,
-                                 criteria, 0, min_eigenvalue_threshold);
+                                 criteria, seeded ? cv::OPTFLOW_USE_INITIAL_FLOW : 0,
+                                 min_eigenvalue_threshold);
 
         if (computed_next.checkVector(2, CV_32F, true) != point_count ||
             computed_status.checkVector(1, CV_8U, true) != point_count ||
@@ -205,4 +234,33 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk(
     } catch (...) {
         return fail(OPENCV_VIDEO_ERROR_UNKNOWN, "Unknown C++ exception in PyrLK shim");
     }
+}
+
+extern "C" opencv_video_status opencv_video_track_pyr_lk(
+    const opencv_core_mat_handle *previous_image,
+    const opencv_core_mat_handle *next_image,
+    const opencv_core_mat_handle *previous_points,
+    opencv_core_mat_handle *next_points,
+    opencv_core_mat_handle *track_status,
+    opencv_core_mat_handle *track_error,
+    int32_t window_width, int32_t window_height, int32_t max_level,
+    int32_t maximum_iterations, double epsilon, double min_eigenvalue_threshold) {
+    return track_pyr_lk(previous_image, next_image, previous_points, nullptr, false,
+                        next_points, track_status, track_error, window_width, window_height,
+                        max_level, maximum_iterations, epsilon, min_eigenvalue_threshold);
+}
+
+extern "C" opencv_video_status opencv_video_track_pyr_lk_seeded(
+    const opencv_core_mat_handle *previous_image,
+    const opencv_core_mat_handle *next_image,
+    const opencv_core_mat_handle *previous_points,
+    const opencv_core_mat_handle *initial_next_points,
+    opencv_core_mat_handle *next_points,
+    opencv_core_mat_handle *track_status,
+    opencv_core_mat_handle *track_error,
+    int32_t window_width, int32_t window_height, int32_t max_level,
+    int32_t maximum_iterations, double epsilon, double min_eigenvalue_threshold) {
+    return track_pyr_lk(previous_image, next_image, previous_points, initial_next_points, true,
+                        next_points, track_status, track_error, window_width, window_height,
+                        max_level, maximum_iterations, epsilon, min_eigenvalue_threshold);
 }

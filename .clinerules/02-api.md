@@ -7,6 +7,7 @@ The bootstrap implements only sparse pyramidal Lucas-Kanade tracking:
 - per-point tracked flag, next point and error;
 - failed tracks expose deterministic Ada values, not native undefined output.
 
-Do not broaden Task 001 into Farneback, ECC, KalmanFilter, CamShift, meanShift,
-UMat/OpenCL, prebuilt pyramids, initial-flow guesses, VideoIO, feature detection,
-Calib3D, navigation fusion, or estimator policy.
+Task 002 adds only caller-supplied Float32 next-point predictions through a typed
+seeded overload. Do not broaden it into Farneback, ECC, KalmanFilter, CamShift,
+meanShift, UMat/OpenCL, prebuilt pyramids, minimum-eigenvalue error mode, VideoIO,
+feature detection, Calib3D, navigation fusion, or estimator policy.
