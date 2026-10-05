@@ -222,11 +222,173 @@ void run() {
     std::cout << "PASS: Video PyrLK raw boundary on "
               << opencv_video_native_version() << " / " << opencv_video_native_backend() << '\n';
 }
+void run_seeded() {
+    auto previous = matrix(96,96,OPENCV_CORE_DEPTH_UINT8,1);
+    auto next = matrix(96,96,OPENCV_CORE_DEPTH_UINT8,1);
+    auto points = matrix(4,1,OPENCV_CORE_DEPTH_FLOAT32,2);
+    auto seeds = matrix(4,1,OPENCV_CORE_DEPTH_FLOAT32,2);
+    auto result = matrix(1,1,OPENCV_CORE_DEPTH_FLOAT32,1);
+    auto status = matrix(1,1,OPENCV_CORE_DEPTH_UINT8,1);
+    auto error = matrix(1,1,OPENCV_CORE_DEPTH_FLOAT32,1);
+    output(previous.get()) = texture(96);
+    output(next.get()) = translated(output(previous.get()),12,7);
+    const auto fixtures = fixture_points(96);
+    for (int i=0; i<4; ++i) {
+        output(points.get()).at<cv::Point2f>(i,0) = fixtures[i];
+        output(seeds.get()).at<cv::Point2f>(i,0) = fixtures[i] + cv::Point2f(12.25f,6.75f);
+    }
+    const auto saved_seeds = output(seeds.get()).clone();
+    const auto saved_previous = output(previous.get()).clone();
+    const auto saved_next = output(next.get()).clone();
+    auto call = [&](const opencv_core_mat_handle *a, const opencv_core_mat_handle *b,
+                    const opencv_core_mat_handle *p, const opencv_core_mat_handle *seed,
+                    opencv_core_mat_handle *q, opencv_core_mat_handle *s, opencv_core_mat_handle *e,
+                    int level=0, int w=21, double eps=.01) {
+        return opencv_video_track_pyr_lk_seeded(a,b,p,seed,q,s,e,w,21,level,30,eps,1e-4);
+    };
+    auto valid = [&]() {
+        check(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),error.get())
+              == OPENCV_VIDEO_OK, "seeded call failed");
+    };
+    valid();
+    cv::Mat oracle_next = saved_seeds.clone(), oracle_status, oracle_error;
+    cv::calcOpticalFlowPyrLK(output(previous.get()),output(next.get()),output(points.get()),
+                            oracle_next,oracle_status,oracle_error,cv::Size(21,21),0,
+                            cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS,30,.01),
+                            cv::OPTFLOW_USE_INITIAL_FLOW);
+    check(cv::norm(oracle_next,output(result.get()),cv::NORM_INF)<1e-5 &&
+          cv::norm(oracle_status,output(status.get()),cv::NORM_INF)==0 &&
+          cv::norm(oracle_error,output(error.get()),cv::NORM_INF)<1e-5,
+          "seeded shim differs from direct native oracle");
+    for (int i=0; i<4; ++i)
+        check(output(status.get()).at<unsigned char>(i,0)==1 &&
+              cv::norm(output(result.get()).at<cv::Point2f>(i,0)-fixtures[i]-cv::Point2f(12,7))<.05,
+              "seeded shim ignored useful estimate");
+    const auto before_result = output(result.get()).clone();
+    const auto before_status = output(status.get()).clone();
+    const auto before_error = output(error.get()).clone();
+    auto unchanged = [&]() {
+        check(cv::norm(before_result,output(result.get()),cv::NORM_INF)==0 &&
+              cv::norm(before_status,output(status.get()),cv::NORM_INF)==0 &&
+              cv::norm(before_error,output(error.get()),cv::NORM_INF)==0,
+              "seeded failure not atomic");
+    };
+    auto invalid = [&](opencv_video_status code) {
+        check(code==OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "invalid seeded boundary accepted");
+        check(std::strlen(opencv_video_last_error())!=0,"missing seeded diagnostic");
+        unchanged();
+    };
+    for (int slot=0; slot<7; ++slot)
+        invalid(call(slot==0?nullptr:previous.get(),slot==1?nullptr:next.get(),
+                     slot==2?nullptr:points.get(),slot==3?nullptr:seeds.get(),
+                     slot==4?nullptr:result.get(),slot==5?nullptr:status.get(),slot==6?nullptr:error.get()));
+    for (auto *input : {previous.get(),next.get(),points.get(),seeds.get()}) {
+        invalid(call(previous.get(),next.get(),points.get(),seeds.get(),input,status.get(),error.get()));
+        invalid(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),input,error.get()));
+        invalid(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),input));
+    }
+    invalid(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),result.get(),error.get()));
+    invalid(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),status.get()));
+    invalid(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),result.get()));
+    auto wrong_count = matrix(3,1,OPENCV_CORE_DEPTH_FLOAT32,2);
+    auto wrong_depth = matrix(4,1,OPENCV_CORE_DEPTH_FLOAT64,2);
+    auto wrong_channels = matrix(4,1,OPENCV_CORE_DEPTH_FLOAT32,1);
+    auto wrong_shape = matrix(2,2,OPENCV_CORE_DEPTH_FLOAT32,2);
+    auto strided = matrix(4,2,OPENCV_CORE_DEPTH_FLOAT32,2);
+    output(strided.get()) = output(strided.get()).col(0);
+    check(!output(strided.get()).isContinuous(), "seed stride fixture continuous");
+    for (auto *seed : {wrong_count.get(),wrong_depth.get(),wrong_channels.get(),wrong_shape.get(),strided.get()})
+        invalid(call(previous.get(),next.get(),points.get(),seed,result.get(),status.get(),error.get()));
+    invalid(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),error.get(),31));
+    invalid(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),error.get(),0,0));
+    invalid(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),error.get(),0,21,
+                 std::numeric_limits<double>::quiet_NaN()));
+    for (float bad : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
+                      std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(), 536870976.0f}) {
+        for (int component : {0,1}) {
+            output(seeds.get()).at<cv::Vec2f>(0,0)[component]=bad;
+            invalid(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),error.get()));
+            output(seeds.get())=saved_seeds.clone();
+        }
+    }
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    for (int stage : {1,2}) for (int kind : {1,2,3}) {
+        fault_stage=stage; fault_kind=kind;
+        const auto code=call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),error.get());
+        check(code==(kind==1?OPENCV_VIDEO_ERROR_STANDARD:
+                     kind==2?OPENCV_VIDEO_ERROR_OPENCV:OPENCV_VIDEO_ERROR_UNKNOWN),
+              "seeded exception escaped or wrong status");
+        unchanged();
+        check(cv::norm(saved_seeds,output(seeds.get()),cv::NORM_INF)==0,"fault mutated seeds");
+    }
+    fault_stage=0;
+    std::cout << "PASS: 6 seeded injected exceptions contained atomically\n";
+#endif
+    // Input/input header alias is safe: only the private clone is mutable.
+    check(call(previous.get(),previous.get(),points.get(),points.get(),result.get(),status.get(),error.get())
+          == OPENCV_VIDEO_OK, "seed/previous-point input alias rejected");
+    for (int i=0; i<4; ++i)
+        check(output(status.get()).at<unsigned char>(i,0)==1 &&
+              cv::norm(output(result.get()).at<cv::Point2f>(i,0)-fixtures[i])<.05,
+              "aliased input identity differs");
+    check(cv::norm(saved_seeds,output(seeds.get()),cv::NORM_INF)==0 &&
+          cv::norm(saved_previous,output(previous.get()),cv::NORM_INF)==0 &&
+          cv::norm(saved_next,output(next.get()),cv::NORM_INF)==0,"seeded input mutated");
+    // Distinct headers sharing the seed allocation are also safe, on success
+    // and after native mutation followed by an exception before publication.
+    output(result.get())=output(seeds.get());
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    fault_stage=2; fault_kind=2;
+    check(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),error.get())
+          == OPENCV_VIDEO_ERROR_OPENCV,"shared-storage fault not contained");
+    check(output(result.get()).data==output(seeds.get()).data &&
+          cv::norm(saved_seeds,output(seeds.get()),cv::NORM_INF)==0 &&
+          cv::norm(before_status,output(status.get()),cv::NORM_INF)==0,
+          "shared-storage failure mutated seed or output");
+    fault_stage=0;
+#endif
+    valid();
+    check(cv::norm(saved_seeds,output(seeds.get()),cv::NORM_INF)==0,"shared allocation mutated seed");
+    output(seeds.get()).at<cv::Point2f>(1,0)={-100,-100};
+    output(seeds.get()).at<cv::Point2f>(2,0)={536870912.0f,-536870912.0f};
+    output(points.get()).at<cv::Point2f>(3,0)={-100,-100};
+    valid();
+    for (int i : {1,2,3})
+        check(output(status.get()).at<unsigned char>(i,0)==0 &&
+              output(result.get()).at<cv::Point2f>(i,0)==output(points.get()).at<cv::Point2f>(i,0) &&
+              output(error.get()).at<float>(i,0)==0,"failed seeded result not normalized");
+    // A low-eigenvalue failure can skip both seeded-patch processing and err
+    // assignment; the shim must not read native failed-slot storage.
+    output(previous.get()).setTo(cv::Scalar(0));
+    output(next.get()).setTo(cv::Scalar(0));
+    valid();
+    for (int i=0; i<4; ++i)
+        check(output(status.get()).at<unsigned char>(i,0)==0 &&
+              output(result.get()).at<cv::Point2f>(i,0)==output(points.get()).at<cv::Point2f>(i,0) &&
+              output(error.get()).at<float>(i,0)==0,"singular seeded failure not normalized");
+    auto empty = matrix(0,1,OPENCV_CORE_DEPTH_FLOAT32,2);
+    const auto last_result = output(result.get()).clone();
+    const auto last_status = output(status.get()).clone();
+    const auto last_error = output(error.get()).clone();
+    for (bool empty_previous : {false,true}) {
+        check(call(previous.get(),next.get(),empty_previous?empty.get():points.get(),
+                   empty_previous?seeds.get():empty.get(),result.get(),status.get(),error.get())
+              == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "empty/nonempty seed pair accepted");
+        check(cv::norm(last_result,output(result.get()),cv::NORM_INF)==0 &&
+              cv::norm(last_status,output(status.get()),cv::NORM_INF)==0 &&
+              cv::norm(last_error,output(error.get()),cv::NORM_INF)==0,"empty mismatch not atomic");
+    }
+    check(call(previous.get(),next.get(),empty.get(),empty.get(),result.get(),status.get(),error.get())
+          == OPENCV_VIDEO_OK && output(result.get()).empty() && output(status.get()).empty() &&
+          output(error.get()).empty(), "seeded empty pair failed");
+    std::cout << "PASS: seeded actual-shim/Core boundary, oracle, validation, aliases and atomicity\n";
+}
 }  // namespace
 
 int main() {
     try {
         run();
+        run_seeded();
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "FAIL: " << error.what() << '\n';

@@ -42,6 +42,25 @@ opencv_video_status opencv_video_track_pyr_lk(
     double epsilon,
     double min_eigenvalue_threshold);
 
+/* Same contract, using only OPTFLOW_USE_INITIAL_FLOW. Seeds are read-only,
+ * continuous N x 1 CV_32FC2 with matching count and finite |coordinate| <= 2^29.
+ * Input headers may alias each other; no output header may alias any input.
+ * Native nextPts is a private clone, never an application allocation. */
+opencv_video_status opencv_video_track_pyr_lk_seeded(
+    const opencv_core_mat_handle *previous_image,
+    const opencv_core_mat_handle *next_image,
+    const opencv_core_mat_handle *previous_points,
+    const opencv_core_mat_handle *initial_next_points,
+    opencv_core_mat_handle *next_points,
+    opencv_core_mat_handle *track_status,
+    opencv_core_mat_handle *track_error,
+    int32_t window_width,
+    int32_t window_height,
+    int32_t max_level,
+    int32_t maximum_iterations,
+    double epsilon,
+    double min_eigenvalue_threshold);
+
 #ifdef __cplusplus
 }
 #endif

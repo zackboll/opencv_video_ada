@@ -53,5 +53,23 @@ package OpenCV.Video is
       Points         : Tracking_Point_Array;
       Options        : PyrLK_Options := (others => <>)) return Point_Track_Array;
 
+   --  Use caller predictions instead of previous points as the initial next
+   --  estimates (native OPTFLOW_USE_INITIAL_FLOW only). The two arrays must
+   --  have equal lengths; correspondence is by iteration position, not index.
+   --  Results preserve Points'Range. Seeds obey the same coordinate bound as
+   --  Points, need not be inside the image, and are never modified. All other
+   --  validation, successful error and deterministic failure contracts above
+   --  apply. Empty pairs validate images/options and preserve the null range.
+   --  A prediction aids convergence; it does not guarantee a correct match.
+   --  Options precedes the required seed parameter to keep existing positional
+   --  option aggregates unambiguous. Use Initial_Next_Points => Predictions
+   --  to omit Options, or pass Options then Predictions positionally.
+   function Track_PyrLK
+     (Previous_Image      : OpenCV.Core.Mat;
+      Next_Image          : OpenCV.Core.Mat;
+      Points              : Tracking_Point_Array;
+      Options             : PyrLK_Options := (others => <>);
+      Initial_Next_Points : Tracking_Point_Array) return Point_Track_Array;
+
    function Successful_Count (Tracks : Point_Track_Array) return Natural;
 end OpenCV.Video;

@@ -1,4 +1,4 @@
-# PyrLK portable source contract (Task 001)
+# PyrLK portable source contract (Tasks 001 and 002)
 
 ## Evidence
 
@@ -121,7 +121,8 @@ and exact CI runs for native results.
 ## Ownership / failure atomicity
 
 Core owns every opaque handle, Mat header and application allocation. Nested
-`Module_Interop` callbacks keep all six borrowed headers alive for one call;
+`Module_Interop` callbacks keep six (unseeded) or seven (seeded) borrowed headers
+alive for one call;
 Video neither deletes nor retains any borrowed pointer. The C ABI contains only
 opaque Core handles and fixed-width/scalar C types, never C++/STL objects.
 Non-null invalid/freed pointers cannot be validated safely: callers must supply
@@ -135,3 +136,87 @@ Fault hooks are compiled exclusively into a separate native qualification
 binary, not declared in the production C header or Ada imports. Tests throw
 bad_alloc, cv::Exception and a nonstandard exception before the native call and
 after native computation, checking containment and unchanged output headers.
+
+## Initial-flow source review (Task 002)
+
+The same peeled commits above were inspected again, including `tracking.hpp`,
+`lkpyramid.cpp`, and `test_optflowpyrlk.cpp` for **each** tag. Authoritative anchors:
+
+| tag | declaration / flag | CPU nextPts validation | initialization | seeded floor / update / final floor |
+| --- | --- | --- | --- | --- |
+| 4.1.0 | tracking.hpp 56, 138–158, 178–183 | lkpyramid.cpp 1223–1263 | 195–208 | 459–479 / 636–652 / 658–693 |
+| 4.10.0 | tracking.hpp 56, 138–158, 178–183 | lkpyramid.cpp 1254–1294 | 199–212 | 489–509 / 664–680 / 686–721 |
+| 5.0.0 | tracking.hpp 59, 146–166, 186–191 | lkpyramid.cpp 1045–1085 | 131–157 | 434–454 / 609–625 / 630–666 |
+
+1. Native `OPTFLOW_USE_INITIAL_FLOW` is enum value **4** in all three tags. When
+   set, `_nextPts.create` is skipped. Existing storage must pass
+   `checkVector(2, CV_32F, true) == npoints`: continuous Float32 two-vectors of the
+   same count. CPU source does **not** require identical Mat shape/type layout
+   if both satisfy that vector check. Our private ABI deliberately requires the
+   same continuous **N x 1 CV_32FC2** schema as previous-point marshaling and
+   rejects strided seed Mats. Ada arrays do not require identical lower bounds.
+2. At the actual coarsest pyramid level, native reads the full-resolution seed
+   and multiplies it by `1/(1 << level)`. At each finer level it doubles the
+   preceding refined result, rather than rereading the original seed. 5.0 moves
+   this initialization into a loop before the HAL dispatch, using a separate
+   scaled previous-point buffer; the CPU fallback has the same semantics.
+3. Native writes the scaled next estimate **before** checking the previous patch,
+   then writes iterative refinements. A later point, level, allocation, or backend
+   failure can occur after earlier writes. Supplying a caller-visible output Mat
+   or a shallow copy of the seed is therefore unsafe. Video clones the validated
+   seed into private `computed_next`; status/error are also local. Headers publish
+   only after schema and every success-slot check. Failed slots are overwritten
+   without reading either native next point or native error.
+4. The previous patch and seeded next patch are checked against padded bounds
+   **after** half-window subtraction and `cvFloor`, not against the nominal image.
+   A seed just outside the image may succeed; a distant seed normally produces
+   status zero at level zero. It is not a precondition violation. A textureless
+   previous patch can fail before the seeded patch is examined at all.
+5. Input seeds undergo Float32 power-of-two scaling, finer-level multiplication
+   by two, half-window subtraction, and signed-int `cvFloor` in the iteration and
+   final photometric-error branches. `cvRound` acts on fractional interpolation
+   weights, not on a previous-to-seed displacement. There is **no integer
+   subtraction of seed and previous coordinates** in this Mat CPU path. The
+   existing finite `abs(coordinate) <= 2**29` restriction leaves ample signed-int
+   margin for initial scaling/window subtraction and unrefined scale restoration.
+   Distant seeds fail padded bounds before interpolation. No additional caller
+   displacement/delta bound is necessary. Iterative `delta` is computed internally
+   from patch gradients/residuals just as in unseeded LK; bounding the initial
+   displacement would not bound native convergence. Task 001's explicit limitation
+   concerning native internal arithmetic/custom HAL remains, not a claim to prove
+   arbitrary upstream/vendor implementations safe by post-validating outputs.
+6. Failed `nextPts` can contain scaled/intermediate/predicted coordinates; even a
+   finite original seed gives no dependable failed-result meaning. Failed `err`
+   may still be unwritten on singular/low-eigenvalue/out-of-next-patch branches.
+   Native test `accuracy` compares only success coordinates and permits bounded
+   losses; the `submat` regression checks a Region invocation. None of these
+   upstream tests is a seed-consumption oracle or defines failed output values.
+7. COUNT/EPS normalization, window/level arithmetic, image/stride restrictions,
+   and successful mean patch L1 error are unchanged by flag 4. The binding supplies
+   no eigenvalue-error flag. Neither Float64 coordinate narrowing nor a raw public
+   flag word is introduced. Point/seed counts are checked before integer conversion.
+8. There is no material initial-flow contract difference across 4.1, 4.10 and 5.0.
+   SSE/universal-intrinsics/HAL differences still justify numerical tolerances,
+   not bitwise equality. Mat inputs do not select the UMat/OpenCL path.
+
+### Distinguishing native experiment
+
+Use the existing deterministic 96x96 texture
+`(row*17 + col*29 + (row*col)%251)%256`, zero-filled integer translation `(12,7)`,
+and points `(25,25), (45,32), (60,50), (35,65)`. Window 21x21, **Max_Level=0**,
+COUNT|EPS `(30,.01)`, eigenvalue threshold `1e-4`. Supply predictions offset by
+`(12.25,6.75)`, deliberately not exact matches. The correct patches are well inside
+the images. Full-resolution local LK cannot traverse this large translation from
+the previous point on this high-frequency texture; the prediction starts within
+the intended convergence basin.
+
+Direct-C++ experiments on 4.1.0, 4.10.0 and 5.0.0 show all four seeded solutions
+within **0.002 pixels per coordinate** of `(12,7)`, while all four unseeded solutions
+are more than **5 pixels** from the intended match. The test requires 0.05-pixel
+Euclidean accuracy, at least 0.20-pixel refinement away from the supplied seed,
+and >5-pixel unseeded separation (or native failure). The 0.05 bound is a subpixel
+accuracy criterion with substantial measured margin, unchanged across versions;
+it does not conceal convergence differences. This rejects both an ignored flag
+and an implementation that merely returns the seed. AUnit checks the same fixture
+and actual-shim output is compared with direct native status, successful coordinates
+and errors within 1e-5 on identical inputs. Failed native errors are never compared.

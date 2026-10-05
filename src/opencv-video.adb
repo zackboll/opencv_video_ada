@@ -53,6 +53,9 @@ package body OpenCV.Video is
 
    procedure Validate (Points : Tracking_Point_Array) is
    begin
+      if Points'Length > Long_Long_Integer (Interfaces.Integer_32'Last) then
+         raise OpenCV.OpenCV_Error with "PyrLK point count exceeds native integer range";
+      end if;
       for Point of Points loop
          if not Is_Finite (Point.X) or else not Is_Finite (Point.Y)
             or else abs Point.X > 536_870_912.0 or else abs Point.Y > 536_870_912.0
@@ -104,13 +107,16 @@ package body OpenCV.Video is
       end return;
    end Point_Matrix;
 
-   function Track_PyrLK
-     (Previous_Image : OpenCV.Core.Mat;
-      Next_Image     : OpenCV.Core.Mat;
-      Points         : Tracking_Point_Array;
-      Options        : PyrLK_Options := (others => <>)) return Point_Track_Array
+   function Track_Internal
+     (Previous_Image      : OpenCV.Core.Mat;
+      Next_Image          : OpenCV.Core.Mat;
+      Points              : Tracking_Point_Array;
+      Initial_Next_Points : Tracking_Point_Array;
+      Seeded              : Boolean;
+      Options             : PyrLK_Options) return Point_Track_Array
    is
       Point_Input : OpenCV.Core.Mat;
+      Seed_Input  : OpenCV.Core.Mat;
       Next_Points : OpenCV.Core.Mat;
       Status      : OpenCV.Core.Mat;
       Errors      : OpenCV.Core.Mat;
@@ -122,16 +128,32 @@ package body OpenCV.Video is
                procedure Next_Point_Callback (Next_Point_Handle : Bridge.Output_Mat_Handle) is
                   procedure Status_Callback (Status_Handle : Bridge.Output_Mat_Handle) is
                      procedure Error_Callback (Error_Handle : Bridge.Output_Mat_Handle) is
+                        procedure Seed_Callback (Seed_Handle : Bridge.Input_Mat_Handle) is
+                        begin
+                           Code := C.Track_PyrLK_Seeded
+                             (Previous_Handle, Next_Handle, Point_Handle, Seed_Handle,
+                              Next_Point_Handle, Status_Handle, Error_Handle,
+                              Interfaces.Integer_32 (Options.Window_Size.Width),
+                              Interfaces.Integer_32 (Options.Window_Size.Height),
+                              Interfaces.Integer_32 (Options.Max_Level),
+                              Interfaces.Integer_32 (Options.Maximum_Iterations),
+                              Interfaces.C.double (Options.Epsilon),
+                              Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                        end Seed_Callback;
                      begin
-                        Code := C.Track_PyrLK
-                          (Previous_Handle, Next_Handle, Point_Handle,
-                           Next_Point_Handle, Status_Handle, Error_Handle,
-                           Interfaces.Integer_32 (Options.Window_Size.Width),
-                           Interfaces.Integer_32 (Options.Window_Size.Height),
-                           Interfaces.Integer_32 (Options.Max_Level),
-                           Interfaces.Integer_32 (Options.Maximum_Iterations),
-                           Interfaces.C.double (Options.Epsilon),
-                           Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                        if Seeded then
+                           Bridge.With_Input_Handle (Seed_Input, Seed_Callback'Access);
+                        else
+                           Code := C.Track_PyrLK
+                             (Previous_Handle, Next_Handle, Point_Handle,
+                              Next_Point_Handle, Status_Handle, Error_Handle,
+                              Interfaces.Integer_32 (Options.Window_Size.Width),
+                              Interfaces.Integer_32 (Options.Window_Size.Height),
+                              Interfaces.Integer_32 (Options.Max_Level),
+                              Interfaces.Integer_32 (Options.Maximum_Iterations),
+                              Interfaces.C.double (Options.Epsilon),
+                              Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                        end if;
                      end Error_Callback;
                   begin
                      Bridge.With_Output_Handle (Errors, Error_Callback'Access);
@@ -152,6 +174,12 @@ package body OpenCV.Video is
       Validate_Images (Previous_Image, Next_Image);
       Validate (Points);
       Validate (Options);
+      if Seeded then
+         if Initial_Next_Points'Length /= Points'Length then
+            raise OpenCV.OpenCV_Error with "PyrLK point and seed counts differ";
+         end if;
+         Validate (Initial_Next_Points);
+      end if;
 
       if Points'Length = 0 then
          return Result : Point_Track_Array (Points'Range) do
@@ -160,6 +188,9 @@ package body OpenCV.Video is
       end if;
 
       Point_Input := Point_Matrix (Points);
+      if Seeded then
+         Seed_Input := Point_Matrix (Initial_Next_Points);
+      end if;
       --  Outputs start empty; the shim publishes complete temporary cv::Mat
       --  results into these Core-owned headers only after native success.
       Bridge.With_Input_Handle (Previous_Image, Previous_Callback'Access);
@@ -206,6 +237,26 @@ package body OpenCV.Video is
             end;
          end loop;
       end return;
+   end Track_Internal;
+
+   function Track_PyrLK
+     (Previous_Image : OpenCV.Core.Mat;
+      Next_Image     : OpenCV.Core.Mat;
+      Points         : Tracking_Point_Array;
+      Options        : PyrLK_Options := (others => <>)) return Point_Track_Array is
+   begin
+      return Track_Internal (Previous_Image, Next_Image, Points, [], False, Options);
+   end Track_PyrLK;
+
+   function Track_PyrLK
+     (Previous_Image      : OpenCV.Core.Mat;
+      Next_Image          : OpenCV.Core.Mat;
+      Points              : Tracking_Point_Array;
+      Options             : PyrLK_Options := (others => <>);
+      Initial_Next_Points : Tracking_Point_Array) return Point_Track_Array is
+   begin
+      return Track_Internal
+        (Previous_Image, Next_Image, Points, Initial_Next_Points, True, Options);
    end Track_PyrLK;
 
    function Successful_Count (Tracks : Point_Track_Array) return Natural is

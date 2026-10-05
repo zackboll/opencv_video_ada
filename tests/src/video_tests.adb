@@ -381,6 +381,188 @@ package body Video_Tests is
       end;
    end Invalid_Points;
 
+   procedure Seeded_Identity (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (64, 64);
+      Tracks : constant Point_Track_Array := Track_PyrLK
+        (Image, Image, Standard_Points, Initial_Next_Points => Standard_Points);
+   begin
+      for I in Tracks'Range loop
+         Assert (Tracks (I).Tracked and then
+                   Near (Tracks (I).Next_Point.X, Standard_Points (I).X, 0.05) and then
+                   Near (Tracks (I).Next_Point.Y, Standard_Points (I).Y, 0.05) and then
+                   Tracks (I).Error >= 0.0 and then Tracks (I).Error <= OpenCV.Float32_Value'Last,
+                 "seeded identity/error differs");
+      end loop;
+   end Seeded_Identity;
+
+   procedure Seeded_Translation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous : constant OpenCV.Core.Mat := Texture (96, 96);
+      Next : constant OpenCV.Core.Mat := Shift (Previous, 12, 7);
+      Saved_Previous : constant OpenCV.Core.Mat := Previous.Clone;
+      Saved_Next : constant OpenCV.Core.Mat := Next.Clone;
+      Points : constant Tracking_Point_Array (5 .. 8) :=
+        [(25.0, 25.0), (45.0, 32.0), (60.0, 50.0), (35.0, 65.0)];
+      Seeds : Tracking_Point_Array (20 .. 23);
+      Options : constant PyrLK_Options := (Max_Level => 0, others => <>);
+   begin
+      for I in Points'Range loop
+         Seeds (I - Points'First + Seeds'First) :=
+           (Points (I).X + 12.25, Points (I).Y + 6.75);
+      end loop;
+      declare
+         Saved_Seeds : constant Tracking_Point_Array := Seeds;
+         Tracks : constant Point_Track_Array := Track_PyrLK (Previous, Next, Points, Options, Seeds);
+         Plain : constant Point_Track_Array := Track_PyrLK (Previous, Next, Points, Options);
+      begin
+         Assert (Tracks'First = 5 and then Tracks'Last = 8, "seed bounds replaced point bounds");
+         Assert (Seeds = Saved_Seeds, "seed array mutated");
+         for I in Tracks'Range loop
+            Assert (Tracks (I).Previous_Point = Points (I) and then Tracks (I).Tracked and then
+                      Near (Tracks (I).Next_Point.X, Points (I).X + 12.0, 0.05) and then
+                      Near (Tracks (I).Next_Point.Y, Points (I).Y + 7.0, 0.05) and then
+                      Tracks (I).Error >= 0.0 and then Tracks (I).Error <= OpenCV.Float32_Value'Last,
+                    "useful seed failed to refine translation");
+            Assert (not Plain (I).Tracked or else
+                      abs (Plain (I).Next_Point.X - Points (I).X - 12.0) > 5.0 or else
+                      abs (Plain (I).Next_Point.Y - Points (I).Y - 7.0) > 5.0,
+                    "fixture no longer distinguishes seed mode");
+         end loop;
+      end;
+      for R in 0 .. 95 loop
+         for C in 0 .. 95 loop
+            Assert (OpenCV.Core.UInt8_Access.Get (Previous, R, C) =
+                      OpenCV.Core.UInt8_Access.Get (Saved_Previous, R, C) and then
+                      OpenCV.Core.UInt8_Access.Get (Next, R, C) =
+                      OpenCV.Core.UInt8_Access.Get (Saved_Next, R, C), "seeded images mutated");
+         end loop;
+      end loop;
+   end Seeded_Translation;
+
+   procedure Seeded_Counts (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (64, 64);
+      Empty : constant Tracking_Point_Array (5 .. 4) := [];
+      Empty_Seeds : constant Tracking_Point_Array (20 .. 19) := [];
+      Tracks : constant Point_Track_Array := Track_PyrLK
+        (Image, Image, Empty, Initial_Next_Points => Empty_Seeds);
+   begin
+      Assert (Tracks'First = 5 and then Tracks'Last = 4, "seeded empty bounds lost");
+      for Mode in 1 .. 3 loop
+         begin
+            declare
+               Rejected : constant Point_Track_Array :=
+                 (if Mode = 1 then Track_PyrLK (Image, Image, Empty, Initial_Next_Points => Standard_Points)
+                  elsif Mode = 2 then Track_PyrLK (Image, Image, Standard_Points, Initial_Next_Points => Empty_Seeds)
+                  else Track_PyrLK (Image, Image, Standard_Points, Initial_Next_Points => Standard_Points (1 .. 3)));
+               pragma Unreferenced (Rejected);
+            begin
+               Assert (False, "mismatched seeds accepted");
+            end;
+         exception
+            when OpenCV.OpenCV_Error => null;
+         end;
+      end loop;
+      begin
+         declare
+            Rejected : constant Point_Track_Array := Track_PyrLK
+              (Image, Image, Empty, (Max_Level => 31, others => <>), Empty_Seeds);
+            pragma Unreferenced (Rejected);
+         begin
+            Assert (False, "empty pair skipped option validation");
+         end;
+      exception
+         when OpenCV.OpenCV_Error => null;
+      end;
+      declare
+         No_Image : OpenCV.Core.Mat;
+      begin
+         declare
+            Rejected : constant Point_Track_Array := Track_PyrLK
+              (No_Image, No_Image, Empty, Initial_Next_Points => Empty_Seeds);
+            pragma Unreferenced (Rejected);
+         begin
+            Assert (False, "empty seeded pair skipped image validation");
+         end;
+      exception
+         when OpenCV.OpenCV_Error => null;
+      end;
+   end Seeded_Counts;
+
+   procedure Invalid_Seeds (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (64, 64);
+      function From_Bits is new Ada.Unchecked_Conversion
+        (Interfaces.Unsigned_32, OpenCV.Float32_Value);
+      type Bit_Array is array (Positive range <>) of Interfaces.Unsigned_32;
+   begin
+      begin
+         declare
+            Tracks : constant Point_Track_Array := Track_PyrLK
+              (Image, Image, [1 => (20.0, 20.0)], Initial_Next_Points => [1 => (OpenCV.Float32_Value'Last, 20.0)]);
+            pragma Unreferenced (Tracks);
+         begin
+            Assert (False, "unsafe seed accepted");
+         end;
+      exception
+         when OpenCV.OpenCV_Error => null;
+      end;
+      for Bits of Bit_Array'[16#7FC0_0000#, 16#7F80_0000#] loop
+         begin
+            declare
+               Tracks : constant Point_Track_Array := Track_PyrLK
+                 (Image, Image, [1 => (20.0, 20.0)], Initial_Next_Points => [1 => (20.0, From_Bits (Bits))]);
+               pragma Unreferenced (Tracks);
+            begin
+               Assert (False, "nonfinite seed accepted");
+            end;
+         exception
+            when OpenCV.OpenCV_Error | Constraint_Error => null;
+         end;
+      end loop;
+   end Invalid_Seeds;
+
+   procedure Seeded_Outside (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (64, 64);
+      Points : constant Tracking_Point_Array := [(-1.0, 32.0), (20.0, 20.0), (32.0, 24.0)];
+      Seeds : constant Tracking_Point_Array := [(-1.0, 32.0), (-100.0, -100.0), (536_870_912.0, -536_870_912.0)];
+      Tracks : constant Point_Track_Array := Track_PyrLK
+        (Image, Image, Points, (Max_Level => 0, others => <>), Seeds);
+   begin
+      Assert (Tracks (1).Tracked and then Near (Tracks (1).Next_Point.X, -1.0, 0.05),
+              "padded out-of-image seed rejected");
+      for I in 2 .. 3 loop
+         Assert (not Tracks (I).Tracked and then Tracks (I).Next_Point = Points (I) and then
+                   Tracks (I).Error = 0.0, "failed seed exposed prediction/native garbage");
+      end loop;
+   end Seeded_Outside;
+
+   procedure Seeded_Regions (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous_Parent : constant OpenCV.Core.Mat := Texture (96, 96);
+      Next_Parent : constant OpenCV.Core.Mat := Shift (Previous_Parent, 2, 1);
+      Previous : constant OpenCV.Core.Mat := Previous_Parent.Region ((8, 8, 64, 64));
+      Next : constant OpenCV.Core.Mat := Next_Parent.Region ((8, 8, 64, 64));
+      Seeds : Tracking_Point_Array (Standard_Points'Range);
+   begin
+      for I in Seeds'Range loop
+         Seeds (I) := (Standard_Points (I).X + 2.25, Standard_Points (I).Y + 0.75);
+      end loop;
+      declare
+         Tracks : constant Point_Track_Array := Track_PyrLK
+           (Previous, Next, Standard_Points, Initial_Next_Points => Seeds);
+      begin
+         Assert (not Previous.Is_Continuous and then not Next.Is_Continuous, "seeded Region is contiguous");
+         for I in Tracks'Range loop
+            Assert (Tracks (I).Tracked and then
+                      Near (Tracks (I).Next_Point.X, Standard_Points (I).X + 2.0) and then
+                      Near (Tracks (I).Next_Point.Y, Standard_Points (I).Y + 1.0), "seeded Region differs");
+         end loop;
+      end;
+   end Seeded_Regions;
+
    package Caller is new AUnit.Test_Caller (Fixture);
 
    function Suite return AUnit.Test_Suites.Access_Test_Suite is
@@ -402,6 +584,12 @@ package body Video_Tests is
        Result.Add_Test (Caller.Create ("noncontiguous Core Regions", Noncontiguous_Regions'Access));
        Result.Add_Test (Caller.Create ("source immutability and value independence", Value_Independence'Access));
        Result.Add_Test (Caller.Create ("nonfinite and unsafe points rejected", Invalid_Points'Access));
-      return Result;
+       Result.Add_Test (Caller.Create ("seeded identity and successful errors", Seeded_Identity'Access));
+       Result.Add_Test (Caller.Create ("seed consumed, bounds and immutability", Seeded_Translation'Access));
+       Result.Add_Test (Caller.Create ("seed counts and empty contract", Seeded_Counts'Access));
+       Result.Add_Test (Caller.Create ("unsafe and nonfinite seeds", Invalid_Seeds'Access));
+       Result.Add_Test (Caller.Create ("outside seeds and failed normalization", Seeded_Outside'Access));
+       Result.Add_Test (Caller.Create ("seeded noncontiguous Regions", Seeded_Regions'Access));
+       return Result;
    end Suite;
 end Video_Tests;
