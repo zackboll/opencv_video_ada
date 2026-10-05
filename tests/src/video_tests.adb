@@ -1,6 +1,8 @@
 with AUnit.Assertions;
 with AUnit.Test_Caller;
 with AUnit.Test_Fixtures;
+with Ada.Unchecked_Conversion;
+with Interfaces;
 with OpenCV.Core;
 with OpenCV.Core.UInt8_Access;
 with OpenCV.Video;
@@ -9,6 +11,9 @@ package body Video_Tests is
    use AUnit.Assertions;
    use OpenCV.Video;
    use type OpenCV.Float32_Value;
+   use type OpenCV.Float64_Value;
+   use type OpenCV.Float32_Point;
+   use type OpenCV.UInt8_Value;
 
    type Fixture is new AUnit.Test_Fixtures.Test_Fixture with null record;
 
@@ -180,9 +185,201 @@ package body Video_Tests is
       end Expect_Error;
    begin
       Expect_Error ((Window_Size => (Width => 0, Height => 21), others => <>));
+       Expect_Error ((Window_Size => (Width => 1, Height => 21), others => <>));
+       Expect_Error ((Window_Size => (Width => 21, Height => 2), others => <>));
+       Expect_Error ((Window_Size => (Width => 256, Height => 21), others => <>));
+       Expect_Error ((Window_Size => (Width => 21, Height => 256), others => <>));
+       Expect_Error ((Max_Level => 31, others => <>));
+       Expect_Error ((Max_Level => Natural'Last, others => <>));
+       Expect_Error ((Maximum_Iterations => 101, others => <>));
+       Expect_Error ((Maximum_Iterations => Positive'Last, others => <>));
       Expect_Error ((Epsilon => 0.0, others => <>));
+       Expect_Error ((Epsilon => -1.0, others => <>));
+       Expect_Error ((Epsilon => 10.01, others => <>));
       Expect_Error ((Min_Eigenvalue_Threshold => -1.0, others => <>));
+       Expect_Error ((Min_Eigenvalue_Threshold => OpenCV.Float64_Value'Last, others => <>));
+       declare
+          function From_Bits is new Ada.Unchecked_Conversion
+            (Interfaces.Unsigned_64, OpenCV.Float64_Value);
+          type Bit_Array is array (Positive range <>) of Interfaces.Unsigned_64;
+       begin
+          for Bits of Bit_Array'(1 => 16#7FF0_0000_0000_0000#,
+                                 2 => 16#7FF8_0000_0000_0000#)
+          loop
+             begin
+                Expect_Error ((Epsilon => From_Bits (Bits), others => <>));
+             exception
+                --  GNAT validity checks can reject IEEE special values before
+                --  they can be represented in a public Ada record.
+                when Constraint_Error => null;
+             end;
+             begin
+                Expect_Error ((Min_Eigenvalue_Threshold => From_Bits (Bits), others => <>));
+             exception
+                when Constraint_Error => null;
+             end;
+          end loop;
+       end;
    end Invalid_Options;
+
+   procedure Horizontal_Translation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous : constant OpenCV.Core.Mat := Texture (64, 64);
+      Next : constant OpenCV.Core.Mat := Shift (Previous, 2, 0);
+      Tracks : constant Point_Track_Array := Track_PyrLK (Previous, Next, Standard_Points);
+   begin
+      for I in Tracks'Range loop
+         Assert (Tracks (I).Tracked and then
+                   Near (Tracks (I).Next_Point.X, Standard_Points (I).X + 2.0) and then
+                   Near (Tracks (I).Next_Point.Y, Standard_Points (I).Y),
+                 "horizontal translation/order mismatch");
+         Assert (Tracks (I).Error >= 0.0 and then Tracks (I).Error <= 255.0,
+                 "successful error is not finite nonnegative L1 evidence");
+      end loop;
+   end Horizontal_Translation;
+
+   procedure Failed_And_Outside (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (64, 64);
+      Points : constant Tracking_Point_Array :=
+        [7 => (20.0, 20.0), 8 => (-100.0, -100.0),
+         9 => (32.0, 24.0), 10 => (200.0, 200.0)];
+      Tracks : constant Point_Track_Array := Track_PyrLK (Image, Image, Points);
+   begin
+      Assert (Tracks'First = 7 and then Tracks'Last = 10, "mixed result bounds");
+      for I in Tracks'Range loop
+         Assert (Tracks (I).Previous_Point = Points (I), "input ordering changed");
+         if I in 8 | 10 then
+            Assert (not Tracks (I).Tracked and then Tracks (I).Next_Point = Points (I)
+                      and then Tracks (I).Error = 0.0, "failed-track normalization");
+         else
+            Assert (Tracks (I).Tracked and then
+                      Near (Tracks (I).Next_Point.X, Points (I).X, 0.05) and then
+                      Near (Tracks (I).Next_Point.Y, Points (I).Y, 0.05), "mixed track ordering");
+         end if;
+      end loop;
+   end Failed_And_Outside;
+
+   procedure Textureless_Failure (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : OpenCV.Core.Mat := OpenCV.Core.Create
+        (64, 64, (Depth => OpenCV.Core.UInt8, Channels => 1));
+   begin
+      Image.Set_To ((Component_0 => 0.0, others => 0.0));
+      declare
+         Tracks : constant Point_Track_Array := Track_PyrLK (Image, Image, Standard_Points);
+      begin
+         Assert (Successful_Count (Tracks) = 0, "flat image should lose all tracks");
+         for I in Tracks'Range loop
+            Assert (Tracks (I).Next_Point = Standard_Points (I) and then Tracks (I).Error = 0.0,
+                    "flat-image failed output is not deterministic");
+         end loop;
+      end;
+   end Textureless_Failure;
+
+   procedure Boundary_Points (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (64, 64);
+      Points : constant Tracking_Point_Array :=
+        [1 => (1.0, 1.0), 2 => (62.0, 62.0), 3 => (-1.0, 32.0), 4 => (64.0, 32.0)];
+      Tracks : constant Point_Track_Array := Track_PyrLK
+        (Image, Image, Points, (Max_Level => 0, others => <>));
+   begin
+      for I in Tracks'Range loop
+         Assert (Tracks (I).Tracked and then
+                   Near (Tracks (I).Next_Point.X, Points (I).X, 0.05) and then
+                   Near (Tracks (I).Next_Point.Y, Points (I).Y, 0.05),
+                 "padded boundary identity differs");
+      end loop;
+   end Boundary_Points;
+
+   procedure Empty_Image (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : OpenCV.Core.Mat;
+   begin
+      declare
+         Tracks : constant Point_Track_Array := Track_PyrLK (Image, Image, Standard_Points);
+         pragma Unreferenced (Tracks);
+      begin
+         Assert (False, "empty image accepted");
+      end;
+   exception
+      when OpenCV.OpenCV_Error => null;
+   end Empty_Image;
+
+   procedure Noncontiguous_Regions (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous_Parent : constant OpenCV.Core.Mat := Texture (96, 96);
+      Next_Parent : constant OpenCV.Core.Mat := Shift (Previous_Parent, 2, 1);
+      Previous : constant OpenCV.Core.Mat := Previous_Parent.Region ((8, 8, 64, 64));
+      Next : constant OpenCV.Core.Mat := Next_Parent.Region ((8, 8, 64, 64));
+      Tracks : constant Point_Track_Array := Track_PyrLK (Previous, Next, Standard_Points);
+   begin
+      Assert (not Previous.Is_Continuous and then not Next.Is_Continuous, "fixture is contiguous");
+      for I in Tracks'Range loop
+         Assert (Tracks (I).Tracked and then
+                   Near (Tracks (I).Next_Point.X, Standard_Points (I).X + 2.0) and then
+                   Near (Tracks (I).Next_Point.Y, Standard_Points (I).Y + 1.0),
+                 "noncontiguous Region translation differs");
+      end loop;
+   end Noncontiguous_Regions;
+
+   procedure Value_Independence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous : OpenCV.Core.Mat := Texture (64, 64);
+      Next : OpenCV.Core.Mat := Shift (Previous, 2, 1);
+      Saved_Previous : constant OpenCV.Core.Mat := Previous.Clone;
+      Saved_Next : constant OpenCV.Core.Mat := Next.Clone;
+      Points : Tracking_Point_Array := Standard_Points;
+      Tracks : constant Point_Track_Array := Track_PyrLK (Previous, Next, Points);
+   begin
+      for R in 0 .. 63 loop
+         for C in 0 .. 63 loop
+            Assert (OpenCV.Core.UInt8_Access.Get (Previous, R, C) =
+                      OpenCV.Core.UInt8_Access.Get (Saved_Previous, R, C) and then
+                    OpenCV.Core.UInt8_Access.Get (Next, R, C) =
+                      OpenCV.Core.UInt8_Access.Get (Saved_Next, R, C), "source pixels mutated");
+         end loop;
+      end loop;
+      Previous.Set_To ((Component_0 => 0.0, others => 0.0));
+      Next.Set_To ((Component_0 => 0.0, others => 0.0));
+      Points (1) := (0.0, 0.0);
+      Assert (Tracks (1).Previous_Point = Standard_Points (1) and then
+                Near (Tracks (1).Next_Point.X, 22.0), "result retains mutable source storage");
+   end Value_Independence;
+
+   procedure Invalid_Points (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (64, 64);
+      function From_Bits is new Ada.Unchecked_Conversion
+        (Interfaces.Unsigned_32, OpenCV.Float32_Value);
+      type Values is array (Positive range <>) of OpenCV.Float32_Value;
+   begin
+      for Value of Values'[OpenCV.Float32_Value'Last]
+      loop
+         begin
+            declare
+               Tracks : constant Point_Track_Array := Track_PyrLK (Image, Image, [1 => (Value, 20.0)]);
+               pragma Unreferenced (Tracks);
+            begin
+               Assert (False, "unsafe point accepted");
+            end;
+         exception
+            when OpenCV.OpenCV_Error => null;
+         end;
+      end loop;
+      begin
+         declare
+            Tracks : constant Point_Track_Array := Track_PyrLK
+              (Image, Image, [1 => (From_Bits (16#7FC0_0000#), 20.0)]);
+            pragma Unreferenced (Tracks);
+         begin
+            Assert (False, "NaN point accepted");
+         end;
+      exception
+         when OpenCV.OpenCV_Error | Constraint_Error => null;
+      end;
+   end Invalid_Points;
 
    package Caller is new AUnit.Test_Caller (Fixture);
 
@@ -197,6 +394,14 @@ package body Video_Tests is
       Result.Add_Test (Caller.Create ("non-UInt8 image rejected", Wrong_Depth'Access));
       Result.Add_Test (Caller.Create ("multi-channel image rejected", Wrong_Channels'Access));
       Result.Add_Test (Caller.Create ("invalid PyrLK options rejected", Invalid_Options'Access));
+       Result.Add_Test (Caller.Create ("horizontal translation and finite errors", Horizontal_Translation'Access));
+       Result.Add_Test (Caller.Create ("mixed status ordering and outside points", Failed_And_Outside'Access));
+       Result.Add_Test (Caller.Create ("textureless deterministic failure", Textureless_Failure'Access));
+       Result.Add_Test (Caller.Create ("padded boundary points", Boundary_Points'Access));
+       Result.Add_Test (Caller.Create ("empty image rejected", Empty_Image'Access));
+       Result.Add_Test (Caller.Create ("noncontiguous Core Regions", Noncontiguous_Regions'Access));
+       Result.Add_Test (Caller.Create ("source immutability and value independence", Value_Independence'Access));
+       Result.Add_Test (Caller.Create ("nonfinite and unsafe points rejected", Invalid_Points'Access));
       return Result;
    end Suite;
 end Video_Tests;
