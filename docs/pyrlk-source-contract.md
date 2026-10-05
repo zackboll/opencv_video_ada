@@ -15,6 +15,7 @@ For each tag inspect these authoritative files (replace TAG in the URLs):
 - https://github.com/opencv/opencv/blob/TAG/modules/video/src/lkpyramid.cpp
 - https://github.com/opencv/opencv/blob/TAG/modules/video/include/opencv2/video/tracking.hpp
 - https://github.com/opencv/opencv/blob/TAG/modules/video/test/test_optflowpyrlk.cpp
+- https://github.com/opencv/opencv/blob/TAG/modules/core/src/matrix.cpp
 
 Useful 4.10 anchors: `LKTrackerInvoker::operator()` lines 190–722;
 `buildOpticalFlowPyramid` lines 726–821; `SparsePyrLKOpticalFlowImpl::calc`
@@ -78,7 +79,11 @@ and accepts a bounded number of lost/bad points. It is not our synthetic oracle.
   Video rejects negative, nonfinite or float-overflowing thresholds.
 - Native has a zero-count release-and-return branch after point schema and
   window/level validation, before image processing. An arbitrary empty Mat is
-  not necessarily accepted by `checkVector`. Ada handles empty point arrays
+  not necessarily accepted by `checkVector`: all three implementations require
+  non-null `data`, so ordinary empty Mats return -1 rather than reaching the
+  nominal zero-count branch. The shim's explicit typed-empty handling is a
+  deliberate thick-binding behavior, not a claim about native empty-Mat success.
+  Ada handles empty point arrays
   before marshaling, but still validates images/options. The shim independently
   supports a typed empty CV_32FC2 Mat and clears all output headers on success.
 - OpenCV uses assertions/errors that throw `cv::Exception`, plus standard
@@ -106,6 +111,8 @@ responsibilities; invalid successful results are not exposed as Ada values.
 semantics. 5.0 adds Scharr/LK HAL dispatch and a scaled-points buffer, and removes
 some obsolete paths. Those optimized paths may change rounding/iteration
 results, so coordinate tolerances are used, not cross-version bitwise equality.
+5.0 also changes `checkVector`'s 2-D condition to `dims <= 2`; the private Video
+Nx1 2-D point schema remains unchanged and avoids depending on that difference.
 The Core pin already supports 5.0's own Mat ABI differences; Video does not
 duplicate Core headers. Mat inputs do not request UMat/OpenCL execution. A source
 review does not establish version qualification; see the qualification record

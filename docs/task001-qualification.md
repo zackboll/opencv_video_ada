@@ -20,6 +20,10 @@ Clean tree and no existing/overlapping open PR were confirmed before creating
 - Public crate, tests and example build with warnings as errors. No new warning
   suppressions were added. The pre-existing Apple c11-extension exception is
   unchanged.
+- Independent clean Git clone (no generated build products copied) reproduces
+  build, AUnit, example, native, fault and sanitizer/oracle campaigns with exit 0.
+  Local Development, Validation and Release public builds pass; Validation AUnit
+  also passes 16/16. The C header separately compiles as C11 with warnings as errors.
 - AUnit: **16 registered, 16 executed, 16 passed, 0 failed assertions,
   0 unexpected errors**. Includes identity, horizontal and two-axis translation,
   input ordering, nondefault bounds, empty points/images, rejected schemas and
@@ -61,6 +65,35 @@ it was not replaced or its tolerances loosened.
 
 ## Remote qualification
 
-Pinned source compatibility and PR CI results will be recorded here after their
-exact workflow runs complete. Workflow definitions are not passing evidence.
-Windows remains push-to-main-only, deliberately outside the PR review gate.
+Qualification head: `12a71aa7c7e5817db0e9c5737e1d69485b1649fa`.
+
+[PR CI run 37253653392](https://github.com/zackboll/opencv_video_ada/actions/runs/37253653392)
+completed successfully: repository-checks, Linux, macOS and Linux sanitizers.
+Linux used packaged OpenCV **4.6.0**; macOS used Homebrew OpenCV **5.0.0**.
+Linux/macOS AUnit each reports 16 executed/passed, 0 assertion failures/errors;
+native/fault/oracle and 4/4 synthetic example pass. macOS linkage checks confirm
+opencv_video, Core shim and libc++, without libstdc++.
+
+[Pinned compatibility run 37253603928](https://github.com/zackboll/opencv_video_ada/actions/runs/37253603928)
+completed successfully, source-built separate Linux installations:
+
+| OpenCV | binding build | AUnit registered/executed/passed | failed assertions/errors | raw + 6 faults | ASan / UBSan | oracle | example |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 4.1.0 | pass | 16 / 16 / 16 | 0 / 0 | pass | pass / pass | 8/8 | 4/4 |
+| 4.10.0 | pass | 16 / 16 / 16 | 0 / 0 | pass | pass / pass | 8/8 | 4/4 |
+| 5.0.0 | pass | 16 / 16 / 16 | 0 / 0 | pass | pass / pass | 8/8 | 4/4 |
+
+No semantic difference was observed on these fixtures. Source-reviewed SIMD/HAL
+differences still preclude a universal bitwise-equality promise. All sanitizer
+commands exited successfully with no reported findings/leaks/uncaught exceptions.
+Old OpenCV source builds emit their own upstream compiler/CMake warnings; no
+binding warning policy was weakened or new suppressions introduced for them.
+GitHub also reports checkout@v4 Node 20 deprecation; jobs pass with forced Node 24.
+
+The final evidence/formatting follow-up changes no runtime semantics or fixtures;
+required PR checks are checked again on the final pushed head at handoff. Exact
+final-head check URLs are available on PR #1; this record deliberately identifies
+the tested commit rather than claiming an earlier run tested a later commit.
+Windows remains push-to-main-only, deliberately outside the PR review gate and
+not qualified by this campaign. No unresolved implementation/portability blocker
+was found. No merge, tag, release, amend, rebase, force-push or auto-merge occurred.
