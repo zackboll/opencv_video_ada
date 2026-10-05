@@ -6,34 +6,35 @@
 
 #include <cmath>
 #include <exception>
-#include <sstream>
-#include <string>
+#include <cstdio>
+#include <limits>
 #include <utility>
 
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+void opencv_video_test_fault(int);
+#endif
+
 namespace {
-thread_local std::string g_last_error;
+// Diagnostics must remain safe even while handling allocation failure.
+thread_local char g_last_error[512] = {};
 
-void clear_error() { g_last_error.clear(); }
+void clear_error() noexcept { g_last_error[0] = '\0'; }
 
-opencv_video_status fail(opencv_video_status code, const std::string &message) {
-    g_last_error = message;
+opencv_video_status fail(opencv_video_status code, const char *message) noexcept {
+    std::snprintf(g_last_error, sizeof(g_last_error), "%s", message);
     return code;
 }
-
-bool finite(double value) { return std::isfinite(value); }
 
 opencv_video_status resolve_input(const opencv_core_mat_handle *handle,
                                   const cv::Mat **out,
                                   const char *name) {
     if (handle == nullptr || out == nullptr) {
         return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
-                    std::string(name) + " handle is null");
+                    name);
     }
     const opencv_core_status status = opencv_core_module_input_mat(handle, out);
     if (status != OPENCV_CORE_OK || *out == nullptr) {
-        std::ostringstream message;
-        message << "Core failed to resolve " << name << " (status " << status << ")";
-        return fail(OPENCV_VIDEO_ERROR_CORE_BRIDGE, message.str());
+        return fail(OPENCV_VIDEO_ERROR_CORE_BRIDGE, name);
     }
     return OPENCV_VIDEO_OK;
 }
@@ -43,13 +44,11 @@ opencv_video_status resolve_output(opencv_core_mat_handle *handle,
                                    const char *name) {
     if (handle == nullptr || out == nullptr) {
         return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
-                    std::string(name) + " handle is null");
+                    name);
     }
     const opencv_core_status status = opencv_core_module_output_mat(handle, out);
     if (status != OPENCV_CORE_OK || *out == nullptr) {
-        std::ostringstream message;
-        message << "Core failed to resolve " << name << " (status " << status << ")";
-        return fail(OPENCV_VIDEO_ERROR_CORE_BRIDGE, message.str());
+        return fail(OPENCV_VIDEO_ERROR_CORE_BRIDGE, name);
     }
     return OPENCV_VIDEO_OK;
 }
@@ -59,7 +58,7 @@ extern "C" const char *opencv_video_native_version(void) { return CV_VERSION; }
 
 extern "C" const char *opencv_video_native_backend(void) { return "video"; }
 
-extern "C" const char *opencv_video_last_error(void) { return g_last_error.c_str(); }
+extern "C" const char *opencv_video_last_error(void) { return g_last_error; }
 
 extern "C" opencv_video_status opencv_video_track_pyr_lk(
     const opencv_core_mat_handle *previous_image,
@@ -96,6 +95,14 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk(
         status = resolve_output(track_error, &published_error, "track error");
         if (status != OPENCV_VIDEO_OK) return status;
 
+        if (published_next == published_status || published_next == published_error ||
+            published_status == published_error ||
+            published_next == previous || published_next == next || published_next == points ||
+            published_status == previous || published_status == next || published_status == points ||
+            published_error == previous || published_error == next || published_error == points) {
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Aliased input/output headers");
+        }
+
         if (previous->empty() || next->empty() || previous->dims != 2 || next->dims != 2 ||
             previous->type() != CV_8UC1 || next->type() != CV_8UC1 ||
             previous->size() != next->size()) {
@@ -103,15 +110,45 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk(
                         "PyrLK images must be nonempty matching 2-D UInt8 C1 Mats");
         }
 
+        if (window_width < 3 || window_width > 255 || window_height < 3 || window_height > 255 ||
+            max_level < 0 || max_level > 30 || maximum_iterations < 1 || maximum_iterations > 100 ||
+            !std::isfinite(epsilon) || epsilon <= 0.0 || epsilon > 10.0 ||
+            !std::isfinite(min_eigenvalue_threshold) || min_eigenvalue_threshold < 0.0 ||
+            min_eigenvalue_threshold > std::numeric_limits<float>::max()) {
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Invalid PyrLK options");
+        }
+        // Native code uses signed int row strides and row*stride expressions.
+        const int64_t padded_rows = int64_t(previous->rows) + 2 * window_height;
+        const int64_t padded_cols = int64_t(previous->cols) + 2 * window_width;
+        if (padded_rows * padded_cols > std::numeric_limits<int>::max() / 4 ||
+            previous->step[0] > size_t(std::numeric_limits<int>::max() / padded_rows) ||
+            next->step[0] > size_t(std::numeric_limits<int>::max() / padded_rows)) {
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Image exceeds safe native arithmetic bounds");
+        }
+
+        if (points->empty()) {
+            if (points->dims != 2 || points->type() != CV_32FC2 || points->total() != 0) {
+                return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Invalid empty point schema");
+            }
+            published_next->release();
+            published_status->release();
+            published_error->release();
+            return OPENCV_VIDEO_OK;
+        }
+        if (points->dims != 2 || points->cols != 1 || points->type() != CV_32FC2) {
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Points must be N x 1 Float32 C2");
+        }
         const int point_count = points->checkVector(2, CV_32F, true);
         if (point_count <= 0) {
             return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
                         "PyrLK previous points must be a nonempty continuous Float32 2-vector");
         }
-        if (window_width <= 0 || window_height <= 0 || max_level < 0 ||
-            maximum_iterations <= 0 || !finite(epsilon) || epsilon <= 0.0 ||
-            !finite(min_eigenvalue_threshold) || min_eigenvalue_threshold < 0.0) {
-            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Invalid PyrLK options");
+        const cv::Point2f *input = points->ptr<cv::Point2f>();
+        for (int i = 0; i < point_count; ++i) {
+            if (!std::isfinite(input[i].x) || !std::isfinite(input[i].y) ||
+                std::abs(input[i].x) > 536870912.0f || std::abs(input[i].y) > 536870912.0f) {
+                return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Point exceeds safe native conversion bounds");
+            }
         }
 
         cv::Mat computed_next;
@@ -119,6 +156,11 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk(
         cv::Mat computed_error;
         const cv::TermCriteria criteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS,
                                         maximum_iterations, epsilon);
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+        // Only the separately compiled qualification binary supplies this hook.
+        opencv_video_test_fault(1);
+#endif
 
         cv::calcOpticalFlowPyrLK(*previous, *next, *points,
                                  computed_next, computed_status, computed_error,
@@ -130,6 +172,23 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk(
             computed_error.checkVector(1, CV_32F, true) != point_count) {
             return fail(OPENCV_VIDEO_ERROR_OPENCV,
                         "OpenCV returned an unexpected PyrLK output schema");
+        }
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+        opencv_video_test_fault(2);
+#endif
+        auto *result = computed_next.ptr<cv::Point2f>();
+        auto *flags = computed_status.ptr<unsigned char>();
+        auto *errors = computed_error.ptr<float>();
+        for (int i = 0; i < point_count; ++i) {
+            if (flags[i] == 0) {
+                // Never read native failed-track point/error storage.
+                result[i] = input[i];
+                errors[i] = 0.0f;
+            } else if (flags[i] != 1 || !std::isfinite(result[i].x) ||
+                       !std::isfinite(result[i].y) || !std::isfinite(errors[i]) || errors[i] < 0) {
+                return fail(OPENCV_VIDEO_ERROR_OPENCV, "Invalid successful PyrLK result");
+            }
         }
 
         // Failure atomicity: publish only after every native result is complete

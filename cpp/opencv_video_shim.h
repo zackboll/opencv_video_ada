@@ -21,6 +21,13 @@ const char *opencv_video_native_version(void);
 const char *opencv_video_native_backend(void);
 const char *opencv_video_last_error(void);
 
+/* Handles must be real live Core handles. Output headers must be distinct from
+ * each other and all inputs. On failure, existing outputs are unchanged (not
+ * cleared); Ada supplies initially empty outputs. On successful empty points,
+ * all outputs are cleared. Points are continuous N x 1 CV_32FC2, including a
+ * typed empty Mat. Failed slots publish the input point and zero error without
+ * reading undefined native slots. Borrowed Core pointers are never retained.
+ */
 opencv_video_status opencv_video_track_pyr_lk(
     const opencv_core_mat_handle *previous_image,
     const opencv_core_mat_handle *next_image,
