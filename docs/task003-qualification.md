@@ -88,5 +88,11 @@ TBB disabled. All commands serial across the three Alire roots; warnings as erro
 - Repository checker (five imports/exports, 37 registrations), seven actual
   configuration tests, all shell syntax checks and git diff --check pass.
 
-Clean-clone and remote review-gate evidence is recorded after those campaigns
-complete; these local results do not claim that later commits already passed CI.
+- Independent clean Git clone of implementation commit
+  `bbe06f7068b5aba94e15824b93fe01139caa62ef`, with no generated products copied,
+  reproduces public/tests builds, AUnit 37/37 with zero failures/errors, direct
+  oracle, complete native/fault and ASan/UBSan campaigns, retained 4/4 example,
+  repository/configuration/shell/diff checks; all exit zero on OpenCV 4.10.0.
+
+Remote review-gate evidence is recorded after those campaigns complete; these
+local results do not claim that later commits already passed CI.
