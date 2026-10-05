@@ -94,5 +94,40 @@ TBB disabled. All commands serial across the three Alire roots; warnings as erro
   oracle, complete native/fault and ASan/UBSan campaigns, retained 4/4 example,
   repository/configuration/shell/diff checks; all exit zero on OpenCV 4.10.0.
 
-Remote review-gate evidence is recorded after those campaigns complete; these
-local results do not claim that later commits already passed CI.
+## Remote qualification
+
+Qualification head: `d02876345e72ecec7661ef67340ed9eb5497ace2`.
+PR [#3 — Add forward-backward PyrLK consistency diagnostics](https://github.com/zackboll/opencv_video_ada/pull/3).
+
+[PR CI run 37259263123](https://github.com/zackboll/opencv_video_ada/actions/runs/37259263123)
+completed successfully: repository-checks, linux, macos, linux-sanitizers. Exact
+logs retrieved: Linux OpenCV 4.6.0 and macOS Homebrew 5.0.0 each report 37
+executed/passed, zero failed assertions/unexpected errors, successful direct oracle,
+complete raw/seeded/fault boundaries and retained 4/4 example. macOS runtime checks
+verify Video/Core shims and libc++ without libstdc++. Linux ASan/UBSan actual-shim
+campaign passes with no reported findings/leaks/uncaught exceptions.
+
+[Manual pinned compatibility run 37259262033](https://github.com/zackboll/opencv_video_ada/actions/runs/37259262033)
+completed successfully on the same qualification head, independently source-built
+Linux installations. Exact logs retrieved and checked:
+
+| OpenCV | build | AUnit registered/executed/passed | assertions/errors | raw/seeded + faults | ASan/UBSan | direct forward/backward oracle | example |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 4.1.0 | pass | 37 / 37 / 37 | 0 / 0 | pass | pass / pass | 20 mapped entries pass | 4/4 |
+| 4.10.0 | pass | 37 / 37 / 37 | 0 / 0 | pass | pass / pass | 20 mapped entries pass | 4/4 |
+| 5.0.0 | pass | 37 / 37 / 37 | 0 / 0 | pass | pass / pass | 20 mapped entries pass | 4/4 |
+
+Both retained native oracle scenarios (8 unseeded + 4 seeded) also pass on every
+version. Deliberately inconsistent and blank-destination fixtures pass without
+per-version thresholds or tolerance relaxation. All sanitizer commands exit zero.
+Upstream source compiler/CMake warnings and checkout@v4 Node 20 deprecation are
+non-failing annotations; no binding warning policy was weakened. No deterministic
+CI failure or blind rerun occurred. No unresolved implementation/portability issue
+was found. Windows remains post-merge-only, not a Task 003 PR job.
+
+The remote-evidence follow-up changes documentation only. Required PR checks are
+checked again on its final pushed head; exact final-head URLs remain on PR #3.
+This record distinguishes the pinned qualification head above from a later
+documentation commit rather than claiming earlier runs tested later commits.
+No merge, tag, release, amend, published-history rebase, force-push or auto-merge
+occurred; the PR is left open/non-draft/unmerged with auto-merge disabled.
