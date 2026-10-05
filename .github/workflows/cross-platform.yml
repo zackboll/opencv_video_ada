@@ -17,6 +17,7 @@ jobs:
       - name: Repository checks
         run: |
           python3 scripts/check_repository.py
+          python3 scripts/test_configuration.py
           for script in scripts/*.sh; do sh -n "$script"; done
           git diff --check
   linux:
