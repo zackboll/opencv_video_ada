@@ -72,4 +72,50 @@ package OpenCV.Video is
       Initial_Next_Points : Tracking_Point_Array) return Point_Track_Array;
 
    function Successful_Count (Tracks : Point_Track_Array) return Natural;
+
+   type Forward_Backward_Options is record
+      Tracking                 : PyrLK_Options := (others => <>);
+      --  Pixels; finite and nonnegative. Zero is legal; no silent clamping.
+      Maximum_Round_Trip_Error : OpenCV.Float32_Value := 1.0;
+   end record;
+
+   type Forward_Backward_Track is record
+      Forward                  : Point_Track;
+      Backward_Tracked         : Boolean := False;
+      Recovered_Previous_Point : OpenCV.Float32_Point := (X => 0.0, Y => 0.0);
+      Round_Trip_Error         : OpenCV.Float32_Value := 0.0;
+      Consistent               : Boolean := False;
+   end record;
+
+   type Forward_Backward_Track_Array is
+     array (Positive range <>) of Forward_Backward_Track;
+
+   --  Compose forward LK and seeded backward LK, only for forward successes.
+   --  Backward starts at Forward.Next_Point and predicts the original point.
+   --  Results preserve Points'Range and never implicitly filter entries.
+   --  If either direction fails: recovered = original, distance = zero,
+   --  Backward_Tracked = Consistent = False. Otherwise Round_Trip_Error is the
+   --  Euclidean pixel distance from original to recovered, computed in Float64
+   --  and checked before Float32 conversion. Consistent means both directions
+   --  succeeded and the returned distance <= Maximum_Round_Trip_Error.
+   --  Forward.Error remains native mean patch L1 photometric error, NOT this
+   --  geometric distance. Consistency is useful evidence, not proof of a correct
+   --  physical correspondence. Existing image/point/options contracts apply.
+   function Track_PyrLK_Forward_Backward
+     (Previous_Image : OpenCV.Core.Mat;
+      Next_Image     : OpenCV.Core.Mat;
+      Points         : Tracking_Point_Array;
+      Options        : Forward_Backward_Options := (others => <>))
+      return Forward_Backward_Track_Array;
+
+   --  Forward predictions follow the existing seeded count/iteration-position
+   --  contract, may have different bounds, and are never modified. Options
+   --  precedes required seeds to preserve positional aggregate compatibility.
+   function Track_PyrLK_Forward_Backward
+     (Previous_Image      : OpenCV.Core.Mat;
+      Next_Image          : OpenCV.Core.Mat;
+      Points              : Tracking_Point_Array;
+      Options             : Forward_Backward_Options := (others => <>);
+      Initial_Next_Points : Tracking_Point_Array)
+      return Forward_Backward_Track_Array;
 end OpenCV.Video;

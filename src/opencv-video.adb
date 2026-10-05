@@ -1,3 +1,4 @@
+with Ada.Numerics.Generic_Elementary_Functions;
 with Interfaces;
 with Interfaces.C;
 with OpenCV.Core.Float32_Access;
@@ -258,6 +259,112 @@ package body OpenCV.Video is
       return Track_Internal
         (Previous_Image, Next_Image, Points, Initial_Next_Points, True, Options);
    end Track_PyrLK;
+
+   procedure Validate (Options : Forward_Backward_Options) is
+   begin
+      if not Is_Finite (Options.Maximum_Round_Trip_Error)
+        or else Options.Maximum_Round_Trip_Error < 0.0
+      then
+         raise OpenCV.OpenCV_Error with "Round-trip threshold must be finite and nonnegative";
+      end if;
+   end Validate;
+
+   function Round_Trip_Distance
+     (Original, Recovered : OpenCV.Float32_Point) return OpenCV.Float32_Value
+   is
+      package Math is new Ada.Numerics.Generic_Elementary_Functions (OpenCV.Float64_Value);
+      DX : constant OpenCV.Float64_Value :=
+        OpenCV.Float64_Value (Recovered.X) - OpenCV.Float64_Value (Original.X);
+      DY : constant OpenCV.Float64_Value :=
+        OpenCV.Float64_Value (Recovered.Y) - OpenCV.Float64_Value (Original.Y);
+      Distance : constant OpenCV.Float64_Value := Math.Sqrt (DX * DX + DY * DY);
+   begin
+      --  Original coordinates are bounded by 2**29; successful native outputs
+      --  are finite Float32 (not necessarily within that input bound). Even the
+      --  full binary32 domain gives |delta| < 2**129, sum of squares < 2**259,
+      --  far below binary64's 2**1024 limit. For two bounded inputs it is <=2**61.
+      if not Is_Finite (Distance) or else Distance < 0.0
+        or else Distance > OpenCV.Float64_Value (OpenCV.Float32_Value'Last)
+      then
+         raise OpenCV.OpenCV_Error with "Round-trip distance is not representable as Float32";
+      end if;
+      return OpenCV.Float32_Value (Distance);
+   end Round_Trip_Distance;
+
+   function Complete_Backward
+     (Previous_Image, Next_Image : OpenCV.Core.Mat;
+      Points : Tracking_Point_Array;
+      Forward : Point_Track_Array;
+      Options : Forward_Backward_Options) return Forward_Backward_Track_Array
+   is
+      Count : constant Natural := Successful_Count (Forward);
+      Backward_Points, Original_Points : Tracking_Point_Array (1 .. Count);
+      Source_Indices : array (1 .. Count) of Positive;
+      Compact : Natural := 0;
+   begin
+      return Result : Forward_Backward_Track_Array (Points'Range) do
+         for I in Points'Range loop
+            Result (I).Forward := Forward (I);
+            Result (I).Recovered_Previous_Point := Points (I);
+            if Forward (I).Tracked then
+               --  Increment only once per success: Compact <= Count <= Length.
+               --  No successor of the original last index is ever computed.
+               Compact := Compact + 1;
+               Source_Indices (Compact) := I;
+               Backward_Points (Compact) := Forward (I).Next_Point;
+               Original_Points (Compact) := Points (I);
+            end if;
+         end loop;
+         if Count > 0 then
+            declare
+               Backward : constant Point_Track_Array := Track_PyrLK
+                 (Next_Image, Previous_Image, Backward_Points, Options.Tracking, Original_Points);
+            begin
+               for J in Backward'Range loop
+                  if Backward (J).Tracked then
+                     declare
+                        I : constant Positive := Source_Indices (J);
+                        Distance : constant OpenCV.Float32_Value := Round_Trip_Distance
+                          (Points (I), Backward (J).Next_Point);
+                     begin
+                        Result (I).Backward_Tracked := True;
+                        Result (I).Recovered_Previous_Point := Backward (J).Next_Point;
+                        Result (I).Round_Trip_Error := Distance;
+                        Result (I).Consistent := Distance <= Options.Maximum_Round_Trip_Error;
+                     end;
+                  end if;
+               end loop;
+            end;
+         end if;
+      end return;
+   end Complete_Backward;
+
+   function Track_PyrLK_Forward_Backward
+     (Previous_Image : OpenCV.Core.Mat;
+      Next_Image     : OpenCV.Core.Mat;
+      Points         : Tracking_Point_Array;
+      Options        : Forward_Backward_Options := (others => <>))
+      return Forward_Backward_Track_Array is
+   begin
+      Validate (Options);
+      return Complete_Backward
+        (Previous_Image, Next_Image, Points,
+         Track_PyrLK (Previous_Image, Next_Image, Points, Options.Tracking), Options);
+   end Track_PyrLK_Forward_Backward;
+
+   function Track_PyrLK_Forward_Backward
+     (Previous_Image      : OpenCV.Core.Mat;
+      Next_Image          : OpenCV.Core.Mat;
+      Points              : Tracking_Point_Array;
+      Options             : Forward_Backward_Options := (others => <>);
+      Initial_Next_Points : Tracking_Point_Array)
+      return Forward_Backward_Track_Array is
+   begin
+      Validate (Options);
+      return Complete_Backward
+        (Previous_Image, Next_Image, Points,
+         Track_PyrLK (Previous_Image, Next_Image, Points, Options.Tracking, Initial_Next_Points), Options);
+   end Track_PyrLK_Forward_Backward;
 
    function Successful_Count (Tracks : Point_Track_Array) return Natural is
       Count : Natural := 0;

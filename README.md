@@ -89,6 +89,59 @@ the distinguishing seeded fixture without another example executable.
 
 LK minimum-eigenvalue output mode, prebuilt pyramids and UMat remain excluded.
 
+### Forward/backward consistency diagnostics (Task 003)
+
+Ordinary PyrLK asks **“where did this point go?”** The composed forward/backward
+diagnostic asks **“if I track it there and then back again, do I return to where
+I started?”** This operation lives entirely in Ada; OpenCV does not provide a
+single forward/backward API here.
+
+```ada
+Diagnostics := OpenCV.Video.Track_PyrLK_Forward_Backward
+  (Previous_Image => Previous,
+   Next_Image     => Current,
+   Points         => Points,
+   Options        =>
+     (Tracking                 => (others => <>),
+      Maximum_Round_Trip_Error => 1.0));
+```
+
+The seeded-forward overload also accepts named `Initial_Next_Points`, with the
+same equal-count, iteration-position and differing-lower-bound rules as Task 002.
+Options precedes required seeds. Images, points and predictions remain unchanged.
+One diagnostic is returned for **every** input point, preserving `Points'Range`;
+no point is silently filtered out.
+
+Only forward successes enter the compact backward call. It tracks from the next
+image back into the previous image, starting at each forward location and
+**seeding the backward destination with the original previous point**, not the
+forward location. The compact results are mapped back to their original indices.
+
+Each `Forward_Backward_Track` contains:
+
+- `Forward`: the ordinary `Point_Track`, unchanged;
+- `Backward_Tracked`: whether backward LK succeeded;
+- `Recovered_Previous_Point`: the backward location, or the original if unavailable;
+- `Round_Trip_Error`: Euclidean original-to-recovered distance **in pixels**,
+  calculated in Float64 then checked/converted to finite nonnegative Float32;
+- `Consistent`: forward success **and** backward success **and** a valid returned
+  distance `<= Maximum_Round_Trip_Error`.
+
+**`Forward.Error` is native mean patch L1 photometric error; `Round_Trip_Error`
+is geometric displacement. They are separate quantities, not confidence scores.**
+If either pass fails, recovery is the original point, distance is zero, and both
+`Backward_Tracked` and `Consistent` are false. That zero never signifies success.
+
+The threshold must be finite and nonnegative; zero is legal, and no arbitrary
+maximum or silent clamping is imposed. The default one pixel is a convenience,
+**not estimator policy or a universal acceptance criterion**. Low round-trip
+error is useful evidence, **not proof of a correct physical correspondence**:
+ambiguous repeated patches can still agree in both directions.
+
+See [Task 003](docs/tasks/003-forward-backward-consistency.md) and its
+[qualification record](docs/task003-qualification.md) for arithmetic bounds,
+real inconsistent fixtures, mapping evidence and native version results.
+
 ## Build
 
 Requirements:
