@@ -40,3 +40,18 @@ fi
     -o "obj/sanitizers/video-boundary$suffix"
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 "obj/sanitizers/video-boundary$suffix"
+
+# Separate test build: fault injection never appears in the production library.
+"$compiler" "$@" -std=c++17 -Wall -Wextra -Wpedantic -Werror \
+    $flags -DOPENCV_VIDEO_TEST_FAULTS -Icpp "-I$core/cpp" $opencv_cflags \
+    cpp/opencv_video_shim.cpp tests/cpp/native_boundary.cpp \
+    "$core_shim" $(pkg-config --libs "$package") \
+    -o "obj/sanitizers/video-faults$suffix"
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 "obj/sanitizers/video-faults$suffix"
+
+"$compiler" "$@" -std=c++17 -Wall -Wextra -Wpedantic -Werror \
+    $flags $opencv_cflags tests/cpp/direct_oracle.cpp \
+    $(pkg-config --libs "$package") -o "obj/sanitizers/video-oracle$suffix"
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 "obj/sanitizers/video-oracle$suffix"

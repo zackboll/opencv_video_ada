@@ -3,11 +3,27 @@
 #include "opencv_core_module_bridge.hpp"
 
 #include <opencv2/core.hpp>
+#include <opencv2/video/tracking.hpp>
+#include "synthetic_fixture.hpp"
+#include <cstring>
 #include <cmath>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <stdexcept>
+
+static_assert(sizeof(opencv_video_status) == 4, "status ABI width");
+static_assert(sizeof(float) == 4 && sizeof(double) == 8, "floating ABI widths");
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+int fault_stage = 0;
+int fault_kind = 0;
+void opencv_video_test_fault(int stage) {
+    if (stage != fault_stage) return;
+    if (fault_kind == 1) throw std::bad_alloc();
+    if (fault_kind == 2) CV_Error(cv::Error::StsError, "qualification native exception");
+    throw 42;
+}
+#endif
 
 namespace {
 void check(bool condition, const char *message) {
@@ -78,6 +94,15 @@ void run() {
               "synthetic translation differs");
     }
 
+    // Compare actual shim output to a direct native call on identical storage.
+    cv::Mat oracle_next, oracle_status, oracle_error;
+    cv::calcOpticalFlowPyrLK(output(previous.get()), output(next.get()), output(points.get()),
+                            oracle_next, oracle_status, oracle_error);
+    check(cv::norm(oracle_next, output(next_points.get()), cv::NORM_INF) < 1e-5 &&
+          cv::norm(oracle_status, output(status.get()), cv::NORM_INF) == 0 &&
+          cv::norm(oracle_error, output(error.get()), cv::NORM_INF) < 1e-5,
+          "shim differs from independent native call");
+
     const cv::Mat before_next = output(next_points.get()).clone();
     const cv::Mat before_status = output(status.get()).clone();
     const cv::Mat before_error = output(error.get()).clone();
@@ -117,6 +142,82 @@ void run() {
     check(opencv_video_track_pyr_lk(previous.get(),next.get(),wrong_points.get(),next_points.get(),status.get(),error.get(),
           21,21,3,30,0.01,1e-4) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
           "wrong point depth accepted");
+
+    auto call = [&](const opencv_core_mat_handle *a, const opencv_core_mat_handle *b,
+                    const opencv_core_mat_handle *p, opencv_core_mat_handle *q,
+                    opencv_core_mat_handle *s, opencv_core_mat_handle *e,
+                    int w=21, int h=21, int level=3, int count=30,
+                    double eps=0.01, double eig=1e-4) {
+        return opencv_video_track_pyr_lk(a,b,p,q,s,e,w,h,level,count,eps,eig);
+    };
+    auto invalid = [&](opencv_video_status code) {
+        check(code == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "invalid boundary argument accepted");
+        check(std::strlen(opencv_video_last_error()) != 0, "missing failure diagnostic");
+        check(cv::norm(before_next, output(next_points.get()), cv::NORM_INF) == 0 &&
+              cv::norm(before_status, output(status.get()), cv::NORM_INF) == 0 &&
+              cv::norm(before_error, output(error.get()), cv::NORM_INF) == 0,
+              "failure not atomic");
+    };
+    for (int slot=0; slot<6; ++slot)
+        invalid(call(slot==0?nullptr:previous.get(),slot==1?nullptr:next.get(),
+                     slot==2?nullptr:points.get(),slot==3?nullptr:next_points.get(),
+                     slot==4?nullptr:status.get(),slot==5?nullptr:error.get()));
+    invalid(call(previous.get(),next.get(),points.get(),next_points.get(),next_points.get(),error.get()));
+    invalid(call(previous.get(),next.get(),points.get(),previous.get(),status.get(),error.get()));
+    auto wrong_channels = matrix(64,64,OPENCV_CORE_DEPTH_UINT8,3);
+    auto wrong_geometry = matrix(63,64,OPENCV_CORE_DEPTH_UINT8,1);
+    invalid(call(previous.get(),wrong_channels.get(),points.get(),next_points.get(),status.get(),error.get()));
+    invalid(call(previous.get(),wrong_geometry.get(),points.get(),next_points.get(),status.get(),error.get()));
+    for (int bad : {-1,0,1,2,256,std::numeric_limits<int>::max()}) {
+        invalid(call(previous.get(),next.get(),points.get(),next_points.get(),status.get(),error.get(),bad));
+        invalid(call(previous.get(),next.get(),points.get(),next_points.get(),status.get(),error.get(),21,bad));
+    }
+    for (int bad : {-1,31,std::numeric_limits<int>::max()})
+        invalid(call(previous.get(),next.get(),points.get(),next_points.get(),status.get(),error.get(),21,21,bad));
+    for (int bad : {-1,0,101,std::numeric_limits<int>::max()})
+        invalid(call(previous.get(),next.get(),points.get(),next_points.get(),status.get(),error.get(),21,21,3,bad));
+    invalid(call(previous.get(),next.get(),points.get(),next_points.get(),status.get(),error.get(),21,21,3,30,11.0));
+    invalid(call(previous.get(),next.get(),points.get(),next_points.get(),status.get(),error.get(),21,21,3,30,0.01,
+                 std::numeric_limits<double>::max()));
+    for (float bad : {std::numeric_limits<float>::infinity(),std::numeric_limits<float>::quiet_NaN(),
+                      std::numeric_limits<float>::max()}) {
+        output(points.get()).at<cv::Vec2f>(0,0)[0]=bad;
+        invalid(call(previous.get(),next.get(),points.get(),next_points.get(),status.get(),error.get()));
+    }
+    output(points.get()).at<cv::Vec2f>(0,0)=fixtures[0];
+    auto empty_image = matrix(0,0,OPENCV_CORE_DEPTH_UINT8,1);
+    invalid(call(empty_image.get(),next.get(),points.get(),next_points.get(),status.get(),error.get()));
+    auto bad_shape = matrix(2,2,OPENCV_CORE_DEPTH_FLOAT32,2);
+    invalid(call(previous.get(),next.get(),bad_shape.get(),next_points.get(),status.get(),error.get()));
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    for (int stage : {1,2}) for (int kind : {1,2,3}) {
+        fault_stage=stage; fault_kind=kind;
+        const auto code=call(previous.get(),next.get(),points.get(),next_points.get(),status.get(),error.get());
+        check(code == (kind==1?OPENCV_VIDEO_ERROR_STANDARD:
+                       kind==2?OPENCV_VIDEO_ERROR_OPENCV:OPENCV_VIDEO_ERROR_UNKNOWN),
+              "exception escaped or wrong status");
+        check(cv::norm(before_next,output(next_points.get()),cv::NORM_INF)==0 &&
+              cv::norm(before_status,output(status.get()),cv::NORM_INF)==0 &&
+              cv::norm(before_error,output(error.get()),cv::NORM_INF)==0, "fault published partial output");
+    }
+    fault_stage=0;
+    std::cout << "PASS: 6 injected allocation/native/unknown failures contained\n";
+#endif
+    output(points.get()).at<cv::Vec2f>(1,0)=cv::Vec2f(-100,-100);
+    output(points.get()).at<cv::Vec2f>(3,0)=cv::Vec2f(200,200);
+    check(call(previous.get(),next.get(),points.get(),next_points.get(),status.get(),error.get())==OPENCV_VIDEO_OK,
+          "mixed outside points rejected");
+    for (int i : {1,3}) {
+        check(output(status.get()).at<unsigned char>(i,0)==0 &&
+              output(next_points.get()).at<cv::Vec2f>(i,0)==output(points.get()).at<cv::Vec2f>(i,0) &&
+              output(error.get()).at<float>(i,0)==0, "failed native output not normalized");
+    }
+    auto empty_points=matrix(0,1,OPENCV_CORE_DEPTH_FLOAT32,2);
+    check(call(previous.get(),next.get(),empty_points.get(),next_points.get(),status.get(),error.get())==OPENCV_VIDEO_OK &&
+          output(next_points.get()).empty() && output(status.get()).empty() && output(error.get()).empty(),
+          "empty points did not clear all outputs");
+    check(std::strlen(opencv_video_last_error())==0,"stale success diagnostic");
 
     std::cout << "PASS: Video PyrLK raw boundary on "
               << opencv_video_native_version() << " / " << opencv_video_native_backend() << '\n';

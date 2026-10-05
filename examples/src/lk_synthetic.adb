@@ -6,6 +6,7 @@ with OpenCV.Video;
 procedure LK_Synthetic is
    use Ada.Text_IO;
    use OpenCV.Video;
+   use type OpenCV.Float32_Value;
 
    function Texture (Rows, Columns : Positive) return OpenCV.Core.Mat is
    begin
@@ -57,6 +58,12 @@ begin
    Put_Line ("successful tracks:" & Natural'Image (Successful_Count (Tracks)) &
              "/" & Natural'Image (Tracks'Length));
    for I in Tracks'Range loop
+      if not Tracks (I).Tracked
+        or else abs (Tracks (I).Next_Point.X - Points (I).X - 3.0) > 0.20
+        or else abs (Tracks (I).Next_Point.Y - Points (I).Y - 2.0) > 0.20
+      then
+         raise Program_Error with "synthetic translation oracle differs";
+      end if;
       Put_Line
         (Positive'Image (I) & ": tracked=" & Boolean'Image (Tracks (I).Tracked) &
          " from=(" & OpenCV.Float32_Value'Image (Tracks (I).Previous_Point.X) &

@@ -54,22 +54,31 @@ package body OpenCV.Video is
    procedure Validate (Points : Tracking_Point_Array) is
    begin
       for Point of Points loop
-         if not Is_Finite (Point.X) or else not Is_Finite (Point.Y) then
-            raise OpenCV.OpenCV_Error with "PyrLK points must be finite";
+         if not Is_Finite (Point.X) or else not Is_Finite (Point.Y)
+            or else abs Point.X > 536_870_912.0 or else abs Point.Y > 536_870_912.0
+         then
+            raise OpenCV.OpenCV_Error with "PyrLK points exceed safe native conversion bounds";
          end if;
       end loop;
    end Validate;
 
    procedure Validate (Options : PyrLK_Options) is
    begin
-      if Options.Window_Size.Width = 0 or else Options.Window_Size.Height = 0 then
-         raise OpenCV.OpenCV_Error with "PyrLK window dimensions must be positive";
+      if Options.Window_Size.Width not in 3 .. 255
+        or else Options.Window_Size.Height not in 3 .. 255
+        or else Options.Max_Level > 30 or else Options.Maximum_Iterations > 100
+      then
+         raise OpenCV.OpenCV_Error with "PyrLK window, level or iteration count out of range";
       end if;
-      if not Is_Finite (Options.Epsilon) or else Options.Epsilon <= 0.0 then
+      if not Is_Finite (Options.Epsilon) or else Options.Epsilon <= 0.0
+        or else Options.Epsilon > 10.0
+      then
          raise OpenCV.OpenCV_Error with "PyrLK epsilon must be finite and positive";
       end if;
       if not Is_Finite (Options.Min_Eigenvalue_Threshold)
         or else Options.Min_Eigenvalue_Threshold < 0.0
+        or else Options.Min_Eigenvalue_Threshold >
+          OpenCV.Float64_Value (OpenCV.Float32_Value'Last)
       then
          raise OpenCV.OpenCV_Error with
            "PyrLK minimum eigenvalue threshold must be finite and nonnegative";
@@ -182,8 +191,10 @@ package body OpenCV.Video is
                      Native_Point : constant Vec2.Vector := Vec2_Access.Get (Next_Points, Row, 0);
                      Native_Error : constant OpenCV.Float32_Value := Float_Access.Get (Errors, Row, 0);
                   begin
-                     if not Is_Finite (Native_Point (0)) or else not Is_Finite (Native_Point (1)) then
-                        raise OpenCV.OpenCV_Error with "PyrLK produced a nonfinite tracked coordinate";
+                     if not Is_Finite (Native_Point (0)) or else not Is_Finite (Native_Point (1))
+                       or else not Is_Finite (Native_Error) or else Native_Error < 0.0
+                     then
+                        raise OpenCV.OpenCV_Error with "PyrLK produced an invalid successful result";
                      end if;
                      Result (I).Next_Point := (X => Native_Point (0), Y => Native_Point (1));
                      Result (I).Error := Native_Error;
