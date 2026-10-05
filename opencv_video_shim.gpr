@@ -1,0 +1,67 @@
+with "opencv_core.gpr";
+with "config/opencv_video_config.gpr";
+with "config/opencv_video_install.gpr";
+
+project OpenCV_Video_Shim is
+   for Library_Name use "opencv_video_shim";
+   for Languages use ("C++");
+   for Source_Dirs use ("cpp");
+   for Object_Dir use "obj/shim/" & OpenCV_Video_Config.Build_Profile;
+   for Library_Dir use "lib";
+   for Create_Missing_Dirs use "True";
+
+   case OpenCV_Video_Install.Shim_Build is
+      when "Static_PIC" => for Library_Kind use "static-pic";
+      when "Relocatable" => for Library_Kind use "relocatable";
+      when "External_Relocatable" =>
+         for Externally_Built use "True";
+         for Languages use ();
+         for Source_Dirs use ();
+         for Library_Kind use "relocatable";
+   end case;
+
+   Common_Cxx_Switches :=
+     ("-std=c++17", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
+      "-DOPENCV_VIDEO_BUILDING",
+      OpenCV_Video_Install.Include_Switch,
+      OpenCV_Video_Install.Core_Bridge_Include_Switch);
+
+   package Compiler is
+      for Driver ("C++") use OpenCV_Video_Install.Cxx_Driver;
+      case OpenCV_Video_Install.Cxx_Toolchain is
+         when "GNU" =>
+            for Default_Switches ("C++") use Common_Cxx_Switches;
+         when "Apple_Clang" =>
+            for Default_Switches ("C++") use
+              Common_Cxx_Switches & ("-Wno-error=c11-extensions");
+            for Leading_Required_Switches ("C++") use
+              ("-c", "-x", "c++", "-isysroot", OpenCV_Video_Install.Cxx_Sysroot);
+            for Include_Switches ("C++") use ("-I");
+            for Dependency_Switches ("C++") use ("-MMD", "-MF", "");
+      end case;
+   end Compiler;
+
+   case OpenCV_Video_Install.Shim_Build is
+      when "Relocatable" =>
+         for Library_Options use
+           ("-isysroot", OpenCV_Video_Install.Cxx_Sysroot,
+            OpenCV_Video_Install.Library_Search_Switch,
+            OpenCV_Video_Install.OpenCV_Video_Link_Option,
+            OpenCV_Video_Install.OpenCV_Core_Link_Option);
+      when others => null;
+   end case;
+
+   package Linker is
+      case OpenCV_Video_Install.Shim_Build is
+         when "Static_PIC" =>
+            for Linker_Options use
+              (OpenCV_Video_Install.Library_Search_Switch,
+               OpenCV_Video_Install.OpenCV_Video_Link_Option,
+               OpenCV_Video_Install.OpenCV_Core_Link_Option,
+               OpenCV_Video_Install.Cxx_Runtime_Switch);
+         when "Relocatable" =>
+            for Driver use OpenCV_Video_Install.Cxx_Driver;
+         when "External_Relocatable" => null;
+      end case;
+   end Linker;
+end OpenCV_Video_Shim;

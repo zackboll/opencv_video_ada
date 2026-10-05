@@ -1,0 +1,22 @@
+name = "opencv_video_tests"
+description = "Tests for the OpenCV Video Ada binding"
+version = "0.1.0-dev"
+authors = ["Zack Boll"]
+maintainers = ["Zack Boll <zackboll@gmail.com>"]
+maintainers-logins = ["zackboll"]
+licenses = "Apache-2.0"
+project-files = ["opencv_video_tests.gpr"]
+executables = ["run_tests"]
+
+[[depends-on]]
+opencv_video = "*"
+aunit = "^26.0.0"
+
+[[pins]]
+opencv_video = { path = ".." }
+[[pins]]
+opencv_core = { url = "https://github.com/zackboll/opencv_core_ada.git", commit = "4da9d35ea21e1b2efe96296243ea668b488c6326" }
+
+[build-switches."*"]
+ada_version = "Ada2022"
+style_checks = "No"

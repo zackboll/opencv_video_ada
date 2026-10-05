@@ -1,0 +1,5 @@
+OpenCV Video Ada
+Copyright 2026 Zack Boll
+
+This project is an independent handwritten Ada binding to portions of OpenCV.
+OpenCV is distributed under its own license by the OpenCV project.

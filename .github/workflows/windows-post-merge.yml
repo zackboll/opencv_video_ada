@@ -1,0 +1,50 @@
+name: Windows post-merge Video
+on:
+  push:
+    branches:
+      - main
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: alire-project/setup-alire@latest
+        with:
+          version: "2.1.1"
+          toolchain: "gnat_native gprbuild"
+          msys2: true
+      - name: Select Ada toolchain
+        run: alr -n --force toolchain --select gnat_native=16.1.0 gprbuild=26.0.1
+      - name: Install MSYS2 native dependencies
+        run: |
+          alr exec -- pacman -Sy --noconfirm --needed \
+            mingw-w64-x86_64-opencv mingw-w64-x86_64-pkg-config mingw-w64-x86_64-gcc
+      - name: Build and run with isolated runtime
+        run: sh scripts/test.sh
+      - name: Inspect external Video DLL
+        run: |
+          set -eu
+          test -f lib/libopencv_video_shim.dll
+          test -f lib/libopencv_video_shim.dll.a
+          test ! -f lib/libopencv_video_shim.a
+          driver=$(sed -n 's/^[ ]*Cxx_Driver := "\(.*\)";/\1/p' config/opencv_video_install.gpr)
+          case "$driver" in
+            *gnat_native*) exit 1 ;;
+            *mingw64*/bin/g++*) ;;
+            *) echo "error: expected MSYS2 MinGW64 g++, got $driver" >&2; exit 1 ;;
+          esac
+          for setting in OpenCV_Video_Link_Option OpenCV_Core_Link_Option Core_Shim_Link_Option; do
+            import_library=$(sed -n "s/^[ ]*$setting := \"\(.*\)\";/\1/p" config/opencv_video_install.gpr)
+            test -f "$import_library"
+          done
+          "$(dirname "$driver")/objdump.exe" -p lib/libopencv_video_shim.dll > video-pe.log
+          grep -Ei 'DLL Name.*opencv_video' video-pe.log
+          grep -i 'DLL Name.*opencv_core_shim' video-pe.log

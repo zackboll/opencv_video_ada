@@ -1,0 +1,17 @@
+/alire/
+/config/
+/obj/
+/lib/
+/bin/
+/tests/alire/
+/tests/config/
+/tests/obj/
+/tests/bin/
+/examples/alire/
+/examples/config/
+/examples/obj/
+/examples/bin/
+*.log
+*.tmp
+__pycache__/
+.DS_Store

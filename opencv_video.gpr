@@ -1,0 +1,51 @@
+with "opencv_core.gpr";
+with "config/opencv_video_config.gpr";
+with "config/opencv_video_install.gpr";
+with "opencv_video_shim.gpr";
+
+project OpenCV_Video is
+   for Library_Name use "opencv_video_ada";
+   for Languages use ("Ada");
+   for Source_Dirs use ("src", "src/internal", "config");
+   for Object_Dir use "obj/" & OpenCV_Video_Config.Build_Profile;
+   for Library_Dir use "lib";
+   for Create_Missing_Dirs use "True";
+
+   type Library_Type_Type is ("relocatable", "static", "static-pic");
+   Library_Type : Library_Type_Type :=
+     external ("OPENCV_VIDEO_LIBRARY_TYPE", external ("LIBRARY_TYPE", "static-pic"));
+   for Library_Kind use Library_Type;
+
+   case Library_Type is
+      when "relocatable" =>
+         case OpenCV_Video_Install.Shim_Build is
+            when "External_Relocatable" =>
+               for Library_Options use
+                 ("-L" & Project'Project_Dir & "lib", "-lopencv_video_shim");
+            when others => null;
+         end case;
+      when others => null;
+   end case;
+
+   package Compiler is
+      for Default_Switches ("Ada") use
+        OpenCV_Video_Config.Ada_Compiler_Switches & ("-gnatwa", "-gnatwe", "-Werror");
+   end Compiler;
+
+   package Binder is
+      for Switches ("Ada") use ("-Es");
+   end Binder;
+
+   package Linker is
+      case OpenCV_Video_Install.Shim_Build is
+         when "External_Relocatable" =>
+            for Linker_Options use
+              ("-L" & Project'Project_Dir & "lib", "-lopencv_video_shim");
+         when others => null;
+      end case;
+   end Linker;
+
+   package Install is
+      for Artifacts (".") use ("share");
+   end Install;
+end OpenCV_Video;

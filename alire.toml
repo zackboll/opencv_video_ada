@@ -1,0 +1,38 @@
+name = "opencv_video"
+description = "Handwritten thick Ada binding to OpenCV video tracking primitives"
+version = "0.1.0-dev"
+authors = ["Zack Boll"]
+maintainers = ["Zack Boll <zackboll@gmail.com>"]
+maintainers-logins = ["zackboll"]
+licenses = "Apache-2.0"
+website = "https://github.com/zackboll/opencv_video_ada"
+tags = ["opencv", "computer-vision", "binding", "ada", "video", "optical-flow"]
+project-files = ["opencv_video.gpr"]
+
+[[depends-on]]
+opencv_core = "~0.4.0"
+opencv = "*"
+pkg_config = "*"
+
+# Bootstrap source pin, not a vendored copy. Review/remove for publication.
+# The same pin is repeated in tests/examples because each is an Alire root.
+[[pins]]
+opencv_core = { url = "https://github.com/zackboll/opencv_core_ada.git", commit = "4da9d35ea21e1b2efe96296243ea668b488c6326" }
+
+[depends-on.'case(os)'.windows]
+mingw_w64_gcc = "*"
+
+[environment.'case(distribution)']
+msys2 = { PATH.prepend = "${CRATE_ROOT}/lib" }
+
+[build-switches."*"]
+ada_version = "Ada2022"
+style_checks = "No"
+
+[[actions]]
+type = "pre-build"
+command = ["sh", "scripts/configure_opencv.sh"]
+
+[[actions]]
+type = "test"
+command = ["sh", "scripts/test.sh"]

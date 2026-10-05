@@ -1,0 +1,60 @@
+name: Pinned OpenCV compatibility
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-version:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        opencv: ["4.1.0", "4.10.0", "5.0.0"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: video-ada
+      - uses: actions/checkout@v4
+        with:
+          repository: opencv/opencv
+          ref: ${{ matrix.opencv }}
+          path: opencv-source
+      - name: Install build tools and external-package metadata
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ pkg-config libopencv-dev
+      - name: Build selected native modules
+        shell: bash
+        run: |
+          set -eu
+          prefix="$RUNNER_TEMP/opencv-install"
+          cmake -S opencv-source -B opencv-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=17 \
+            -DCMAKE_INSTALL_PREFIX="$prefix" \
+            -DBUILD_LIST=core,imgproc,video \
+            -DBUILD_SHARED_LIBS=ON -DOPENCV_GENERATE_PKGCONFIG=ON \
+            -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF \
+            -DBUILD_opencv_apps=OFF -DBUILD_JAVA=OFF \
+            -DBUILD_opencv_python2=OFF -DBUILD_opencv_python3=OFF \
+            -DWITH_OPENCL=OFF -DWITH_IPP=OFF -DWITH_TBB=OFF -DWITH_ADE=OFF \
+            -DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DWITH_GTK=OFF
+          cmake --build opencv-build --parallel 2
+          cmake --install opencv-build
+          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - uses: alire-project/setup-alire@latest
+        with:
+          version: "2.1.1"
+          toolchain: "gnat_native gprbuild"
+      - name: Select Ada toolchain
+        working-directory: video-ada
+        run: alr -n --force toolchain --select gnat_native=16.1.0 gprbuild=26.0.1
+      - name: Build and test against selected native version
+        working-directory: video-ada
+        run: |
+          sh scripts/test.sh
+          grep -F 'Native_Version := "${{ matrix.opencv }}";' config/opencv_video_install.gpr
+          grep -F 'Native_Backend := "video";' config/opencv_video_install.gpr
+          alr -n exec -- sh scripts/run_sanitizers.sh
+          alr -n -C examples build
+          alr -n -C examples exec -- sh ../scripts/run_native.sh bin/lk_synthetic
