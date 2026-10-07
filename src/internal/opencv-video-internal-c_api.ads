@@ -45,5 +45,36 @@ package OpenCV.Video.Internal.C_API is
       Min_Eigenvalue_Threshold : Interfaces.C.double) return Status
      with Import, Convention => C, External_Name => "opencv_video_track_pyr_lk_seeded";
 
+   function Track_PyrLK_Quality
+     (Previous_Image         : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Next_Image             : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Previous_Points        : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Next_Points            : OpenCV.Core.Module_Interop.Output_Mat_Handle;
+      Track_Status           : OpenCV.Core.Module_Interop.Output_Mat_Handle;
+      Track_Error            : OpenCV.Core.Module_Interop.Output_Mat_Handle;
+      Window_Width           : Interfaces.Integer_32;
+      Window_Height          : Interfaces.Integer_32;
+      Max_Level              : Interfaces.Integer_32;
+      Maximum_Iterations     : Interfaces.Integer_32;
+      Epsilon                : Interfaces.C.double;
+      Min_Eigenvalue_Threshold : Interfaces.C.double) return Status
+     with Import, Convention => C, External_Name => "opencv_video_track_pyr_lk_min_eigenvalues";
+
+   function Track_PyrLK_Seeded_Quality
+     (Previous_Image         : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Next_Image             : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Previous_Points        : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Initial_Next_Points    : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Next_Points            : OpenCV.Core.Module_Interop.Output_Mat_Handle;
+      Track_Status           : OpenCV.Core.Module_Interop.Output_Mat_Handle;
+      Track_Error            : OpenCV.Core.Module_Interop.Output_Mat_Handle;
+      Window_Width           : Interfaces.Integer_32;
+      Window_Height          : Interfaces.Integer_32;
+      Max_Level              : Interfaces.Integer_32;
+      Maximum_Iterations     : Interfaces.Integer_32;
+      Epsilon                : Interfaces.C.double;
+      Min_Eigenvalue_Threshold : Interfaces.C.double) return Status
+     with Import, Convention => C, External_Name => "opencv_video_track_pyr_lk_seeded_min_eigenvalues";
+
    procedure Check (Code : Status; Operation : String);
 end OpenCV.Video.Internal.C_API;

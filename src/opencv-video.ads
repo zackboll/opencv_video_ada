@@ -73,6 +73,44 @@ package OpenCV.Video is
 
    function Successful_Count (Tracks : Point_Track_Array) return Natural;
 
+   type Trackability_Track is record
+      Previous_Point     : OpenCV.Float32_Point := (X => 0.0, Y => 0.0);
+      Next_Point         : OpenCV.Float32_Point := (X => 0.0, Y => 0.0);
+      Tracked            : Boolean := False;
+      Minimum_Eigenvalue : OpenCV.Float32_Value := 0.0;
+   end record;
+
+   type Trackability_Track_Array is
+     array (Positive range <>) of Trackability_Track;
+
+   --  Local LK conditioning of the previous-image patch, normalized by window
+   --  pixel count. This is NOT photometric Error, probability, match confidence,
+   --  or a guarantee of correct correspondence. No universal threshold exists.
+   --  Minimum_Eigenvalue is finite and nonnegative independently of Tracked:
+   --  threshold rejection or unavailable next search can retain useful quality.
+   --  An unavailable previous patch returns zero when native defines it; a
+   --  backend leaving quality unwritten raises OpenCV_Error. Failed Next_Point is
+   --  Previous_Point. Invalid/unwritten native quality raises OpenCV_Error;
+   --  values are never clamped. Existing image/coordinate/options validation,
+   --  input immutability, Region support and Points'Range preservation apply.
+   function Track_PyrLK_Trackability
+     (Previous_Image : OpenCV.Core.Mat;
+      Next_Image     : OpenCV.Core.Mat;
+      Points         : Tracking_Point_Array;
+      Options        : PyrLK_Options := (others => <>))
+      return Trackability_Track_Array;
+
+   --  Same quality semantics with private cloned initial predictions. Equal
+   --  lengths, iteration-position correspondence, differing bounds allowed.
+   --  Options precedes required seeds for positional aggregate compatibility.
+   function Track_PyrLK_Trackability
+     (Previous_Image      : OpenCV.Core.Mat;
+      Next_Image          : OpenCV.Core.Mat;
+      Points              : Tracking_Point_Array;
+      Options             : PyrLK_Options := (others => <>);
+      Initial_Next_Points : Tracking_Point_Array)
+      return Trackability_Track_Array;
+
    type Forward_Backward_Options is record
       Tracking                 : PyrLK_Options := (others => <>);
       --  Pixels; finite and nonnegative. Zero is legal; no silent clamping.

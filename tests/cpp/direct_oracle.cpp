@@ -6,6 +6,74 @@
 #include <fstream>
 #include <iomanip>
 #include <stdexcept>
+#include <limits>
+
+static void trackability(std::ostream &output) {
+    float structures[3] = {};
+    std::vector<float> identity;
+    for (int mode = 0; mode < 9; ++mode) {
+        auto f = quality_fixture(mode);
+        cv::Mat points(int(f.points.size()),1,CV_32FC2,
+                       f.points.data());
+        cv::Mat dest(int(f.seeds.size()),1,CV_32FC2,
+                     f.seeds.data());
+        dest = dest.clone();
+        cv::Mat status;
+        cv::Mat values(int(f.points.size()),1,CV_32F,
+                       cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
+        const auto *storage = values.data;
+        cv::calcOpticalFlowPyrLK(f.previous,f.next,points,dest,status,values,{21,21},0,{3,30,.01},
+            cv::OPTFLOW_LK_GET_MIN_EIGENVALS | (f.seeded ? cv::OPTFLOW_USE_INITIAL_FLOW : 0),f.threshold);
+        if (storage != values.data) throw std::runtime_error("native quality storage not reused");
+        for (int i = 0; i < int(f.points.size()); ++i) {
+            const float e = values.at<float>(i);
+            const bool tracked = status.at<unsigned char>(i) != 0;
+            if (!std::isfinite(e) || e < 0) {
+                std::cerr << "native quality violation: version=" << CV_VERSION << " mode=" << mode
+                          << " point=" << i << " status=" << int(tracked) << " eigenvalue=" << e
+                          << " previous=" << f.points[i] << " seed=" << f.seeds[i] << '\n';
+                // KleidiCV 26.03 intentionally skips err for unavailable prev.
+                // Record absence explicitly; Ada/shim MUST reject the whole call.
+                if (mode == 3 && i == 1 && !tracked && std::isnan(e)) {
+                    output << mode << ' ' << i << " -1 " << f.points[i].x << ' '
+                           << f.points[i].y << " 0\n";
+                    continue;
+                }
+                throw std::runtime_error("undefined native eigenvalue");
+            }
+            if (mode == 0) identity.push_back(e);
+            if (mode >= 5 && mode <= 7) structures[mode-5] = e;
+            if ((mode == 0 || mode == 1 || mode == 5) && (!tracked || e <= .1f))
+                throw std::runtime_error("strong quality fixture failed");
+            if (mode == 1 && cv::norm(dest.at<cv::Point2f>(i)-f.points[i]-cv::Point2f(12,7)) >= .05)
+                throw std::runtime_error("quality seed not consumed");
+            if (mode == 2 && (tracked || std::abs(e-identity[i]) > 1e-5))
+                throw std::runtime_error("threshold discarded quality");
+            if (mode == 3 && i == 1 && (tracked || e != 0))
+                throw std::runtime_error("previous patch quality not zero");
+            if (mode == 4 && i == 1 && (tracked || std::abs(e-identity[i]) > 1e-5))
+                throw std::runtime_error("next search discarded quality");
+            if (mode == 8 && std::abs(e-identity[i]) > 1e-5)
+                throw std::runtime_error("seed changed previous-patch quality");
+            const auto p = tracked ? dest.at<cv::Point2f>(i) : f.points[i];
+            output << mode << ' ' << i << ' ' << int(tracked) << ' ' << p.x << ' ' << p.y << ' ' << e << '\n';
+        }
+    }
+    if (structures[0] <= .5f || structures[1] != 0 || structures[2] != 0)
+        throw std::runtime_error("corner/edge/flat relationship failed");
+    const auto image = quality_structure(0);
+    for (double multiplier : {.5,2.0}) {
+        std::vector<cv::Point2f> points{{48,48}}, dest;
+        std::vector<unsigned char> status;
+        std::vector<float> values;
+        cv::calcOpticalFlowPyrLK(image,image,points,dest,status,values,{21,21},0,{3,30,.01},
+                                cv::OPTFLOW_LK_GET_MIN_EIGENVALS,structures[0]*multiplier);
+        if (bool(status[0]) != (multiplier < 1) || std::abs(values[0]-structures[0]) > 1e-5)
+            throw std::runtime_error("factor-two eigenvalue threshold failed");
+    }
+    std::cout << "quality corner=" << structures[0] << " edge=" << structures[1]
+              << " flat=" << structures[2] << '\n';
+}
 
 // Diagnostic oracle: direct OpenCV only, including compact-success mapping.
 static void forward_backward(std::ostream &output, int mode) {
@@ -98,15 +166,23 @@ int main(int argc, char **argv) {
                       << " error=" << error[i] << '\n';
         }
         std::ofstream file;
-        if (argc == 2) {
+        if (argc >= 2) {
             file.open(argv[1]);
             if (!file) throw std::runtime_error("cannot create oracle results");
         }
-        auto &output = argc == 2 ? static_cast<std::ostream &>(file) : std::cout;
+        auto &output = argc >= 2 ? static_cast<std::ostream &>(file) : std::cout;
         output << std::setprecision(17);
         for (int mode = 0; mode < 4; ++mode) forward_backward(output, mode);
+        std::ofstream quality_file;
+        if (argc == 3) {
+            quality_file.open(argv[2]);
+            if (!quality_file) throw std::runtime_error("cannot create quality oracle results");
+        }
+        auto &quality_output = argc == 3 ? static_cast<std::ostream &>(quality_file) : std::cout;
+        quality_output << std::setprecision(17);
+        trackability(quality_output);
         std::cout << "PASS: independent OpenCV " << CV_VERSION
-                  << " oracle (8 unseeded + 4 seeded + 20 forward/backward entries)\n";
+                  << " oracle (8 unseeded + 4 seeded + 20 forward/backward + 27 quality entries)\n";
         return 0;
     } catch (const std::exception &e) {
         std::cerr << "FAIL: " << e.what() << '\n';

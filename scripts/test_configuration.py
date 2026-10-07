@@ -90,6 +90,61 @@ esac
         self.env.update(TEST_PACKAGE="opencv5", TEST_VERSION="5.0.0")
         self.configure(True)
 
+class OracleConfigurationTests(unittest.TestCase):
+    """Regression for Task 003's MSYS2 oracle metadata lookup failure."""
+
+    def test_actual_oracle_metadata_selection(self):
+        for override in (False, True):
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                for directory in ("scripts", "config", "bin"):
+                    (root / directory).mkdir()
+                for name in ("run_forward_backward_oracle.sh", "run_native.sh"):
+                    shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+                binary = root / "bin"
+
+                def executable(name, body):
+                    path = binary / name
+                    path.write_text("#!/bin/sh\n" + body)
+                    path.chmod(0o755)
+                    return path
+
+                executable("uname", "echo MSYS_NT-10.0\n")
+                executable("cygpath", 'echo "$2"\n')
+                executable("pkg-config", "exit 1\n")
+                metadata = executable("x86_64-w64-mingw32-pkg-config", """
+case "$1" in
+--exists) test "$2" = opencv5 ;;
+--cflags) echo -I/mock/opencv ;;
+--libs) echo -lopencv_video ;;
+*) exit 1 ;;
+esac
+""")
+                if override:
+                    metadata = executable("chosen-pkg-config", metadata.read_text())
+                compiler = executable("g++", """
+while [ "$#" -gt 0 ]; do
+ if [ "$1" = -o ]; then
+  shift
+  printf '#!/bin/sh\\nexit 0\\n' > "$1"
+  chmod +x "$1"
+  exit 0
+ fi
+ shift
+done
+exit 1
+""")
+                (root / "config/opencv_video_install.gpr").write_text(
+                    f'   Cxx_Driver := "{compiler}";\n')
+                env = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}",
+                           OPENCV_CORE_ALIRE_PREFIX=str(root / "core"))
+                env.pop("PKG_CONFIG", None)
+                if override:
+                    env["PKG_CONFIG"] = str(metadata)
+                result = subprocess.run(["sh", "scripts/run_forward_backward_oracle.sh"],
+                                        cwd=root, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

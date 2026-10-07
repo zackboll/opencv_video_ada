@@ -986,6 +986,436 @@ package body Video_Tests is
          raise;
    end FB_Direct_Oracle;
 
+   function Quality_Structure (Kind : Natural) return OpenCV.Core.Mat is
+   begin
+      return Result : OpenCV.Core.Mat := OpenCV.Core.Create
+        (96, 96, (Depth => OpenCV.Core.UInt8, Channels => 1)) do
+         for R in 0 .. 95 loop
+            for C in 0 .. 95 loop
+               OpenCV.Core.UInt8_Access.Set (Result, R, C,
+                 (if Kind = 0 then (if R >= 48 and then C >= 48 then 255 else 0)
+                  elsif Kind = 1 then (if C >= 48 then 255 else 0) else 127));
+            end loop;
+         end loop;
+      end return;
+   end Quality_Structure;
+
+   Quality_Points : constant Tracking_Point_Array (5 .. 8) :=
+     [(25.0, 25.0), (45.0, 32.0), (60.0, 50.0), (35.0, 65.0)];
+   Quality_Options : constant PyrLK_Options := (Max_Level => 0, others => <>);
+
+   procedure Quality_Identity (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (96, 96);
+      Tracks : constant Trackability_Track_Array :=
+        Track_PyrLK_Trackability (Image, Image, Quality_Points, Quality_Options);
+   begin
+      Assert (Tracks'First = 5 and then Tracks'Last = 8, "quality bounds lost");
+      for I in Tracks'Range loop
+         Assert (Tracks (I).Tracked and then Tracks (I).Minimum_Eigenvalue > 0.1,
+                 "identity quality missing (flag 8 ignored)");
+         Assert (Tracks (I).Previous_Point = Quality_Points (I) and then
+                   Tracks (I).Next_Point = Quality_Points (I), "identity point moved");
+      end loop;
+   end Quality_Identity;
+
+   procedure Quality_Seeded (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous : constant OpenCV.Core.Mat := Texture (96, 96);
+      Next : constant OpenCV.Core.Mat := Shift (Previous, 12, 7);
+      Seeds : Tracking_Point_Array (20 .. 23);
+   begin
+      for I in Quality_Points'Range loop
+         Seeds (I - 5 + 20) := (Quality_Points (I).X + 12.25, Quality_Points (I).Y + 6.75);
+      end loop;
+      declare
+         Saved : constant Tracking_Point_Array := Seeds;
+         Tracks : constant Trackability_Track_Array := Track_PyrLK_Trackability
+           (Previous, Next, Quality_Points, Quality_Options, Seeds);
+         Plain : constant Point_Track_Array := Track_PyrLK
+           (Previous, Next, Quality_Points, Quality_Options);
+      begin
+         Assert (Tracks'First = 5 and then Tracks'Last = 8 and then Seeds = Saved,
+                 "seeded quality bounds or seed mutation");
+         for I in Tracks'Range loop
+            Assert (Tracks (I).Tracked and then Tracks (I).Minimum_Eigenvalue > 0.1,
+                    "seeded quality missing");
+            Assert (Near (Tracks (I).Next_Point.X, Quality_Points (I).X + 12.0, 0.05)
+                      and then Near (Tracks (I).Next_Point.Y, Quality_Points (I).Y + 7.0, 0.05),
+                    "quality seeds not consumed");
+            Assert (abs (Tracks (I).Next_Point.X - Seeds (I - 5 + 20).X) > 0.20,
+                    "quality returned prediction without refinement");
+            Assert (not Plain (I).Tracked or else
+                      abs (Plain (I).Next_Point.X - Tracks (I).Next_Point.X) > 5.0,
+                    "distinguishing quality fixture lost");
+         end loop;
+      end;
+   end Quality_Seeded;
+
+   procedure Quality_Structures (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Values : array (0 .. 2) of OpenCV.Float32_Value;
+   begin
+      for Kind in Values'Range loop
+         declare
+            Image : constant OpenCV.Core.Mat := Quality_Structure (Kind);
+            Tracks : constant Trackability_Track_Array := Track_PyrLK_Trackability
+              (Image, Image, [1 => (48.0, 48.0)], Quality_Options);
+         begin
+            Values (Kind) := Tracks (1).Minimum_Eigenvalue;
+            Assert (Tracks (1).Tracked = (Kind = 0), "structure status differs");
+         end;
+      end loop;
+      Assert (Values (0) > 0.5 and then Values (1) = 0.0 and then Values (2) = 0.0,
+              "portable corner/edge/flat conditioning relationship failed");
+   end Quality_Structures;
+
+   procedure Check_Quality_Threshold (Below : Boolean) is
+      Image : constant OpenCV.Core.Mat := Quality_Structure (0);
+      Points : constant Tracking_Point_Array := [7 => (48.0, 48.0)];
+      Baseline : constant Trackability_Track_Array :=
+        Track_PyrLK_Trackability (Image, Image, Points, Quality_Options);
+      Options : PyrLK_Options := Quality_Options;
+   begin
+      Options.Min_Eigenvalue_Threshold := OpenCV.Float64_Value (Baseline (7).Minimum_Eigenvalue)
+        * (if Below then 0.5 else 2.0);
+      declare
+         Tracks : constant Trackability_Track_Array := Track_PyrLK_Trackability (Image, Image, Points, Options);
+      begin
+         Assert (Tracks (7).Tracked = Below, "threshold not acting on eigenvalue");
+         Assert (Tracks (7).Minimum_Eigenvalue = Baseline (7).Minimum_Eigenvalue,
+                 "threshold rejection discarded meaningful quality");
+         Assert (Tracks (7).Next_Point = Points (7), "threshold point not deterministic");
+      end;
+   end Check_Quality_Threshold;
+
+   procedure Quality_Threshold_Below (T : in out Fixture) is
+      pragma Unreferenced (T);
+   begin
+      Check_Quality_Threshold (True);
+   end Quality_Threshold_Below;
+
+   procedure Quality_Threshold_Above (T : in out Fixture) is
+      pragma Unreferenced (T);
+   begin
+      Check_Quality_Threshold (False);
+   end Quality_Threshold_Above;
+
+   function Previous_Quality_Defined return Boolean is
+      package Integers is new Ada.Text_IO.Integer_IO (Integer);
+      package Floats is new Ada.Text_IO.Float_IO (OpenCV.Float64_Value);
+      File : Ada.Text_IO.File_Type;
+      Mode, Index, Status : Integer;
+      Value : OpenCV.Float64_Value;
+      Defined : Boolean := True;
+   begin
+      Ada.Text_IO.Open (File, Ada.Text_IO.In_File,
+        Ada.Environment_Variables.Value ("VIDEO_TRACKABILITY_ORACLE", "../obj/oracle/trackability.txt"));
+      for Record_Number in 1 .. 27 loop
+         Integers.Get (File, Mode); Integers.Get (File, Index); Integers.Get (File, Status);
+         for Component in 1 .. 3 loop Floats.Get (File, Value); end loop;
+         if Status = -1 then
+            Assert (Mode = 3 and then Index = 1, "unexpected undefined native quality path");
+            Defined := False;
+         end if;
+      end loop;
+      Ada.Text_IO.Close (File);
+      return Defined;
+   end Previous_Quality_Defined;
+
+   procedure Quality_Previous_Unavailable (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (96, 96);
+      Points : constant Tracking_Point_Array := [7 => (-1000.0, -1000.0), 8 => (1000.0, 1000.0)];
+   begin
+      begin
+         declare
+            Tracks : constant Trackability_Track_Array :=
+              Track_PyrLK_Trackability (Image, Image, Points, Quality_Options);
+         begin
+            Assert (Previous_Quality_Defined, "undefined native quality accepted");
+            for I in Tracks'Range loop
+               Assert (not Tracks (I).Tracked and then Tracks (I).Minimum_Eigenvalue = 0.0 and then
+                         Tracks (I).Next_Point = Points (I), "unavailable previous patch semantics");
+            end loop;
+         end;
+      exception
+         when OpenCV.OpenCV_Error =>
+            Assert (not Previous_Quality_Defined, "defined previous quality rejected");
+      end;
+   end Quality_Previous_Unavailable;
+
+   procedure Quality_Next_Unavailable (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (96, 96);
+      Baseline : constant Trackability_Track_Array :=
+        Track_PyrLK_Trackability (Image, Image, Quality_Points, Quality_Options);
+      Tracks : constant Trackability_Track_Array := Track_PyrLK_Trackability
+        (Image, Image, Quality_Points, Quality_Options,
+         Initial_Next_Points => [20 .. 23 => (-1000.0, -1000.0)]);
+   begin
+      for I in Tracks'Range loop
+         Assert (not Tracks (I).Tracked and then Tracks (I).Next_Point = Quality_Points (I),
+                 "unavailable next search point not normalized");
+         Assert (Tracks (I).Minimum_Eigenvalue = Baseline (I).Minimum_Eigenvalue and then
+                   Tracks (I).Minimum_Eigenvalue > 0.1, "next failure erased previous quality");
+      end loop;
+   end Quality_Next_Unavailable;
+
+   procedure Quality_Metrics (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (96, 96);
+      Quality : constant Trackability_Track_Array :=
+        Track_PyrLK_Trackability (Image, Image, Quality_Points, Quality_Options);
+      Ordinary : constant Point_Track_Array := Track_PyrLK (Image, Image, Quality_Points, Quality_Options);
+      Next : constant OpenCV.Core.Mat := Shift (Image, 2, 1);
+      Options : constant PyrLK_Options := (Max_Level => 1, others => <>);
+      Moving : constant Trackability_Track_Array := Track_PyrLK_Trackability (Image, Next, Quality_Points, Options);
+      Photo : constant Point_Track_Array := Track_PyrLK (Image, Next, Quality_Points, Options);
+   begin
+      for I in Quality'Range loop
+         Assert (Ordinary (I).Tracked = Quality (I).Tracked and then
+                   Ordinary (I).Next_Point = Quality (I).Next_Point, "ordinary identity differs");
+         Assert (Ordinary (I).Error = 0.0 and then Quality (I).Minimum_Eigenvalue > 0.1,
+                 "photometric L1 error confused with eigenvalue");
+         Assert (Moving (I).Tracked = Photo (I).Tracked and then Moving (I).Tracked and then
+                   Near (Moving (I).Next_Point.X, Photo (I).Next_Point.X, 1.0E-5) and then
+                   Near (Moving (I).Next_Point.Y, Photo (I).Next_Point.Y, 1.0E-5),
+                 "quality changed successful ordinary next point");
+      end loop;
+   end Quality_Metrics;
+
+   procedure Quality_Seed_Independence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (96, 96);
+      Seeds : Tracking_Point_Array (20 .. 23);
+      Baseline : constant Trackability_Track_Array :=
+        Track_PyrLK_Trackability (Image, Image, Quality_Points, Quality_Options);
+   begin
+      for I in Quality_Points'Range loop
+         Seeds (I - 5 + 20) := (Quality_Points (I).X + 32.0, Quality_Points (I).Y + 20.0);
+      end loop;
+      declare
+         Tracks : constant Trackability_Track_Array := Track_PyrLK_Trackability
+           (Image, Image, Quality_Points, Quality_Options, Seeds);
+      begin
+         for I in Tracks'Range loop
+            Assert (Near (Tracks (I).Minimum_Eigenvalue, Baseline (I).Minimum_Eigenvalue, 1.0E-5),
+                    "destination seed changed previous-patch quality");
+         end loop;
+      end;
+   end Quality_Seed_Independence;
+
+   procedure Quality_Extreme_Bounds (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (96, 96);
+      Points : constant Tracking_Point_Array := [Positive'Last => (25.0, 25.0)];
+      Plain : constant Trackability_Track_Array := Track_PyrLK_Trackability (Image, Image, Points);
+      Seeded : constant Trackability_Track_Array := Track_PyrLK_Trackability
+        (Image, Image, Points, Initial_Next_Points => [3 => (25.0, 25.0)]);
+   begin
+      Assert (Plain'First = Positive'Last and then Plain'Last = Positive'Last and then
+                Seeded'First = Positive'Last and then Seeded'Last = Positive'Last, "extreme quality bounds lost");
+      Assert (Plain (Positive'Last).Tracked and then Seeded (Positive'Last).Tracked,
+              "extreme quality bounds failed");
+   end Quality_Extreme_Bounds;
+
+   procedure Quality_Empty (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (96, 96);
+      Empty : constant Tracking_Point_Array (7 .. 6) := [];
+      Plain : constant Trackability_Track_Array := Track_PyrLK_Trackability (Image, Image, Empty);
+      Seeded : constant Trackability_Track_Array := Track_PyrLK_Trackability
+        (Image, Image, Empty, Initial_Next_Points => Tracking_Point_Array'(20 .. 19 => <>));
+   begin
+      Assert (Plain'First = 7 and then Plain'Last = 6 and then Seeded'First = 7 and then Seeded'Last = 6,
+              "empty quality bounds lost");
+   end Quality_Empty;
+
+   procedure Quality_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (96, 96);
+      Empty_Image : OpenCV.Core.Mat;
+      Wrong_Depth_Image : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (96, 96, (Depth => OpenCV.Core.Float32, Channels => 1));
+      Wrong_Channels_Image : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (96, 96, (Depth => OpenCV.Core.UInt8, Channels => 3));
+      Wrong_Geometry : constant OpenCV.Core.Mat := Texture (95, 96);
+   begin
+      for Seeded in Boolean loop
+         for Mode in 0 .. 10 loop
+            begin
+               declare
+                  Previous : constant OpenCV.Core.Mat :=
+                    (case Mode is when 0 => Empty_Image, when 1 => Wrong_Depth_Image,
+                     when 2 => Wrong_Channels_Image, when 3 => Wrong_Geometry, when others => Image);
+                  Points : constant Tracking_Point_Array :=
+                    (if Mode = 10 then Tracking_Point_Array'(7 .. 6 => <>)
+                     elsif Mode = 8 then [1 => (OpenCV.Float32_Value'Last, 0.0)] else Quality_Points);
+                  Options : PyrLK_Options := Quality_Options;
+               begin
+                  case Mode is
+                     when 4 | 10 => Options.Max_Level := 31;
+                     when 5 => Options.Window_Size.Width := 2;
+                     when 6 => Options.Epsilon := 0.0;
+                     when 7 => Options.Min_Eigenvalue_Threshold := -1.0;
+                     when others => null;
+                  end case;
+                  if Seeded or else Mode /= 9 then
+                     declare
+                        Tracks : constant Trackability_Track_Array :=
+                          (if Seeded then Track_PyrLK_Trackability (Previous, Image, Points, Options,
+                            Initial_Next_Points => (if Mode = 9 then [20 => (25.0, 25.0)] else Points))
+                           else Track_PyrLK_Trackability (Previous, Image, Points, Options));
+                        pragma Unreferenced (Tracks);
+                     begin
+                        Assert (False, "quality bypassed validation");
+                     end;
+                  end if;
+               end;
+            exception
+               when OpenCV.OpenCV_Error => null;
+            end;
+         end loop;
+      end loop;
+      for Bad of Tracking_Point_Array'[(OpenCV.Float32_Value'Last, 0.0), (536_871_040.0, 0.0)] loop
+         begin
+            declare
+               Tracks : constant Trackability_Track_Array := Track_PyrLK_Trackability
+                 (Image, Image, [1 => (25.0, 25.0)], Initial_Next_Points => [20 => Bad]);
+               pragma Unreferenced (Tracks);
+            begin
+               Assert (False, "unsafe quality seed accepted");
+            end;
+         exception
+            when OpenCV.OpenCV_Error => null;
+         end;
+      end loop;
+   end Quality_Validation;
+
+   procedure Quality_Regions_Immutability (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Parent : constant OpenCV.Core.Mat := Texture (128, 128);
+      Shifted : constant OpenCV.Core.Mat := Shift (Parent, 2, 1);
+      Previous : constant OpenCV.Core.Mat := Parent.Region ((X => 10, Y => 10, Width => 96, Height => 96));
+      Next : constant OpenCV.Core.Mat := Shifted.Region ((X => 10, Y => 10, Width => 96, Height => 96));
+      Before_Previous : constant OpenCV.Core.Mat := Previous.Clone;
+      Before_Next : constant OpenCV.Core.Mat := Next.Clone;
+      Points : constant Tracking_Point_Array := Quality_Points;
+      Seeds : Tracking_Point_Array (20 .. 23);
+   begin
+      for I in Points'Range loop
+         Seeds (I - 5 + 20) := (Points (I).X + 2.25, Points (I).Y + 0.75);
+      end loop;
+      declare
+         Saved_Points : constant Tracking_Point_Array := Points;
+         Saved_Seeds : constant Tracking_Point_Array := Seeds;
+         Plain : constant Trackability_Track_Array := Track_PyrLK_Trackability
+           (Previous, Next, Points, (Max_Level => 1, others => <>));
+         Seeded : constant Trackability_Track_Array := Track_PyrLK_Trackability
+           (Previous, Next, Points, Quality_Options, Seeds);
+      begin
+         Assert (Points = Saved_Points and then Seeds = Saved_Seeds, "quality input arrays mutated");
+         for I in Points'Range loop
+            Assert (Plain (I).Tracked and then Seeded (I).Tracked and then
+                      Plain (I).Minimum_Eigenvalue > 0.0 and then Seeded (I).Minimum_Eigenvalue > 0.0,
+                    "strided quality Region failed");
+            Assert (Near (Seeded (I).Next_Point.X, Points (I).X + 2.0, 0.05) and then
+                      Near (Seeded (I).Next_Point.Y, Points (I).Y + 1.0, 0.05), "Region translation differs");
+         end loop;
+         for R in 0 .. 95 loop
+            for C in 0 .. 95 loop
+               Assert (OpenCV.Core.UInt8_Access.Get (Previous, R, C) =
+                         OpenCV.Core.UInt8_Access.Get (Before_Previous, R, C) and then
+                       OpenCV.Core.UInt8_Access.Get (Next, R, C) =
+                         OpenCV.Core.UInt8_Access.Get (Before_Next, R, C), "quality source pixels mutated");
+            end loop;
+         end loop;
+      end;
+   end Quality_Regions_Immutability;
+
+   procedure Quality_Direct_Oracle (T : in out Fixture) is
+      pragma Unreferenced (T);
+      package Integers is new Ada.Text_IO.Integer_IO (Integer);
+      package Floats is new Ada.Text_IO.Float_IO (OpenCV.Float64_Value);
+      File : Ada.Text_IO.File_Type;
+      Compared : Natural := 0;
+      Previous_Defined : constant Boolean := Previous_Quality_Defined;
+      function Close (Actual : OpenCV.Float32_Value; Expected : OpenCV.Float64_Value) return Boolean is
+        (abs (OpenCV.Float64_Value (Actual) - Expected) <= 1.0E-5);
+   begin
+      Ada.Text_IO.Open (File, Ada.Text_IO.In_File,
+        Ada.Environment_Variables.Value ("VIDEO_TRACKABILITY_ORACLE", "../obj/oracle/trackability.txt"));
+      for Mode in 0 .. 8 loop
+         declare
+            Previous : constant OpenCV.Core.Mat :=
+              (if Mode in 5 .. 7 then Quality_Structure (Mode - 5) else Texture (96, 96));
+            Next : constant OpenCV.Core.Mat := (if Mode = 1 then Shift (Previous, 12, 7) else Previous);
+            Points : Tracking_Point_Array :=
+              (if Mode in 5 .. 7 then Tracking_Point_Array'[5 => (48.0, 48.0)] else Quality_Points);
+            Seeds : Tracking_Point_Array (20 .. 19 + Points'Length);
+            Options : PyrLK_Options := Quality_Options;
+         begin
+            for I in Points'Range loop
+               Seeds (I - 5 + 20) := (Points (I).X + (if Mode = 1 then 12.25 elsif Mode = 8 then 32.0 else 0.0),
+                                     Points (I).Y + (if Mode = 1 then 6.75 elsif Mode = 8 then 20.0 else 0.0));
+            end loop;
+            if Mode = 2 then Options.Min_Eigenvalue_Threshold := 100.0; end if;
+            if Mode = 3 then Points (6) := (-1000.0, -1000.0); end if;
+            if Mode = 4 then Seeds (21) := (-1000.0, -1000.0); end if;
+            if Mode = 3 and then not Previous_Defined then
+               begin
+                  declare
+                     Tracks : constant Trackability_Track_Array :=
+                       Track_PyrLK_Trackability (Previous, Next, Points, Options);
+                     pragma Unreferenced (Tracks);
+                  begin
+                     Assert (False, "native unwritten quality accepted by Ada");
+                  end;
+               exception
+                  when OpenCV.OpenCV_Error => null;
+               end;
+               for I in 0 .. 3 loop
+                  declare
+                     Native_Mode, Index, Status : Integer;
+                     X, Y, Eigenvalue : OpenCV.Float64_Value;
+                  begin
+                     Integers.Get (File, Native_Mode); Integers.Get (File, Index); Integers.Get (File, Status);
+                     Floats.Get (File, X); Floats.Get (File, Y); Floats.Get (File, Eigenvalue);
+                     Assert (Native_Mode = 3 and then Index = I and then
+                               Status = (if I = 1 then -1 else 1), "undefined-quality oracle mapping");
+                     Compared := Compared + 1;
+                  end;
+               end loop;
+            else
+            declare
+               Tracks : constant Trackability_Track_Array :=
+                 (if Mode = 1 or else Mode = 4 or else Mode = 8 then
+                    Track_PyrLK_Trackability (Previous, Next, Points, Options, Seeds)
+                  else Track_PyrLK_Trackability (Previous, Next, Points, Options));
+            begin
+               for I in Tracks'Range loop
+                  declare
+                     Native_Mode, Index, Status : Integer;
+                     X, Y, Eigenvalue : OpenCV.Float64_Value;
+                  begin
+                     Integers.Get (File, Native_Mode); Integers.Get (File, Index); Integers.Get (File, Status);
+                     Floats.Get (File, X); Floats.Get (File, Y); Floats.Get (File, Eigenvalue);
+                     Assert (Native_Mode = Mode and then Index = I - 5, "quality oracle mapping");
+                     Assert (Tracks (I).Tracked = (Status = 1) and then Close (Tracks (I).Next_Point.X, X)
+                               and then Close (Tracks (I).Next_Point.Y, Y) and then
+                               Close (Tracks (I).Minimum_Eigenvalue, Eigenvalue), "quality differs from direct OpenCV");
+                     Compared := Compared + 1;
+                  end;
+               end loop;
+            end;
+            end if;
+         end;
+      end loop;
+      Assert (Compared = 27 and then Ada.Text_IO.End_Of_File (File), "quality oracle inventory");
+      Ada.Text_IO.Close (File);
+   end Quality_Direct_Oracle;
+
    package Caller is new AUnit.Test_Caller (Fixture);
 
    function Suite return AUnit.Test_Suites.Access_Test_Suite is
@@ -1028,6 +1458,20 @@ package body Video_Tests is
         Result.Add_Test (Caller.Create ("FB noncontiguous Regions both overloads", FB_Regions'Access));
         Result.Add_Test (Caller.Create ("FB retains image options and seed validation", FB_Validation'Access));
         Result.Add_Test (Caller.Create ("FB independent direct C++ oracle", FB_Direct_Oracle'Access));
+       Result.Add_Test (Caller.Create ("quality unseeded identity and bounds", Quality_Identity'Access));
+       Result.Add_Test (Caller.Create ("quality seeded 12 7 and differing bounds", Quality_Seeded'Access));
+       Result.Add_Test (Caller.Create ("quality corner edge flat", Quality_Structures'Access));
+       Result.Add_Test (Caller.Create ("quality threshold below eigenvalue", Quality_Threshold_Below'Access));
+       Result.Add_Test (Caller.Create ("quality threshold above retains eigenvalue", Quality_Threshold_Above'Access));
+       Result.Add_Test (Caller.Create ("quality previous patch unavailable", Quality_Previous_Unavailable'Access));
+       Result.Add_Test (Caller.Create ("quality next search unavailable retains value", Quality_Next_Unavailable'Access));
+       Result.Add_Test (Caller.Create ("quality versus photometric metrics and coordinates", Quality_Metrics'Access));
+       Result.Add_Test (Caller.Create ("quality independent of destination seeds", Quality_Seed_Independence'Access));
+       Result.Add_Test (Caller.Create ("quality Positive Last bounds", Quality_Extreme_Bounds'Access));
+       Result.Add_Test (Caller.Create ("quality empty bounds both overloads", Quality_Empty'Access));
+       Result.Add_Test (Caller.Create ("quality inherited validation both overloads", Quality_Validation'Access));
+       Result.Add_Test (Caller.Create ("quality Regions and all input immutability", Quality_Regions_Immutability'Access));
+       Result.Add_Test (Caller.Create ("quality independent direct C++ oracle", Quality_Direct_Oracle'Access));
        return Result;
    end Suite;
 end Video_Tests;

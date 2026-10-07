@@ -50,7 +50,7 @@ def main() -> None:
 
     tests = (ROOT / "tests/src/video_tests.adb").read_text()
     registrations = re.findall(r"Result\.Add_Test\s*\(Caller\.Create", tests)
-    check(len(registrations) == 37, "update documented AUnit inventory when changing tests")
+    check(len(registrations) == 51, "update documented AUnit inventory when changing tests")
 
     configure = (ROOT / "scripts/configure_opencv.sh").read_text()
     check("opencv2/video/tracking.hpp" in configure and "libopencv_video" in configure,
@@ -69,7 +69,7 @@ def main() -> None:
           "compatibility matrix must remain manual-only")
 
     print(f"PASS: manifests, Core pin {CORE_PIN[:12]}, {len(declared)} ABI declarations/imports, "
-          f"37 AUnit registrations, Core ownership, video backend, CI topology")
+          f"51 AUnit registrations, Core ownership, video backend, CI topology")
 
 
 if __name__ == "__main__":

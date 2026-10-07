@@ -15,6 +15,7 @@ void opencv_video_test_fault(int);
 #endif
 
 namespace {
+enum class ErrorMode { Photometric, MinimumEigenvalue };
 // Diagnostics must remain safe even while handling allocation failure.
 thread_local char g_last_error[512] = {};
 
@@ -66,6 +67,7 @@ static opencv_video_status track_pyr_lk(
     const opencv_core_mat_handle *previous_points,
     const opencv_core_mat_handle *initial_next_points,
     bool seeded,
+    ErrorMode error_mode,
     opencv_core_mat_handle *next_points,
     opencv_core_mat_handle *track_status,
     opencv_core_mat_handle *track_error,
@@ -182,6 +184,12 @@ static opencv_video_status track_pyr_lk(
         if (seeded) computed_next = seeds->clone();
         cv::Mat computed_status;
         cv::Mat computed_error;
+        const bool quality = error_mode == ErrorMode::MinimumEigenvalue;
+        if (quality) {
+            computed_error = cv::Mat(point_count, 1, CV_32F,
+                                    cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
+        }
+        const auto *error_storage = computed_error.data;
         const cv::TermCriteria criteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS,
                                         maximum_iterations, epsilon);
 
@@ -193,9 +201,15 @@ static opencv_video_status track_pyr_lk(
         cv::calcOpticalFlowPyrLK(*previous, *next, *points,
                                  computed_next, computed_status, computed_error,
                                  cv::Size(window_width, window_height), max_level,
-                                 criteria, seeded ? cv::OPTFLOW_USE_INITIAL_FLOW : 0,
+                                 criteria, (seeded ? cv::OPTFLOW_USE_INITIAL_FLOW : 0) |
+                                     (quality ? cv::OPTFLOW_LK_GET_MIN_EIGENVALS : 0),
                                  min_eigenvalue_threshold);
 
+        // Mat OutputArray::create reuses matching storage on all reviewed tags.
+        // Reject replacement: otherwise the sentinel no longer proves writes.
+        if (quality && computed_error.data != error_storage) {
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "PyrLK replaced minimum-eigenvalue storage");
+        }
         if (computed_next.checkVector(2, CV_32F, true) != point_count ||
             computed_status.checkVector(1, CV_8U, true) != point_count ||
             computed_error.checkVector(1, CV_32F, true) != point_count) {
@@ -210,10 +224,14 @@ static opencv_video_status track_pyr_lk(
         auto *flags = computed_status.ptr<unsigned char>();
         auto *errors = computed_error.ptr<float>();
         for (int i = 0; i < point_count; ++i) {
+            if (quality && (!std::isfinite(errors[i]) || errors[i] < 0)) {
+                return fail(OPENCV_VIDEO_ERROR_OPENCV, "Invalid or unwritten PyrLK minimum eigenvalue");
+            }
             if (flags[i] == 0) {
-                // Never read native failed-track point/error storage.
+                // Never read failed nextPts. Quality is independent of status;
+                // only photometric failed errors are undefined and discarded.
                 result[i] = input[i];
-                errors[i] = 0.0f;
+                if (!quality) errors[i] = 0.0f;
             } else if (flags[i] != 1 || !std::isfinite(result[i].x) ||
                        !std::isfinite(result[i].y) || !std::isfinite(errors[i]) || errors[i] < 0) {
                 return fail(OPENCV_VIDEO_ERROR_OPENCV, "Invalid successful PyrLK result");
@@ -246,6 +264,7 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk(
     int32_t window_width, int32_t window_height, int32_t max_level,
     int32_t maximum_iterations, double epsilon, double min_eigenvalue_threshold) {
     return track_pyr_lk(previous_image, next_image, previous_points, nullptr, false,
+                        ErrorMode::Photometric,
                         next_points, track_status, track_error, window_width, window_height,
                         max_level, maximum_iterations, epsilon, min_eigenvalue_threshold);
 }
@@ -261,6 +280,38 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk_seeded(
     int32_t window_width, int32_t window_height, int32_t max_level,
     int32_t maximum_iterations, double epsilon, double min_eigenvalue_threshold) {
     return track_pyr_lk(previous_image, next_image, previous_points, initial_next_points, true,
+                        ErrorMode::Photometric,
                         next_points, track_status, track_error, window_width, window_height,
+                        max_level, maximum_iterations, epsilon, min_eigenvalue_threshold);
+}
+
+extern "C" opencv_video_status opencv_video_track_pyr_lk_min_eigenvalues(
+    const opencv_core_mat_handle *previous_image,
+    const opencv_core_mat_handle *next_image,
+    const opencv_core_mat_handle *previous_points,
+    opencv_core_mat_handle *next_points,
+    opencv_core_mat_handle *track_status,
+    opencv_core_mat_handle *minimum_eigenvalues,
+    int32_t window_width, int32_t window_height, int32_t max_level,
+    int32_t maximum_iterations, double epsilon, double min_eigenvalue_threshold) {
+    return track_pyr_lk(previous_image, next_image, previous_points, nullptr, false,
+                        ErrorMode::MinimumEigenvalue,
+                        next_points, track_status, minimum_eigenvalues, window_width, window_height,
+                        max_level, maximum_iterations, epsilon, min_eigenvalue_threshold);
+}
+
+extern "C" opencv_video_status opencv_video_track_pyr_lk_seeded_min_eigenvalues(
+    const opencv_core_mat_handle *previous_image,
+    const opencv_core_mat_handle *next_image,
+    const opencv_core_mat_handle *previous_points,
+    const opencv_core_mat_handle *initial_next_points,
+    opencv_core_mat_handle *next_points,
+    opencv_core_mat_handle *track_status,
+    opencv_core_mat_handle *minimum_eigenvalues,
+    int32_t window_width, int32_t window_height, int32_t max_level,
+    int32_t maximum_iterations, double epsilon, double min_eigenvalue_threshold) {
+    return track_pyr_lk(previous_image, next_image, previous_points, initial_next_points, true,
+                        ErrorMode::MinimumEigenvalue,
+                        next_points, track_status, minimum_eigenvalues, window_width, window_height,
                         max_level, maximum_iterations, epsilon, min_eigenvalue_threshold);
 }
