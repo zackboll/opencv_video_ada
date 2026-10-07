@@ -91,7 +91,7 @@ clone of `640cda40c26d429a62c05b2f8da302ba404cfdba`, no generated artifacts copi
 passes 4.10 public/tests, AUnit 51/51 with zero failures/errors, production/fault/
 oracle/ASan/UBSan, 4/4 example, repository/configuration/shell/diff checks.
 
-## Remote campaign (in progress)
+## Remote qualification and review gate
 
 PR [#4](https://github.com/zackboll/opencv_video_ada/pull/4) is open, non-draft,
 unmerged, auto-merge disabled. Implementation head `640cda40c26d429a62c05b2f8da302ba404cfdba`.
@@ -118,3 +118,34 @@ full ordinary/seeded/quality boundary/faults, 27 quality plus retained native or
 entries, actual Video ASan/UBSan and 4/4 example. Exact complete logs retrieved and
 native versions checked. This earlier head is not claimed as a final-head run;
 final-head cross-platform and repeat pinned checks remain required.
+
+[Backend-qualified PR run 37558538508](https://github.com/zackboll/opencv_video_ada/actions/runs/37558538508)
+is **successful** on `8e71439f4e9a0b588ca8eeaa1dd0aa9607e260e8`: all four required
+jobs repository-checks/linux/macos/linux-sanitizers. Exact logs retrieved: Linux
+4.6.0 and macOS ARM64 Homebrew 5.0.0_5 each report **51 executed, 51 passed,
+0 failed assertions, 0 unexpected errors**, all ordinary/seeded/quality boundaries,
+24 injected exception cases (six for each mode/seed combination) plus shared-seed
+post-native atomicity, direct oracle, retained 4/4 example. macOS confirms the
+KleidiCV unavailable-previous sentinel and strict rejection; other quality modes
+pass without per-version scalar/coordinate tolerance relaxation. macOS runtime
+checks confirm native Video, Core shim, libc++ and no libstdc++ across the shim.
+Linux actual Video ASan/UBSan succeeds with no reported findings/leaks/uncaught
+exceptions. Apple toolchain deployment-target and checkout Node deprecation
+annotations are non-failing, not binding warning-policy exceptions.
+
+Local qualification was repeated on this backend-qualified head for all three
+actual versions with 51/51 and all campaigns passing. An independent clean clone
+of this head, no generated products copied, repeats 4.10 build/tests/oracle/raw/
+fault/sanitizers/example/static checks successfully. All three public profiles
+and Validation AUnit 51/51 were repeated. External flag-8 mutation against the
+final boundary still exits 1; production source hash remains unchanged.
+
+The final evidence-only follow-up changes documentation, not production/test
+semantics or workflows. Required CI and the manual pinned matrix are verified
+again on the final pushed head at handoff; exact final SHA, run URLs and head
+equality are recorded in the PR review-gate comment and final response, rather
+than claiming earlier run IDs tested a later documentation commit. Keep the PR
+open/non-draft/unmerged, auto-merge disabled. Windows remains push-to-main-only;
+the diagnosed Task 003 Windows regression is fixed but no successful Task 004
+Windows native run is claimed. No main change, merge, amend, published-history
+rebase, force-push, tag, release, version bump or Core pin change occurred.
