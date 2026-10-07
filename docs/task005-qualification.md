@@ -93,11 +93,19 @@ qualified by lifetime tests and the limited controlled ownership representation.
 
 Repository checker, eight actual-script configuration tests, shell syntax,
 git diff --check and C11 header warnings-as-errors pass. Public Development,
-Validation, Release and Validation AUnit qualification are recorded with the remote
-and clean-clone results below once complete.
+Validation and Release builds pass. Validation AUnit reports 59 executed/passed,
+zero assertion failures/unexpected errors.
 
 ## Remote and independent clean-clone evidence
 
-Pending completion; no PR/CI or clean-clone pass is claimed by this initial record.
+Independent clean Git clone of implementation commit
+`ed30c808a54265037a464aebfc5dfac4d080e86d`, with no generated products copied,
+reproduces public/test builds, 59/59 AUnit with zero failures/errors, all native/
+fault/direct-oracle/sanitizer campaigns, retained 4/4 example and repository/
+configuration/shell/diff checks on OpenCV 4.10.0. All commands exit zero.
+Final implementation tests and sanitizers repeated on 4.1.0/5.0.0 also pass,
+including all 16 new pyramid exceptions. No runtime code changed after this head.
+
+Remote qualification pending; no PR/CI pass is claimed by this initial record.
 The review gate requires all final-head PR jobs and the manual pinned matrix,
 open/non-draft/unmerged PR, auto-merge disabled, clean tree and head equality.
