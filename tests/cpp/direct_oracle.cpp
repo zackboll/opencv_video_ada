@@ -28,7 +28,12 @@ static void trackability(std::ostream &output) {
         for (int i = 0; i < int(f.points.size()); ++i) {
             const float e = values.at<float>(i);
             const bool tracked = status.at<unsigned char>(i) != 0;
-            if (!std::isfinite(e) || e < 0) throw std::runtime_error("undefined native eigenvalue");
+            if (!std::isfinite(e) || e < 0) {
+                std::cerr << "native quality violation: version=" << CV_VERSION << " mode=" << mode
+                          << " point=" << i << " status=" << int(tracked) << " eigenvalue=" << e
+                          << " previous=" << f.points[i] << " seed=" << f.seeds[i] << '\n';
+                throw std::runtime_error("undefined native eigenvalue");
+            }
             if (mode == 0) identity.push_back(e);
             if (mode >= 5 && mode <= 7) structures[mode-5] = e;
             if ((mode == 0 || mode == 1 || mode == 5) && (!tracked || e <= .1f))
