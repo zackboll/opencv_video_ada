@@ -88,7 +88,8 @@ package OpenCV.Video is
    --  or a guarantee of correct correspondence. No universal threshold exists.
    --  Minimum_Eigenvalue is finite and nonnegative independently of Tracked:
    --  threshold rejection or unavailable next search can retain useful quality.
-   --  An unavailable previous patch returns zero. Failed Next_Point is always
+   --  An unavailable previous patch returns zero when native defines it; a
+   --  backend leaving quality unwritten raises OpenCV_Error. Failed Next_Point is
    --  Previous_Point. Invalid/unwritten native quality raises OpenCV_Error;
    --  values are never clamped. Existing image/coordinate/options validation,
    --  input immutability, Region support and Points'Range preservation apply.

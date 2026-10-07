@@ -39,7 +39,7 @@ not universally qualified: fallback source writes all slots, HAL prose alone
 does not prove it, and sentinels reject undefined output. Tiny negative roundoff
 is not clamped: any negative native output deliberately raises OpenCV_Error.
 
-## Local evidence established so far
+## Local qualification
 
 Debian Linux x86_64, Alire 2.1.1, GNAT/Alire C++ 16.1.0; system g++ 14.2.0;
 gprbuild package 26.0.1 (reports 26.0.0). Warnings remain errors.
@@ -74,9 +74,47 @@ gprbuild package 26.0.1 (reports 26.0.0). Warnings remain errors.
 - Public Development/Validation/Release builds pass; Validation AUnit reports
   51 executed/passed, zero failed assertions/unexpected errors.
 
-Version campaign logs must be checked for actual configured/runtime versions,
-not just script labels. Earlier temporary installations disappeared during the
-campaign; mislabeled fallback-to-system runs are **not** compatibility evidence.
-Stable independent source installations are being built for repeat qualification.
-Remote final-head CI, pinned compatibility, profiles and clean clone are not yet
-claimed complete in this record.
+The completed serial repeat campaign uses stable source-built 4.1.0 and 5.0.0
+installations (core/imgproc/video, OpenCL/IPP/TBB disabled) and packaged 4.10.0.
+Configured Native_Version and native oracle/boundary runtime versions were checked:
+
+| OpenCV | build | AUnit registered/executed/passed | assertions/errors | boundary/faults | ASan/UBSan | oracle | example |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 4.1.0 | pass | 51 / 51 / 51 | 0 / 0 | pass | pass / pass | 27 quality + retained entries | 4/4 |
+| 4.10.0 | pass | 51 / 51 / 51 | 0 / 0 | pass | pass / pass | 27 quality + retained entries | 4/4 |
+| 5.0.0 | pass | 51 / 51 / 51 | 0 / 0 | pass | pass / pass | 27 quality + retained entries | 4/4 |
+
+Earlier temporary installations disappeared during the first campaign; mislabeled
+fallback-to-system runs are **excluded**, not compatibility evidence. Native source
+build warnings are upstream; binding warnings remain errors. Clean independent Git
+clone of `640cda40c26d429a62c05b2f8da302ba404cfdba`, no generated artifacts copied,
+passes 4.10 public/tests, AUnit 51/51 with zero failures/errors, production/fault/
+oracle/ASan/UBSan, 4/4 example, repository/configuration/shell/diff checks.
+
+## Remote campaign (in progress)
+
+PR [#4](https://github.com/zackboll/opencv_video_ada/pull/4) is open, non-draft,
+unmerged, auto-merge disabled. Implementation head `640cda40c26d429a62c05b2f8da302ba404cfdba`.
+[Initial PR run 37557392971](https://github.com/zackboll/opencv_video_ada/actions/runs/37557392971)
+passes repository-checks, Linux OpenCV 4.6.0 (51/51, zero failures/errors, full
+boundary/oracle/example), Linux sanitizers. macOS Homebrew 5.0.0 fails before AUnit
+at direct-native `undefined native eigenvalue`. Exact complete and failed logs
+retrieved; no blind rerun or scalar clamp. Diagnostic-only follow-up
+`ccd21276f2fb9a6e466ba734fb67ddf1373687f1` reports mode/index/status/value to identify
+the native backend violation. Its exact log establishes mode 3, point 1, status
+false, **NaN sentinel retained** at previous (-1000,-1000). Verified exact Homebrew
+5.0.0_5 bottle and its KleidiCV dispatch; reviewed pinned KleidiCV 26.03 source
+which skips err on that path. Production correctly rejects it. Qualification now
+records this specific undefined slot explicitly and requires whole-call OpenCV_Error
+and failure atomicity, while still requiring native zero on CPU builds. No quality
+is fabricated, no status changed, no tolerance weakened, no backend disabled.
+This is a deliberate portability restriction: unavailable-previous quality calls
+can raise on this backend, unlike the defined-zero fallback CPU result.
+
+[Pinned compatibility run 37557391208](https://github.com/zackboll/opencv_video_ada/actions/runs/37557391208)
+completed successfully on implementation head 640cda40: source-built 4.1.0, 4.10.0,
+5.0.0 each reports 51 registered/executed/passed, zero failed assertions/errors,
+full ordinary/seeded/quality boundary/faults, 27 quality plus retained native oracle
+entries, actual Video ASan/UBSan and 4/4 example. Exact complete logs retrieved and
+native versions checked. This earlier head is not claimed as a final-head run;
+final-head cross-platform and repeat pinned checks remain required.

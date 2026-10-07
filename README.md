@@ -175,6 +175,12 @@ validation and immutability apply, including differing seed bounds and Regions.
 See the [source contract](docs/pyrlk-source-contract.md#minimum-eigenvalue-source-review-task-004)
 and [qualification record](docs/task004-qualification.md).
 
+**Backend limitation:** OpenCV 5.0's KleidiCV 26.03 HAL (observed in macOS ARM64
+Homebrew 5.0.0_5) leaves quality unwritten for unavailable previous patches. The
+new API deliberately raises `OpenCV_Error` for the entire call on that path,
+instead of fabricating zero. The reviewed fallback CPU implementations write
+defined zero. This does not change ordinary tracking or failed photometric errors.
+
 ## Build
 
 Requirements:

@@ -284,6 +284,37 @@ The standard/source-built qualification exercises native fallback/optimized CPU
 paths, not arbitrary vendor HALs. A vendor must honor flag-8 semantics; finite
 but semantically wrong vendor results cannot be detected by value validation.
 
+The 5.0 bundled Carotene HAL was also inspected after the first macOS failure:
+`hal/carotene/hal/tegra_hal.hpp` 1937–1962 delegates LK when its configuration is
+supported. `hal/carotene/src/opticalflow.cpp` 75–98 writes zero for unavailable
+previous patches (at every level); 299–314 uses the same scaled expression, writes
+it before threshold/determinant rejection; 324–335 retains it on next-search
+failure. Status is optional at coarse levels; the quality Boolean is honored.
+This bundled HAL's source does cover both normal quality writes, unlike an
+arbitrary external implementation. ARM NEON accumulation and fused arithmetic
+can still differ from x86, especially for rank-deficient patches. Source alone
+does not establish runtime nonnegativity or select which Homebrew path executed.
+
+**Observed material backend difference:** macOS ARM64 Homebrew OpenCV **5.0.0_5**
+uses KleidiCV, not Carotene LK (Carotene's LK adapter is ARMv7-only). Downloaded
+the exact arm64_sonoma bottle, verified SHA256
+`1d0ac2865a6b50180fbf17b7aa3bdb284cec63baeb4021a059d6abc386cb3d00`, and inspected
+its LK invoker: it calls `kleidicv::hal::standalone_lucas_kanade_alg_u8` at 0x22248.
+OpenCV 5.0 pins KleidiCV **26.03**, archive MD5
+`b85a745bfe0e87e67e30be9533eb6b24` (`hal/kleidicv/kleidicv.cmake`). Reviewed
+`adapters/opencv/kleidicv_hal.h` 640–660 and
+`kleidicv/src/analysis/standalone_lucas_kanade_alg_common.h` 118–152.
+The latter sets status false and continues at 125–130 for an unavailable previous
+patch **without writing err**. An evaluable patch writes eigenvalue at 144–145
+before threshold rejection and next search. Exact macOS native experiment leaves
+NaN at previous (-1000,-1000), status false, level zero. Thus the all-slot CPU
+guarantee does not extend to this default ARM HAL; its affected calls raise
+OpenCV_Error atomically under the new API. We do not fill missing quality with
+zero, disable HAL globally, patch upstream, or mutate status. Direct oracle marks
+this slot explicitly unavailable; Ada/raw tests require rejection of the entire
+call. CPU implementations must still return defined zero. This is source-backed
+backend-dependent **definedness**, not relaxed metric/coordinate tolerances.
+
 ### Defensive output allocation and validation
 
 Video privately allocates continuous `N x 1 CV_32F` errors initialized to quiet

@@ -1101,17 +1101,48 @@ package body Video_Tests is
       Check_Quality_Threshold (False);
    end Quality_Threshold_Above;
 
+   function Previous_Quality_Defined return Boolean is
+      package Integers is new Ada.Text_IO.Integer_IO (Integer);
+      package Floats is new Ada.Text_IO.Float_IO (OpenCV.Float64_Value);
+      File : Ada.Text_IO.File_Type;
+      Mode, Index, Status : Integer;
+      Value : OpenCV.Float64_Value;
+      Defined : Boolean := True;
+   begin
+      Ada.Text_IO.Open (File, Ada.Text_IO.In_File,
+        Ada.Environment_Variables.Value ("VIDEO_TRACKABILITY_ORACLE", "../obj/oracle/trackability.txt"));
+      for Record_Number in 1 .. 27 loop
+         Integers.Get (File, Mode); Integers.Get (File, Index); Integers.Get (File, Status);
+         for Component in 1 .. 3 loop Floats.Get (File, Value); end loop;
+         if Status = -1 then
+            Assert (Mode = 3 and then Index = 1, "unexpected undefined native quality path");
+            Defined := False;
+         end if;
+      end loop;
+      Ada.Text_IO.Close (File);
+      return Defined;
+   end Previous_Quality_Defined;
+
    procedure Quality_Previous_Unavailable (T : in out Fixture) is
       pragma Unreferenced (T);
       Image : constant OpenCV.Core.Mat := Texture (96, 96);
       Points : constant Tracking_Point_Array := [7 => (-1000.0, -1000.0), 8 => (1000.0, 1000.0)];
-      Tracks : constant Trackability_Track_Array :=
-        Track_PyrLK_Trackability (Image, Image, Points, Quality_Options);
    begin
-      for I in Tracks'Range loop
-         Assert (not Tracks (I).Tracked and then Tracks (I).Minimum_Eigenvalue = 0.0 and then
-                   Tracks (I).Next_Point = Points (I), "unavailable previous patch semantics");
-      end loop;
+      begin
+         declare
+            Tracks : constant Trackability_Track_Array :=
+              Track_PyrLK_Trackability (Image, Image, Points, Quality_Options);
+         begin
+            Assert (Previous_Quality_Defined, "undefined native quality accepted");
+            for I in Tracks'Range loop
+               Assert (not Tracks (I).Tracked and then Tracks (I).Minimum_Eigenvalue = 0.0 and then
+                         Tracks (I).Next_Point = Points (I), "unavailable previous patch semantics");
+            end loop;
+         end;
+      exception
+         when OpenCV.OpenCV_Error =>
+            Assert (not Previous_Quality_Defined, "defined previous quality rejected");
+      end;
    end Quality_Previous_Unavailable;
 
    procedure Quality_Next_Unavailable (T : in out Fixture) is
@@ -1309,6 +1340,7 @@ package body Video_Tests is
       package Floats is new Ada.Text_IO.Float_IO (OpenCV.Float64_Value);
       File : Ada.Text_IO.File_Type;
       Compared : Natural := 0;
+      Previous_Defined : constant Boolean := Previous_Quality_Defined;
       function Close (Actual : OpenCV.Float32_Value; Expected : OpenCV.Float64_Value) return Boolean is
         (abs (OpenCV.Float64_Value (Actual) - Expected) <= 1.0E-5);
    begin
@@ -1331,6 +1363,31 @@ package body Video_Tests is
             if Mode = 2 then Options.Min_Eigenvalue_Threshold := 100.0; end if;
             if Mode = 3 then Points (6) := (-1000.0, -1000.0); end if;
             if Mode = 4 then Seeds (21) := (-1000.0, -1000.0); end if;
+            if Mode = 3 and then not Previous_Defined then
+               begin
+                  declare
+                     Tracks : constant Trackability_Track_Array :=
+                       Track_PyrLK_Trackability (Previous, Next, Points, Options);
+                     pragma Unreferenced (Tracks);
+                  begin
+                     Assert (False, "native unwritten quality accepted by Ada");
+                  end;
+               exception
+                  when OpenCV.OpenCV_Error => null;
+               end;
+               for I in 0 .. 3 loop
+                  declare
+                     Native_Mode, Index, Status : Integer;
+                     X, Y, Eigenvalue : OpenCV.Float64_Value;
+                  begin
+                     Integers.Get (File, Native_Mode); Integers.Get (File, Index); Integers.Get (File, Status);
+                     Floats.Get (File, X); Floats.Get (File, Y); Floats.Get (File, Eigenvalue);
+                     Assert (Native_Mode = 3 and then Index = I and then
+                               Status = (if I = 1 then -1 else 1), "undefined-quality oracle mapping");
+                     Compared := Compared + 1;
+                  end;
+               end loop;
+            else
             declare
                Tracks : constant Trackability_Track_Array :=
                  (if Mode = 1 or else Mode = 4 or else Mode = 8 then
@@ -1352,6 +1409,7 @@ package body Video_Tests is
                   end;
                end loop;
             end;
+            end if;
          end;
       end loop;
       Assert (Compared = 27 and then Ada.Text_IO.End_Of_File (File), "quality oracle inventory");

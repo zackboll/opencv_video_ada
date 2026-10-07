@@ -32,6 +32,13 @@ static void trackability(std::ostream &output) {
                 std::cerr << "native quality violation: version=" << CV_VERSION << " mode=" << mode
                           << " point=" << i << " status=" << int(tracked) << " eigenvalue=" << e
                           << " previous=" << f.points[i] << " seed=" << f.seeds[i] << '\n';
+                // KleidiCV 26.03 intentionally skips err for unavailable prev.
+                // Record absence explicitly; Ada/shim MUST reject the whole call.
+                if (mode == 3 && i == 1 && !tracked && std::isnan(e)) {
+                    output << mode << ' ' << i << " -1 " << f.points[i].x << ' '
+                           << f.points[i].y << " 0\n";
+                    continue;
+                }
                 throw std::runtime_error("undefined native eigenvalue");
             }
             if (mode == 0) identity.push_back(e);

@@ -64,6 +64,18 @@ void shift(const cv::Mat &source, cv::Mat &destination, int dx, int dy) {
     }
 }
 
+bool unavailable_previous_quality_is_defined() {
+    const auto image=texture(96);
+    std::vector<cv::Point2f> points{{-1000,-1000}}, dest;
+    std::vector<unsigned char> status;
+    cv::Mat values(1,1,CV_32F,cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
+    cv::calcOpticalFlowPyrLK(image,image,points,dest,status,values,{21,21},0,{3,30,.01},8);
+    check(status[0]==0,"outside previous point unexpectedly tracked");
+    const float e=values.at<float>(0);
+    check(e==0 || std::isnan(e),"unexpected unavailable previous quality");
+    return e==0;
+}
+
 void run(bool quality = false) {
     const auto track = quality ? opencv_video_track_pyr_lk_min_eigenvalues : opencv_video_track_pyr_lk;
     auto previous = matrix(64,64,OPENCV_CORE_DEPTH_UINT8,1);
@@ -215,9 +227,16 @@ void run(bool quality = false) {
 #endif
     output(points.get()).at<cv::Vec2f>(1,0)=cv::Vec2f(-100,-100);
     output(points.get()).at<cv::Vec2f>(3,0)=cv::Vec2f(200,200);
-    check(call(previous.get(),next.get(),points.get(),next_points.get(),status.get(),error.get())==OPENCV_VIDEO_OK,
-          "mixed outside points rejected");
-    for (int i : {1,3}) {
+    const auto outside_code=call(previous.get(),next.get(),points.get(),next_points.get(),status.get(),error.get());
+    const bool missing_quality=quality && !unavailable_previous_quality_is_defined();
+    check(outside_code==(missing_quality ? OPENCV_VIDEO_ERROR_OPENCV : OPENCV_VIDEO_OK),
+          "mixed outside point result differs from native definedness");
+    if (missing_quality) {
+        check(cv::norm(before_next,output(next_points.get()),cv::NORM_INF)==0 &&
+              cv::norm(before_status,output(status.get()),cv::NORM_INF)==0 &&
+              cv::norm(before_error,output(error.get()),cv::NORM_INF)==0,"undefined quality not atomic");
+    }
+    for (int i : {1,3}) if (!missing_quality) {
         check(output(status.get()).at<unsigned char>(i,0)==0 &&
               output(next_points.get()).at<cv::Vec2f>(i,0)==output(points.get()).at<cv::Vec2f>(i,0) &&
               output(error.get()).at<float>(i,0)==0, "failed native output not normalized");
@@ -373,8 +392,18 @@ void run_seeded(bool quality = false) {
     output(seeds.get()).at<cv::Point2f>(1,0)={-100,-100};
     output(seeds.get()).at<cv::Point2f>(2,0)={536870912.0f,-536870912.0f};
     output(points.get()).at<cv::Point2f>(3,0)={-100,-100};
-    valid();
-    for (int i : {1,2,3})
+    const auto before_outside_result=output(result.get()).clone();
+    const auto before_outside_status=output(status.get()).clone();
+    const auto before_outside_error=output(error.get()).clone();
+    const bool missing_quality=quality && !unavailable_previous_quality_is_defined();
+    const auto outside_code=call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),error.get());
+    check(outside_code==(missing_quality ? OPENCV_VIDEO_ERROR_OPENCV : OPENCV_VIDEO_OK),
+          "seeded undefined-quality contract");
+    if (missing_quality)
+        check(cv::norm(before_outside_result,output(result.get()),cv::NORM_INF)==0 &&
+              cv::norm(before_outside_status,output(status.get()),cv::NORM_INF)==0 &&
+              cv::norm(before_outside_error,output(error.get()),cv::NORM_INF)==0,"seeded undefined quality not atomic");
+    for (int i : {1,2,3}) if (!missing_quality)
         check(output(status.get()).at<unsigned char>(i,0)==0 &&
               output(result.get()).at<cv::Point2f>(i,0)==output(points.get()).at<cv::Point2f>(i,0) &&
               (quality ? output(error.get()).at<float>(i,0)>=0 : output(error.get()).at<float>(i,0)==0),
@@ -383,6 +412,7 @@ void run_seeded(bool quality = false) {
     // assignment; the shim must not read native failed-slot storage.
     output(previous.get()).setTo(cv::Scalar(0));
     output(next.get()).setTo(cv::Scalar(0));
+    output(points.get()).at<cv::Point2f>(3,0)=fixtures[3];
     valid();
     for (int i=0; i<4; ++i)
         check(output(status.get()).at<unsigned char>(i,0)==0 &&
@@ -426,7 +456,6 @@ void run_quality() {
             21,21,0,30,.01,f.threshold) : opencv_video_track_pyr_lk_min_eigenvalues(
             previous.get(),next.get(),points.get(),result.get(),status.get(),values.get(),
             21,21,0,30,.01,f.threshold);
-        check(code==OPENCV_VIDEO_OK,"quality boundary call failed");
         cv::Mat dest=output(seeds.get()).clone(), native_status;
         cv::Mat eigenvalues(int(f.points.size()),1,CV_32F,
                             cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
@@ -435,6 +464,13 @@ void run_quality() {
             {21,21},0,{3,30,.01},cv::OPTFLOW_LK_GET_MIN_EIGENVALS |
             (f.seeded ? cv::OPTFLOW_USE_INITIAL_FLOW : 0),f.threshold);
         check(storage==eigenvalues.data,"native sentinel storage not reused");
+        if (mode==3 && std::isnan(eigenvalues.at<float>(1))) {
+            check(code==OPENCV_VIDEO_ERROR_OPENCV,"unwritten HAL quality was exposed");
+            check(output(result.get()).rows==1 && output(status.get()).rows==1 &&
+                  output(values.get()).rows==1,"unwritten HAL quality published partial outputs");
+            continue;
+        }
+        check(code==OPENCV_VIDEO_OK,"quality boundary call failed");
         check(cv::norm(native_status,output(status.get()),cv::NORM_INF)==0 &&
               cv::norm(eigenvalues,output(values.get()),cv::NORM_INF)<1e-5,
               "quality shim differs from direct flag-8/12 oracle");
