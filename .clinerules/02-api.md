@@ -9,5 +9,9 @@ The bootstrap implements only sparse pyramidal Lucas-Kanade tracking:
 
 Task 002 adds only caller-supplied Float32 next-point predictions through a typed
 seeded overload. Do not broaden it into Farneback, ECC, KalmanFilter, CamShift,
-meanShift, UMat/OpenCL, prebuilt pyramids, minimum-eigenvalue error mode, VideoIO,
+meanShift, UMat/OpenCL, prebuilt pyramids, VideoIO,
 feature detection, Calib3D, navigation fusion, or estimator policy.
+
+Task 003 adds pure Ada forward/backward diagnostics. Task 004 adds a separate
+minimum-eigenvalue trackability result/API, never changes Point_Track.Error and
+never exposes a raw flags word.

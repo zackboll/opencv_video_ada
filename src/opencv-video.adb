@@ -108,13 +108,23 @@ package body OpenCV.Video is
       end return;
    end Point_Matrix;
 
+   --  Private transport values; Scalar is never a public Point_Track.Error.
+   type Native_Track is record
+      Previous_Point : OpenCV.Float32_Point := (0.0, 0.0);
+      Next_Point     : OpenCV.Float32_Point := (0.0, 0.0);
+      Tracked        : Boolean := False;
+      Scalar         : OpenCV.Float32_Value := 0.0;
+   end record;
+   type Native_Track_Array is array (Positive range <>) of Native_Track;
+
    function Track_Internal
      (Previous_Image      : OpenCV.Core.Mat;
       Next_Image          : OpenCV.Core.Mat;
       Points              : Tracking_Point_Array;
       Initial_Next_Points : Tracking_Point_Array;
       Seeded              : Boolean;
-      Options             : PyrLK_Options) return Point_Track_Array
+      Options             : PyrLK_Options;
+      Quality             : Boolean := False) return Native_Track_Array
    is
       Point_Input : OpenCV.Core.Mat;
       Seed_Input  : OpenCV.Core.Mat;
@@ -131,29 +141,53 @@ package body OpenCV.Video is
                      procedure Error_Callback (Error_Handle : Bridge.Output_Mat_Handle) is
                         procedure Seed_Callback (Seed_Handle : Bridge.Input_Mat_Handle) is
                         begin
-                           Code := C.Track_PyrLK_Seeded
-                             (Previous_Handle, Next_Handle, Point_Handle, Seed_Handle,
-                              Next_Point_Handle, Status_Handle, Error_Handle,
-                              Interfaces.Integer_32 (Options.Window_Size.Width),
-                              Interfaces.Integer_32 (Options.Window_Size.Height),
-                              Interfaces.Integer_32 (Options.Max_Level),
-                              Interfaces.Integer_32 (Options.Maximum_Iterations),
-                              Interfaces.C.double (Options.Epsilon),
-                              Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                           if Quality then
+                              Code := C.Track_PyrLK_Seeded_Quality
+                                (Previous_Handle, Next_Handle, Point_Handle, Seed_Handle,
+                                 Next_Point_Handle, Status_Handle, Error_Handle,
+                                 Interfaces.Integer_32 (Options.Window_Size.Width),
+                                 Interfaces.Integer_32 (Options.Window_Size.Height),
+                                 Interfaces.Integer_32 (Options.Max_Level),
+                                 Interfaces.Integer_32 (Options.Maximum_Iterations),
+                                 Interfaces.C.double (Options.Epsilon),
+                                 Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                           else
+                              Code := C.Track_PyrLK_Seeded
+                                (Previous_Handle, Next_Handle, Point_Handle, Seed_Handle,
+                                 Next_Point_Handle, Status_Handle, Error_Handle,
+                                 Interfaces.Integer_32 (Options.Window_Size.Width),
+                                 Interfaces.Integer_32 (Options.Window_Size.Height),
+                                 Interfaces.Integer_32 (Options.Max_Level),
+                                 Interfaces.Integer_32 (Options.Maximum_Iterations),
+                                 Interfaces.C.double (Options.Epsilon),
+                                 Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                           end if;
                         end Seed_Callback;
                      begin
                         if Seeded then
                            Bridge.With_Input_Handle (Seed_Input, Seed_Callback'Access);
                         else
-                           Code := C.Track_PyrLK
-                             (Previous_Handle, Next_Handle, Point_Handle,
-                              Next_Point_Handle, Status_Handle, Error_Handle,
-                              Interfaces.Integer_32 (Options.Window_Size.Width),
-                              Interfaces.Integer_32 (Options.Window_Size.Height),
-                              Interfaces.Integer_32 (Options.Max_Level),
-                              Interfaces.Integer_32 (Options.Maximum_Iterations),
-                              Interfaces.C.double (Options.Epsilon),
-                              Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                           if Quality then
+                              Code := C.Track_PyrLK_Quality
+                                (Previous_Handle, Next_Handle, Point_Handle,
+                                 Next_Point_Handle, Status_Handle, Error_Handle,
+                                 Interfaces.Integer_32 (Options.Window_Size.Width),
+                                 Interfaces.Integer_32 (Options.Window_Size.Height),
+                                 Interfaces.Integer_32 (Options.Max_Level),
+                                 Interfaces.Integer_32 (Options.Maximum_Iterations),
+                                 Interfaces.C.double (Options.Epsilon),
+                                 Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                           else
+                              Code := C.Track_PyrLK
+                                (Previous_Handle, Next_Handle, Point_Handle,
+                                 Next_Point_Handle, Status_Handle, Error_Handle,
+                                 Interfaces.Integer_32 (Options.Window_Size.Width),
+                                 Interfaces.Integer_32 (Options.Window_Size.Height),
+                                 Interfaces.Integer_32 (Options.Max_Level),
+                                 Interfaces.Integer_32 (Options.Maximum_Iterations),
+                                 Interfaces.C.double (Options.Epsilon),
+                                 Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                           end if;
                         end if;
                      end Error_Callback;
                   begin
@@ -183,7 +217,7 @@ package body OpenCV.Video is
       end if;
 
       if Points'Length = 0 then
-         return Result : Point_Track_Array (Points'Range) do
+         return Result : Native_Track_Array (Points'Range) do
             null;
          end return;
       end if;
@@ -207,7 +241,7 @@ package body OpenCV.Video is
          raise OpenCV.OpenCV_Error with "Invalid native PyrLK output schema";
       end if;
 
-      return Result : Point_Track_Array (Points'Range) do
+      return Result : Native_Track_Array (Points'Range) do
          for I in Result'Range loop
             declare
                Row : constant Natural := I - Points'First;
@@ -218,6 +252,12 @@ package body OpenCV.Video is
                end if;
                Result (I).Previous_Point := Points (I);
                Result (I).Tracked := Flag = 1;
+               if Quality then
+                  Result (I).Scalar := Float_Access.Get (Errors, Row, 0);
+                  if not Is_Finite (Result (I).Scalar) or else Result (I).Scalar < 0.0 then
+                     raise OpenCV.OpenCV_Error with "Invalid native PyrLK minimum eigenvalue";
+                  end if;
+               end if;
                if Result (I).Tracked then
                   declare
                      Native_Point : constant Vec2.Vector := Vec2_Access.Get (Next_Points, Row, 0);
@@ -229,16 +269,38 @@ package body OpenCV.Video is
                         raise OpenCV.OpenCV_Error with "PyrLK produced an invalid successful result";
                      end if;
                      Result (I).Next_Point := (X => Native_Point (0), Y => Native_Point (1));
-                     Result (I).Error := Native_Error;
+                     Result (I).Scalar := Native_Error;
                   end;
                else
                   Result (I).Next_Point := Points (I);
-                  Result (I).Error := 0.0;
+                  if not Quality then
+                     Result (I).Scalar := 0.0;
+                  end if;
                end if;
             end;
          end loop;
       end return;
    end Track_Internal;
+
+   function Photometric_Results (Native : Native_Track_Array) return Point_Track_Array is
+   begin
+      return Result : Point_Track_Array (Native'Range) do
+         for I in Native'Range loop
+            Result (I) := (Native (I).Previous_Point, Native (I).Next_Point,
+                           Native (I).Tracked, Native (I).Scalar);
+         end loop;
+      end return;
+   end Photometric_Results;
+
+   function Quality_Results (Native : Native_Track_Array) return Trackability_Track_Array is
+   begin
+      return Result : Trackability_Track_Array (Native'Range) do
+         for I in Native'Range loop
+            Result (I) := (Native (I).Previous_Point, Native (I).Next_Point,
+                           Native (I).Tracked, Native (I).Scalar);
+         end loop;
+      end return;
+   end Quality_Results;
 
    function Track_PyrLK
      (Previous_Image : OpenCV.Core.Mat;
@@ -246,7 +308,8 @@ package body OpenCV.Video is
       Points         : Tracking_Point_Array;
       Options        : PyrLK_Options := (others => <>)) return Point_Track_Array is
    begin
-      return Track_Internal (Previous_Image, Next_Image, Points, [], False, Options);
+      return Photometric_Results
+         (Track_Internal (Previous_Image, Next_Image, Points, [], False, Options));
    end Track_PyrLK;
 
    function Track_PyrLK
@@ -256,9 +319,30 @@ package body OpenCV.Video is
       Options             : PyrLK_Options := (others => <>);
       Initial_Next_Points : Tracking_Point_Array) return Point_Track_Array is
    begin
-      return Track_Internal
-        (Previous_Image, Next_Image, Points, Initial_Next_Points, True, Options);
+      return Photometric_Results
+        (Track_Internal (Previous_Image, Next_Image, Points, Initial_Next_Points, True, Options));
    end Track_PyrLK;
+
+   function Track_PyrLK_Trackability
+     (Previous_Image : OpenCV.Core.Mat;
+      Next_Image     : OpenCV.Core.Mat;
+      Points         : Tracking_Point_Array;
+      Options        : PyrLK_Options := (others => <>)) return Trackability_Track_Array is
+   begin
+      return Quality_Results
+        (Track_Internal (Previous_Image, Next_Image, Points, [], False, Options, True));
+   end Track_PyrLK_Trackability;
+
+   function Track_PyrLK_Trackability
+     (Previous_Image      : OpenCV.Core.Mat;
+      Next_Image          : OpenCV.Core.Mat;
+      Points              : Tracking_Point_Array;
+      Options             : PyrLK_Options := (others => <>);
+      Initial_Next_Points : Tracking_Point_Array) return Trackability_Track_Array is
+   begin
+      return Quality_Results
+        (Track_Internal (Previous_Image, Next_Image, Points, Initial_Next_Points, True, Options, True));
+   end Track_PyrLK_Trackability;
 
    procedure Validate (Options : Forward_Backward_Options) is
    begin

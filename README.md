@@ -87,7 +87,8 @@ See [Task 002](docs/tasks/002-initial-flow-seeding.md) and its
 example is retained; the focused AUnit and independent native oracle demonstrate
 the distinguishing seeded fixture without another example executable.
 
-LK minimum-eigenvalue output mode, prebuilt pyramids and UMat remain excluded.
+Prebuilt pyramids and UMat remain excluded. Minimum-eigenvalue output is available
+only through the distinct Task 004 trackability API below.
 
 ### Forward/backward consistency diagnostics (Task 003)
 
@@ -141,6 +142,38 @@ ambiguous repeated patches can still agree in both directions.
 See [Task 003](docs/tasks/003-forward-backward-consistency.md) and its
 [qualification record](docs/task003-qualification.md) for arithmetic bounds,
 real inconsistent fixtures, mapping evidence and native version results.
+
+### Minimum-eigenvalue trackability (Task 004)
+
+```ada
+Quality := OpenCV.Video.Track_PyrLK_Trackability
+  (Previous_Image => Previous,
+   Next_Image     => Current,
+   Points         => Points);
+--  Or supply Initial_Next_Points => Predictions, with optional typed Options.
+```
+
+The distinct `Trackability_Track_Array` preserves `Points'Range` and contains
+`Previous_Point`, `Next_Point`, `Tracked`, and **`Minimum_Eigenvalue`**, not `Error`.
+Native flags are 8 (unseeded) or 12 (seeded); no raw flags interface is exposed.
+`Point_Track` and all existing ordinary/forward-backward operations are unchanged:
+**`Point_Track.Error` always means successful mean L1 photometric patch error.**
+
+The new metric is local LK conditioning of the **previous-image** patch, normalized
+by window pixel count. Higher values generally indicate stronger two-dimensional
+gradient structure. It is not probability, match confidence, reprojection error,
+photometric error, or proof of correct correspondence; no universal application
+threshold is prescribed. All returned values are finite nonnegative Float32.
+
+Quality is independent of status: threshold rejection can retain a positive
+eigenvalue, and a strong previous patch can retain quality after next-search
+failure. An unavailable previous patch returns zero on the reviewed CPU path.
+Every failed `Next_Point` is still the original point. The shim sentinel-initializes
+private quality storage and rejects invalid/unwritten native values atomically,
+never clamps them or silently changes status. Existing images/options/points/seeds
+validation and immutability apply, including differing seed bounds and Regions.
+See the [source contract](docs/pyrlk-source-contract.md#minimum-eigenvalue-source-review-task-004)
+and [qualification record](docs/task004-qualification.md).
 
 ## Build
 

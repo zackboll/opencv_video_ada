@@ -64,7 +64,8 @@ void shift(const cv::Mat &source, cv::Mat &destination, int dx, int dy) {
     }
 }
 
-void run() {
+void run(bool quality = false) {
+    const auto track = quality ? opencv_video_track_pyr_lk_min_eigenvalues : opencv_video_track_pyr_lk;
     auto previous = matrix(64,64,OPENCV_CORE_DEPTH_UINT8,1);
     auto next = matrix(64,64,OPENCV_CORE_DEPTH_UINT8,1);
     auto points = matrix(4,1,OPENCV_CORE_DEPTH_FLOAT32,2);
@@ -77,7 +78,7 @@ void run() {
     const cv::Vec2f fixtures[] = {{20,20},{32,24},{42,35},{26,45}};
     for (int i=0; i<4; ++i) output(points.get()).at<cv::Vec2f>(i,0) = fixtures[i];
 
-    check(opencv_video_track_pyr_lk(previous.get(), next.get(), points.get(),
+    check(track(previous.get(), next.get(), points.get(),
           next_points.get(), status.get(), error.get(), 21,21,3,30,0.01,1e-4) == OPENCV_VIDEO_OK,
           "PyrLK raw boundary failed");
     check(output(next_points.get()).type() == CV_32FC2 && output(next_points.get()).rows == 4,
@@ -97,7 +98,8 @@ void run() {
     // Compare actual shim output to a direct native call on identical storage.
     cv::Mat oracle_next, oracle_status, oracle_error;
     cv::calcOpticalFlowPyrLK(output(previous.get()), output(next.get()), output(points.get()),
-                            oracle_next, oracle_status, oracle_error);
+                            oracle_next, oracle_status, oracle_error, {21,21},3,{3,30,.01},
+                            quality ? cv::OPTFLOW_LK_GET_MIN_EIGENVALS : 0);
     check(cv::norm(oracle_next, output(next_points.get()), cv::NORM_INF) < 1e-5 &&
           cv::norm(oracle_status, output(status.get()), cv::NORM_INF) == 0 &&
           cv::norm(oracle_error, output(error.get()), cv::NORM_INF) < 1e-5,
@@ -106,7 +108,7 @@ void run() {
     const cv::Mat before_next = output(next_points.get()).clone();
     const cv::Mat before_status = output(status.get()).clone();
     const cv::Mat before_error = output(error.get()).clone();
-    check(opencv_video_track_pyr_lk(previous.get(), next.get(), points.get(),
+    check(track(previous.get(), next.get(), points.get(),
           next_points.get(), status.get(), error.get(), 0,21,3,30,0.01,1e-4) ==
           OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "zero-width window accepted");
     check(cv::norm(before_next, output(next_points.get()), cv::NORM_INF) == 0 &&
@@ -114,32 +116,32 @@ void run() {
           cv::norm(before_error, output(error.get()), cv::NORM_INF) == 0,
           "failed call modified published outputs");
 
-    check(opencv_video_track_pyr_lk(nullptr,next.get(),points.get(),next_points.get(),status.get(),error.get(),
+    check(track(nullptr,next.get(),points.get(),next_points.get(),status.get(),error.get(),
           21,21,3,30,0.01,1e-4) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
           "null previous image accepted");
-    check(opencv_video_track_pyr_lk(previous.get(),next.get(),points.get(),nullptr,status.get(),error.get(),
+    check(track(previous.get(),next.get(),points.get(),nullptr,status.get(),error.get(),
           21,21,3,30,0.01,1e-4) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
           "null output handle accepted");
 
     for (double bad : {0.0, -1.0, std::numeric_limits<double>::infinity(),
                        std::numeric_limits<double>::quiet_NaN()}) {
-        check(opencv_video_track_pyr_lk(previous.get(),next.get(),points.get(),next_points.get(),status.get(),error.get(),
+        check(track(previous.get(),next.get(),points.get(),next_points.get(),status.get(),error.get(),
               21,21,3,30,bad,1e-4) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
               "invalid epsilon accepted");
     }
     for (double bad : {-1.0, std::numeric_limits<double>::infinity(),
                        std::numeric_limits<double>::quiet_NaN()}) {
-        check(opencv_video_track_pyr_lk(previous.get(),next.get(),points.get(),next_points.get(),status.get(),error.get(),
+        check(track(previous.get(),next.get(),points.get(),next_points.get(),status.get(),error.get(),
               21,21,3,30,0.01,bad) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
               "invalid eigenvalue threshold accepted");
     }
 
     auto wrong_depth = matrix(64,64,OPENCV_CORE_DEPTH_FLOAT32,1);
-    check(opencv_video_track_pyr_lk(wrong_depth.get(),next.get(),points.get(),next_points.get(),status.get(),error.get(),
+    check(track(wrong_depth.get(),next.get(),points.get(),next_points.get(),status.get(),error.get(),
           21,21,3,30,0.01,1e-4) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
           "wrong image depth accepted");
     auto wrong_points = matrix(4,1,OPENCV_CORE_DEPTH_FLOAT64,2);
-    check(opencv_video_track_pyr_lk(previous.get(),next.get(),wrong_points.get(),next_points.get(),status.get(),error.get(),
+    check(track(previous.get(),next.get(),wrong_points.get(),next_points.get(),status.get(),error.get(),
           21,21,3,30,0.01,1e-4) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
           "wrong point depth accepted");
 
@@ -148,7 +150,7 @@ void run() {
                     opencv_core_mat_handle *s, opencv_core_mat_handle *e,
                     int w=21, int h=21, int level=3, int count=30,
                     double eps=0.01, double eig=1e-4) {
-        return opencv_video_track_pyr_lk(a,b,p,q,s,e,w,h,level,count,eps,eig);
+        return track(a,b,p,q,s,e,w,h,level,count,eps,eig);
     };
     auto invalid = [&](opencv_video_status code) {
         check(code == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "invalid boundary argument accepted");
@@ -162,6 +164,13 @@ void run() {
         invalid(call(slot==0?nullptr:previous.get(),slot==1?nullptr:next.get(),
                      slot==2?nullptr:points.get(),slot==3?nullptr:next_points.get(),
                      slot==4?nullptr:status.get(),slot==5?nullptr:error.get()));
+    for (auto *input : {previous.get(),next.get(),points.get()}) {
+        invalid(call(previous.get(),next.get(),points.get(),input,status.get(),error.get()));
+        invalid(call(previous.get(),next.get(),points.get(),next_points.get(),input,error.get()));
+        invalid(call(previous.get(),next.get(),points.get(),next_points.get(),status.get(),input));
+    }
+    invalid(call(previous.get(),next.get(),points.get(),next_points.get(),status.get(),next_points.get()));
+    invalid(call(previous.get(),next.get(),points.get(),next_points.get(),status.get(),status.get()));
     invalid(call(previous.get(),next.get(),points.get(),next_points.get(),next_points.get(),error.get()));
     invalid(call(previous.get(),next.get(),points.get(),previous.get(),status.get(),error.get()));
     auto wrong_channels = matrix(64,64,OPENCV_CORE_DEPTH_UINT8,3);
@@ -220,9 +229,10 @@ void run() {
     check(std::strlen(opencv_video_last_error())==0,"stale success diagnostic");
 
     std::cout << "PASS: Video PyrLK raw boundary on "
-              << opencv_video_native_version() << " / " << opencv_video_native_backend() << '\n';
+              << (quality ? "quality " : "photometric ") << opencv_video_native_version() << " / " << opencv_video_native_backend() << '\n';
 }
-void run_seeded() {
+void run_seeded(bool quality = false) {
+    const auto track = quality ? opencv_video_track_pyr_lk_seeded_min_eigenvalues : opencv_video_track_pyr_lk_seeded;
     auto previous = matrix(96,96,OPENCV_CORE_DEPTH_UINT8,1);
     auto next = matrix(96,96,OPENCV_CORE_DEPTH_UINT8,1);
     auto points = matrix(4,1,OPENCV_CORE_DEPTH_FLOAT32,2);
@@ -244,7 +254,7 @@ void run_seeded() {
                     const opencv_core_mat_handle *p, const opencv_core_mat_handle *seed,
                     opencv_core_mat_handle *q, opencv_core_mat_handle *s, opencv_core_mat_handle *e,
                     int level=0, int w=21, double eps=.01) {
-        return opencv_video_track_pyr_lk_seeded(a,b,p,seed,q,s,e,w,21,level,30,eps,1e-4);
+        return track(a,b,p,seed,q,s,e,w,21,level,30,eps,1e-4);
     };
     auto valid = [&]() {
         check(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),error.get())
@@ -255,7 +265,7 @@ void run_seeded() {
     cv::calcOpticalFlowPyrLK(output(previous.get()),output(next.get()),output(points.get()),
                             oracle_next,oracle_status,oracle_error,cv::Size(21,21),0,
                             cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS,30,.01),
-                            cv::OPTFLOW_USE_INITIAL_FLOW);
+                            cv::OPTFLOW_USE_INITIAL_FLOW | (quality ? cv::OPTFLOW_LK_GET_MIN_EIGENVALS : 0));
     check(cv::norm(oracle_next,output(result.get()),cv::NORM_INF)<1e-5 &&
           cv::norm(oracle_status,output(status.get()),cv::NORM_INF)==0 &&
           cv::norm(oracle_error,output(error.get()),cv::NORM_INF)<1e-5,
@@ -299,6 +309,14 @@ void run_seeded() {
     check(!output(strided.get()).isContinuous(), "seed stride fixture continuous");
     for (auto *seed : {wrong_count.get(),wrong_depth.get(),wrong_channels.get(),wrong_shape.get(),strided.get()})
         invalid(call(previous.get(),next.get(),points.get(),seed,result.get(),status.get(),error.get()));
+    auto bad_image_depth = matrix(96,96,OPENCV_CORE_DEPTH_FLOAT32,1);
+    auto bad_image_channels = matrix(96,96,OPENCV_CORE_DEPTH_UINT8,3);
+    auto bad_image_geometry = matrix(95,96,OPENCV_CORE_DEPTH_UINT8,1);
+    auto empty_image = matrix(0,0,OPENCV_CORE_DEPTH_UINT8,1);
+    for (auto *image : {bad_image_depth.get(),bad_image_channels.get(),bad_image_geometry.get(),empty_image.get()})
+        invalid(call(image,next.get(),points.get(),seeds.get(),result.get(),status.get(),error.get()));
+    for (auto *p : {wrong_depth.get(),wrong_channels.get(),wrong_shape.get(),strided.get()})
+        invalid(call(previous.get(),next.get(),p,seeds.get(),result.get(),status.get(),error.get()));
     invalid(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),error.get(),31));
     invalid(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),error.get(),0,0));
     invalid(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),error.get(),0,21,
@@ -309,6 +327,9 @@ void run_seeded() {
             output(seeds.get()).at<cv::Vec2f>(0,0)[component]=bad;
             invalid(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),error.get()));
             output(seeds.get())=saved_seeds.clone();
+            output(points.get()).at<cv::Vec2f>(0,0)[component]=bad;
+            invalid(call(previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),error.get()));
+            output(points.get()).at<cv::Point2f>(0,0)=fixtures[0];
         }
     }
 #ifdef OPENCV_VIDEO_TEST_FAULTS
@@ -356,7 +377,8 @@ void run_seeded() {
     for (int i : {1,2,3})
         check(output(status.get()).at<unsigned char>(i,0)==0 &&
               output(result.get()).at<cv::Point2f>(i,0)==output(points.get()).at<cv::Point2f>(i,0) &&
-              output(error.get()).at<float>(i,0)==0,"failed seeded result not normalized");
+              (quality ? output(error.get()).at<float>(i,0)>=0 : output(error.get()).at<float>(i,0)==0),
+              "failed seeded result not normalized");
     // A low-eigenvalue failure can skip both seeded-patch processing and err
     // assignment; the shim must not read native failed-slot storage.
     output(previous.get()).setTo(cv::Scalar(0));
@@ -381,7 +403,57 @@ void run_seeded() {
     check(call(previous.get(),next.get(),empty.get(),empty.get(),result.get(),status.get(),error.get())
           == OPENCV_VIDEO_OK && output(result.get()).empty() && output(status.get()).empty() &&
           output(error.get()).empty(), "seeded empty pair failed");
-    std::cout << "PASS: seeded actual-shim/Core boundary, oracle, validation, aliases and atomicity\n";
+    std::cout << (quality ? "quality " : "photometric ") << "PASS: seeded actual-shim/Core boundary, oracle, validation, aliases and atomicity\n";
+}
+void run_quality() {
+    for (int mode=0; mode<9; ++mode) {
+        const auto f=quality_fixture(mode);
+        auto previous=matrix(96,96,OPENCV_CORE_DEPTH_UINT8,1);
+        auto next=matrix(96,96,OPENCV_CORE_DEPTH_UINT8,1);
+        auto points=matrix(int(f.points.size()),1,OPENCV_CORE_DEPTH_FLOAT32,2);
+        auto seeds=matrix(int(f.seeds.size()),1,OPENCV_CORE_DEPTH_FLOAT32,2);
+        auto result=matrix(1,1,OPENCV_CORE_DEPTH_FLOAT32,2);
+        auto status=matrix(1,1,OPENCV_CORE_DEPTH_UINT8,1);
+        auto values=matrix(1,1,OPENCV_CORE_DEPTH_FLOAT32,1);
+        output(previous.get())=f.previous;
+        output(next.get())=f.next;
+        for (int i=0;i<int(f.points.size());++i) {
+            output(points.get()).at<cv::Point2f>(i)=f.points[i];
+            output(seeds.get()).at<cv::Point2f>(i)=f.seeds[i];
+        }
+        const auto code=f.seeded ? opencv_video_track_pyr_lk_seeded_min_eigenvalues(
+            previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),values.get(),
+            21,21,0,30,.01,f.threshold) : opencv_video_track_pyr_lk_min_eigenvalues(
+            previous.get(),next.get(),points.get(),result.get(),status.get(),values.get(),
+            21,21,0,30,.01,f.threshold);
+        check(code==OPENCV_VIDEO_OK,"quality boundary call failed");
+        cv::Mat dest=output(seeds.get()).clone(), native_status;
+        cv::Mat eigenvalues(int(f.points.size()),1,CV_32F,
+                            cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
+        const auto *storage=eigenvalues.data;
+        cv::calcOpticalFlowPyrLK(f.previous,f.next,output(points.get()),dest,native_status,eigenvalues,
+            {21,21},0,{3,30,.01},cv::OPTFLOW_LK_GET_MIN_EIGENVALS |
+            (f.seeded ? cv::OPTFLOW_USE_INITIAL_FLOW : 0),f.threshold);
+        check(storage==eigenvalues.data,"native sentinel storage not reused");
+        check(cv::norm(native_status,output(status.get()),cv::NORM_INF)==0 &&
+              cv::norm(eigenvalues,output(values.get()),cv::NORM_INF)<1e-5,
+              "quality shim differs from direct flag-8/12 oracle");
+        for (int i=0;i<int(f.points.size());++i) {
+            const float e=output(values.get()).at<float>(i);
+            const bool tracked=output(status.get()).at<unsigned char>(i)!=0;
+            check(std::isfinite(e) && e>=0,"invalid quality exposed");
+            const auto expected=tracked ? dest.at<cv::Point2f>(i) : f.points[i];
+            check(cv::norm(expected-output(result.get()).at<cv::Point2f>(i))<1e-5,
+                  "quality next-point normalization/agreement failed");
+            if (mode==0) check(tracked && e>.1f,"identity eigenvalue flag ignored");
+            if (mode==2) check(!tracked && e>.1f,"threshold quality erased");
+            if (mode==3 && i==1) check(!tracked && e==0,"previous unavailable quality");
+            if (mode==4 && i==1) check(!tracked && e>.1f,"next unavailable quality erased");
+        }
+        for (int i=0;i<int(f.seeds.size());++i)
+            check(output(seeds.get()).at<cv::Point2f>(i)==f.seeds[i],"quality seeds mutated");
+    }
+    std::cout << "PASS: 27 minimum-eigenvalue boundary/native-oracle entries, failed quality retained\n";
 }
 }  // namespace
 
@@ -389,6 +461,9 @@ int main() {
     try {
         run();
         run_seeded();
+        run(true);
+        run_seeded(true);
+        run_quality();
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "FAIL: " << error.what() << '\n';

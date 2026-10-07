@@ -1,4 +1,4 @@
-# PyrLK portable source contract (Tasks 001 and 002)
+# PyrLK portable source contract (Tasks 001, 002 and 004)
 
 ## Evidence
 
@@ -220,3 +220,120 @@ it does not conceal convergence differences. This rejects both an ignored flag
 and an implementation that merely returns the seed. AUnit checks the same fixture
 and actual-shim output is compared with direct native status, successful coordinates
 and errors within 1e-5 on identical inputs. Failed native errors are never compared.
+
+## Minimum-eigenvalue source review (Task 004)
+
+Reviewed the same three peeled tags above: declarations, the complete CPU invoker
+and dispatch, relevant accuracy/submat tests, `matrix.cpp`, `matrix_wrap.cpp`, and
+5.0 `modules/video/src/hal_replacement.hpp`. The upstream accuracy test passes
+`noArray()` for errors and compares successful coordinates; the submat regression
+only requires no exception. Neither proves initialization of flag-8 failed errors.
+
+| tag | flag declaration | previous unavailable | eigenvalue / rejection | output allocation |
+| --- | --- | --- | --- | --- |
+| 4.1.0 | tracking.hpp 57 (=8) | lkpyramid.cpp 214–226 | 439–455 | 1257–1263 |
+| 4.10.0 | tracking.hpp 57 (=8) | lkpyramid.cpp 218–230 | 469–485 | 1288–1294 |
+| 5.0.0 | tracking.hpp 60 (=8) | lkpyramid.cpp 167–177 | 414–430 | 1079–1085 |
+
+At each level, the invoker interpolates **previous** Scharr gradients and forms
+the symmetric normal matrix with entries `A11`, `A12`, `A22` (accumulated gradient
+products scaled by `FLT_SCALE = 1 / 2**20`). The exact native expression is:
+
+```text
+(A22 + A11 - sqrt((A11-A22)*(A11-A22) + 4*A12*A12))
+  / (2 * window_width * window_height)
+```
+
+This is the smaller eigenvalue divided by window pixel count, with native
+gradient/interpolation scaling, **not** a unitless probability or photometric
+residual. It is computed and written before comparing `minEig < minEigThreshold`
+or determinant `D < FLT_EPSILON`, and before any destination-patch iterations.
+Flag 4 selects/scales the destination prediction only; it does not change the
+previous gradients or this expression. Consequently seeded flag 12 and unseeded
+flag 8 have the same previous-patch metric at a given level, even with very
+different destination predictions/images. The last (level-zero) computation
+determines the returned metric. Normal successful output is full-resolution
+previous-patch conditioning, not quality of a matched next patch.
+
+### CPU failure paths and backend limits
+
+Every normal-return fallback-CPU point reaches one of two level-zero writes:
+
+- previous patch outside the padded usable derivative region: status zero,
+  error zero, then continue;
+- evaluable previous patch: write computed eigenvalue, then possibly reject on
+  threshold/determinant, or later fail the next-search bounds check. Those later
+  failures do **not** clear the eigenvalue. The final photometric-error branch is
+  disabled in flag-8 mode.
+
+Therefore `Tracked=False` does not imply zero quality. A high eigenvalue can
+coexist with failed next search; low-but-positive quality survives a high
+threshold. Failed nextPts remain unspecified/intermediate and are never exposed.
+Existing photometric exports still use 0/4 and discard failed errors exactly as
+before. New semantic exports use exactly 8/12; there is no public flags word.
+
+Mat inputs cannot select UMat/OpenCL; the OpenCL implementation also declines
+flag 8. 4.1/4.10 OpenVX dispatch is explicitly disabled (`CV_OVX_RUN(false,...)`).
+5.0 adds `CALL_HAL(LKOpticalFlowLevel,...)` before the CPU loop, passing the
+minimum-eigenvalue Boolean, threshold, error buffer, scaled previous points,
+destination predictions, and status only at level zero. The default HAL returns
+`NOT_IMPLEMENTED`, falling back to the reviewed CPU loop. A custom HAL returning
+OK bypasses it; other HAL error codes throw. HAL prose does not prove every
+failed slot is written. There is **no universal all-backend initialization claim**.
+The standard/source-built qualification exercises native fallback/optimized CPU
+paths, not arbitrary vendor HALs. A vendor must honor flag-8 semantics; finite
+but semantically wrong vendor results cannot be detected by value validation.
+
+### Defensive output allocation and validation
+
+Video privately allocates continuous `N x 1 CV_32F` errors initialized to quiet
+NaNs, saves its data pointer, then invokes native LK. All three CPU implementations
+call `_err.create(N,1,CV_32F,-1,true)`. MAT `OutputArray::create` delegates to
+`Mat::create` (4.1 matrix_wrap.cpp 1287–1313; 4.10 equivalent MAT branch), or
+returns immediately on a matching shape/type (5.0 matrix_wrap.cpp 1605–1632).
+`Mat::create` retains matching allocated storage: 4.1 matrix.cpp 318–333,
+4.10 659–676, 5.0 1085–1103. Thus the preinitialized slots survive allocation.
+Native experiments additionally verify pointer reuse. Video rejects replacement
+storage rather than assuming its new contents were initialized, validates schema,
+and requires **every** slot finite and nonnegative, regardless of status. An
+unwritten sentinel, NaN, infinity or negative value raises `OpenCV_Error` before
+any output publication. Float32 native storage is marshaled through Core typed
+access, with Ada finite/nonnegative checking too; no Float64 narrowing or clamp.
+The sentinel detects wholly unwritten slots; it cannot independently prove that
+a custom HAL overwrote a valid coarse-level value at the final level.
+
+The exact expression subtracts nearly equal Float32 terms for rank-deficient
+patches. Positive-semidefiniteness in real arithmetic does **not** prove native
+rounding never yields a tiny negative value; source has no clamp/guarantee. A
+cross-version sweep of 256 directional ramp combinations at integer and
+fractional points found no negatives, but is not a universal proof. The strict
+public contract deliberately rejects any negative, including roundoff, rather
+than silently changing the metric. Applications encountering such a native
+output receive an exception, not guessed zero quality.
+
+No new coordinate/window/level arithmetic is introduced: this eigenvalue
+expression already executes in ordinary mode for threshold rejection. The
+existing bounded subset remains sufficient for wrapper-controlled conversions
+and allocations, with the prior native-internal/vendor limitations unchanged.
+There is no material fallback-CPU semantic difference across these tags; SIMD,
+NEON and 5.0 HAL rounding still rule out universal bitwise equality promises.
+
+### Deterministic quality experiments and tolerances
+
+96x96 images, 21x21 window, level zero, point (48,48): a quadrant step corner
+(`255` iff row>=48 and col>=48) gives **0.73402756**, a vertical edge (`255` iff
+col>=48) gives **0**, constant 127 gives **0**, on all three local versions.
+Corner >0.5 versus edge/flat zero has a large measured margin. Tests use half
+and twice the measured corner value for rejection/success, never an ULP-sized
+margin; the rejected result retains the same eigenvalue.
+
+The retained texture's four previous points give approximately
+`0.265748, 0.197183, 0.151508, 0.501894`. Identity photometric L1 is zero while
+quality is positive, distinguishing an accidentally disabled flag 8. The seeded
+(12,7) fixture retains Task 002 refinement/consumption criteria and eigenvalues
+agree with direct flag 12. Distant next predictions fail but retain quality;
+distant previous points fail with zero. Seeds P0 versus P0+(32,20) yield the same
+previous-patch values. Same-build independent native/Ada and shim comparisons use
+1e-5 for scalar/coordinate outputs; failed next coordinates compare only after
+deterministic normalization. No numeric relationship between the two metrics is
+asserted in general. See Task 004 qualification for exact executed evidence.

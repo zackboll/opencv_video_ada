@@ -61,6 +61,38 @@ opencv_video_status opencv_video_track_pyr_lk_seeded(
     double epsilon,
     double min_eigenvalue_threshold);
 
+/* Quality exports use flags 8 and 12 respectively. Failed points normalize to
+ * previous points, but quality is preserved independently of status. Every slot
+ * must be written, finite and nonnegative; otherwise outputs remain unchanged. */
+opencv_video_status opencv_video_track_pyr_lk_min_eigenvalues(
+    const opencv_core_mat_handle *previous_image,
+    const opencv_core_mat_handle *next_image,
+    const opencv_core_mat_handle *previous_points,
+    opencv_core_mat_handle *next_points,
+    opencv_core_mat_handle *track_status,
+    opencv_core_mat_handle *minimum_eigenvalues,
+    int32_t window_width,
+    int32_t window_height,
+    int32_t max_level,
+    int32_t maximum_iterations,
+    double epsilon,
+    double min_eigenvalue_threshold);
+
+opencv_video_status opencv_video_track_pyr_lk_seeded_min_eigenvalues(
+    const opencv_core_mat_handle *previous_image,
+    const opencv_core_mat_handle *next_image,
+    const opencv_core_mat_handle *previous_points,
+    const opencv_core_mat_handle *initial_next_points,
+    opencv_core_mat_handle *next_points,
+    opencv_core_mat_handle *track_status,
+    opencv_core_mat_handle *minimum_eigenvalues,
+    int32_t window_width,
+    int32_t window_height,
+    int32_t max_level,
+    int32_t maximum_iterations,
+    double epsilon,
+    double min_eigenvalue_threshold);
+
 #ifdef __cplusplus
 }
 #endif
