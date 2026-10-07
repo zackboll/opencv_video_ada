@@ -23,6 +23,17 @@ case "$(uname -s)" in
 esac
 mkdir -p obj/oracle
 cflags=$("$pkg_config" --cflags "$package" | sed 's/-I/-isystem /g')
-"$compiler" "$@" -std=c++17 -Wall -Wextra -Wpedantic -Werror $cflags \
+case "$(uname -s)" in
+    MINGW*|MSYS*)
+        # opencv5.pc includes the MinGW CRT include root as well as opencv5.
+        # Reclassifying the compiler's own root breaks GCC include_next in
+        # cstdlib. Use the configured OpenCV-only path, as the shim build does.
+        include=$(sed -n 's/^[ ]*Include_Switch := "-I\(.*\)";/\1/p' config/opencv_video_install.gpr)
+        [ -n "$include" ] || { echo 'error: missing configured OpenCV include' >&2; exit 1; }
+        cflags="-isystem $include" ;;
+esac
+env -u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u LIBRARY_PATH \
+    -u GCC_EXEC_PREFIX -u COMPILER_PATH \
+    "$compiler" "$@" -std=c++17 -Wall -Wextra -Wpedantic -Werror $cflags \
     tests/cpp/direct_oracle.cpp $("$pkg_config" --libs "$package") -o obj/oracle/direct-oracle
 sh scripts/run_native.sh obj/oracle/direct-oracle obj/oracle/forward-backward.txt obj/oracle/trackability.txt

@@ -9,6 +9,17 @@
 #include <cstdio>
 #include <limits>
 #include <utility>
+#include <memory>
+#include <vector>
+#include <algorithm>
+
+struct opencv_video_pyramid_handle {
+    std::vector<cv::Mat> levels;
+    cv::Size window;
+    int requested = 0;
+    int available = 0;
+    cv::Size geometry;
+};
 
 #ifdef OPENCV_VIDEO_TEST_FAULTS
 void opencv_video_test_fault(int);
@@ -20,6 +31,34 @@ enum class ErrorMode { Photometric, MinimumEigenvalue };
 thread_local char g_last_error[512] = {};
 
 void clear_error() noexcept { g_last_error[0] = '\0'; }
+
+bool valid_pyramid(const opencv_video_pyramid_handle &p) {
+    if (p.window.width < 3 || p.window.width > 255 ||
+        p.window.height < 3 || p.window.height > 255 ||
+        p.requested < 0 || p.requested > 30 || p.available < 0 ||
+        p.available > p.requested || p.geometry.width <= 0 || p.geometry.height <= 0 ||
+        p.levels.size() != size_t(2 * (p.available + 1))) return false;
+    auto size = p.geometry;
+    for (int level = 0; level <= p.available; ++level) {
+        for (int member = 0; member < 2; ++member) {
+            const auto &m = p.levels[size_t(2 * level + member)];
+            if (m.empty() || m.dims != 2 || m.size() != size ||
+                m.type() != (member == 0 ? CV_8UC1 : CV_16SC2) || m.u == nullptr)
+                return false;
+            cv::Size whole;
+            cv::Point offset;
+            m.locateROI(whole, offset);
+            if (offset.x != p.window.width || offset.y != p.window.height ||
+                whole.width != size.width + 2 * p.window.width ||
+                whole.height != size.height + 2 * p.window.height) return false;
+        }
+        size = {(size.width + 1) / 2, (size.height + 1) / 2};
+        if (level < p.available &&
+            (size.width <= p.window.width || size.height <= p.window.height)) return false;
+    }
+    return p.available == p.requested ||
+        size.width <= p.window.width || size.height <= p.window.height;
+}
 
 opencv_video_status fail(opencv_video_status code, const char *message) noexcept {
     std::snprintf(g_last_error, sizeof(g_last_error), "%s", message);
@@ -61,6 +100,65 @@ extern "C" const char *opencv_video_native_backend(void) { return "video"; }
 
 extern "C" const char *opencv_video_last_error(void) { return g_last_error; }
 
+extern "C" opencv_video_status opencv_video_pyramid_create(
+    const opencv_core_mat_handle *image, int32_t width, int32_t height,
+    int32_t requested, opencv_video_pyramid_handle **out) {
+    if (out == nullptr) return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Null pyramid output");
+    *out = nullptr;
+    try {
+        clear_error();
+        const cv::Mat *source = nullptr;
+        auto code = resolve_input(image, &source, "pyramid image");
+        if (code != OPENCV_VIDEO_OK) return code;
+        if (source->empty() || source->dims != 2 || source->type() != CV_8UC1 ||
+            width < 3 || width > 255 || height < 3 || height > 255 ||
+            requested < 0 || requested > 30)
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Invalid pyramid image/options");
+        const int64_t rows = int64_t(source->rows) + 2 * height;
+        const int64_t cols = int64_t(source->cols) + 2 * width;
+        if (rows * cols > std::numeric_limits<int>::max() / 4 ||
+            source->step[0] > size_t(std::numeric_limits<int>::max() / rows))
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Unsafe pyramid arithmetic");
+        auto p = std::make_unique<opencv_video_pyramid_handle>();
+        p->window = {width, height};
+        p->requested = requested;
+        p->geometry = source->size();
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+        opencv_video_test_fault(3);
+#endif
+        p->available = cv::buildOpticalFlowPyramid(*source, p->levels, p->window,
+            requested, true, cv::BORDER_REFLECT_101, cv::BORDER_CONSTANT, false);
+        if (!valid_pyramid(*p))
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "Invalid native pyramid structure");
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+        opencv_video_test_fault(4);
+#endif
+        *out = p.release();
+        return OPENCV_VIDEO_OK;
+    } catch (const cv::Exception &e) {
+        return fail(OPENCV_VIDEO_ERROR_OPENCV, e.what());
+    } catch (const std::exception &e) {
+        return fail(OPENCV_VIDEO_ERROR_STANDARD, e.what());
+    } catch (...) {
+        return fail(OPENCV_VIDEO_ERROR_UNKNOWN, "Unknown pyramid construction exception");
+    }
+}
+
+extern "C" void opencv_video_pyramid_destroy(opencv_video_pyramid_handle *p) { delete p; }
+
+extern "C" opencv_video_status opencv_video_pyramid_metadata(
+    const opencv_video_pyramid_handle *p, int32_t *width, int32_t *height,
+    int32_t *requested, int32_t *available) {
+    clear_error();
+    if (!p || !width || !height || !requested || !available)
+        return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Null pyramid metadata argument");
+    *width = p->window.width;
+    *height = p->window.height;
+    *requested = p->requested;
+    *available = p->available;
+    return OPENCV_VIDEO_OK;
+}
+
 static opencv_video_status track_pyr_lk(
     const opencv_core_mat_handle *previous_image,
     const opencv_core_mat_handle *next_image,
@@ -76,7 +174,9 @@ static opencv_video_status track_pyr_lk(
     int32_t max_level,
     int32_t maximum_iterations,
     double epsilon,
-    double min_eigenvalue_threshold) {
+    double min_eigenvalue_threshold,
+    const opencv_video_pyramid_handle *previous_pyramid = nullptr,
+    const opencv_video_pyramid_handle *next_pyramid = nullptr) {
     try {
         clear_error();
         const cv::Mat *previous = nullptr;
@@ -87,10 +187,22 @@ static opencv_video_status track_pyr_lk(
         cv::Mat *published_status = nullptr;
         cv::Mat *published_error = nullptr;
 
-        opencv_video_status status = resolve_input(previous_image, &previous, "previous image");
-        if (status != OPENCV_VIDEO_OK) return status;
-        status = resolve_input(next_image, &next, "next image");
-        if (status != OPENCV_VIDEO_OK) return status;
+        opencv_video_status status = OPENCV_VIDEO_OK;
+        if (previous_pyramid || next_pyramid) {
+            if (!previous_pyramid || !next_pyramid ||
+                !valid_pyramid(*previous_pyramid) || !valid_pyramid(*next_pyramid) ||
+                previous_pyramid->window != cv::Size(window_width, window_height) ||
+                next_pyramid->window != cv::Size(window_width, window_height) ||
+                max_level > previous_pyramid->requested || max_level > next_pyramid->requested)
+                return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Incompatible pyramids");
+            previous = &previous_pyramid->levels[0];
+            next = &next_pyramid->levels[0];
+        } else {
+            status = resolve_input(previous_image, &previous, "previous image");
+            if (status != OPENCV_VIDEO_OK) return status;
+            status = resolve_input(next_image, &next, "next image");
+            if (status != OPENCV_VIDEO_OK) return status;
+        }
         status = resolve_input(previous_points, &points, "previous points");
         if (status != OPENCV_VIDEO_OK) return status;
         if (seeded) {
@@ -198,7 +310,13 @@ static opencv_video_status track_pyr_lk(
         opencv_video_test_fault(1);
 #endif
 
-        cv::calcOpticalFlowPyrLK(*previous, *next, *points,
+        if (previous_pyramid) {
+            cv::calcOpticalFlowPyrLK(previous_pyramid->levels, next_pyramid->levels, *points,
+                computed_next, computed_status, computed_error,
+                cv::Size(window_width, window_height),
+                std::min({max_level, previous_pyramid->available, next_pyramid->available}),
+                criteria, 0, min_eigenvalue_threshold);
+        } else cv::calcOpticalFlowPyrLK(*previous, *next, *points,
                                  computed_next, computed_status, computed_error,
                                  cv::Size(window_width, window_height), max_level,
                                  criteria, (seeded ? cv::OPTFLOW_USE_INITIAL_FLOW : 0) |
@@ -267,6 +385,18 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk(
                         ErrorMode::Photometric,
                         next_points, track_status, track_error, window_width, window_height,
                         max_level, maximum_iterations, epsilon, min_eigenvalue_threshold);
+}
+
+extern "C" opencv_video_status opencv_video_track_pyr_lk_pyramids(
+    const opencv_video_pyramid_handle *previous, const opencv_video_pyramid_handle *next,
+    const opencv_core_mat_handle *points, opencv_core_mat_handle *result,
+    opencv_core_mat_handle *status, opencv_core_mat_handle *error,
+    int32_t width, int32_t height, int32_t level, int32_t iterations,
+    double epsilon, double threshold) {
+    if (!previous || !next)
+        return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Empty pyramid");
+    return track_pyr_lk(nullptr, nullptr, points, nullptr, false, ErrorMode::Photometric,
+        result, status, error, width, height, level, iterations, epsilon, threshold, previous, next);
 }
 
 extern "C" opencv_video_status opencv_video_track_pyr_lk_seeded(

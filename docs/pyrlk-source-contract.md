@@ -1,4 +1,4 @@
-# PyrLK portable source contract (Tasks 001, 002 and 004)
+# PyrLK portable source contract (Tasks 001, 002, 004 and 005)
 
 ## Evidence
 
@@ -26,6 +26,51 @@ status-success slots, explicitly looks for NaN errors, uses external fixtures,
 and accepts a bounded number of lost/bad points. It is not our synthetic oracle.
 
 ## Actual native contract
+
+### Owned reusable pyramids (Task 005)
+
+The same three upstream tags listed above implement `buildOpticalFlowPyramid`
+in lkpyramid.cpp (4.1 starts at 698; 4.10 726–822; 5.0 669–764).
+`modules/video/src/lkpyramid.hpp` defines `cv::detail::deriv_type` as **short**,
+verified in all three source trees: native derivative depth is CV_16S, not Float32.
+For our UInt8 C1 / derivatives=true subset the vector alternates CV_8UC1 image
+and CV_16SC2 dx/dy, with exactly `2*(returned_max_level+1)` entries. Logical image
+and derivative geometry agrees at each level. Next dimensions are `(size+1)/2`;
+when either next dimension <= corresponding window dimension, the builder shrinks
+the vector and returns the current level instead of the requested maximum.
+
+Each member is an interior ROI of its own allocated padded Mat: offset equals
+window width/height and whole geometry equals interior + twice the window.
+The shim validates these exact construction invariants, nonempty 2-D/type/owned
+allocation and expected truncation before storing the object and before tracking.
+The same simple level fixtures with window 21 are source-derived: square 32/64/96/
+256 requested 3 or 30 naturally returns 0/1/2/3; requested 0 returns 0 throughout.
+Qualification records actual experiments, not just those source expectations.
+
+`SparsePyrLKOpticalFlowImpl::calc` recognizes STD_VECTOR_MAT on both sides (4.10
+1302–1356; corresponding branches in 4.1 and 5.0). Odd highest vector index,
+twice image channel count and derivative depth select stride 2. It reduces maxLevel
+to available depths. The level loop uses previous derivative entries directly
+when stride 2 is detected; only the image-only path recomputes Scharr derivatives.
+Next-side derivative entries need not be used. OpenCV copies Mat **headers** into
+local vectors; the binding passes its stored vectors directly, without rebuilding
+or deep-copying levels per call. The tracker checks ROI padding with locateROI.
+
+Task 005 deliberately builds with derivatives=true, tryReuseInputImage=false,
+BORDER_REFLECT_101 and BORDER_CONSTANT. Disabling input reuse bypasses the level-zero
+borrowed-Region assignment and always allocates/copies padded storage. copyMakeBorder
+may still consult the source parent when building level zero without BORDER_ISOLATED.
+This preserves Region border semantics; completed levels no longer depend on the
+borrowed Region/header/parent. Higher-level image and derivative borders use native
+isolated handling internally; no binding border toggle is added.
+
+The opaque owned object is **binding policy**, not a native OpenCV class. Requested
+and available levels stay distinct. Exact build/track window equality and request
+<= both requested depths are deliberately stricter compatibility policy; tracking
+uses min(request, both available depths). Sequential read-only reuse is supported,
+not a universal concurrency or speedup promise. Derivative memory is paid once per
+frame so it can become a previous frame later. Seeded/quality/composed pyramid APIs
+remain deferred. Ordinary raw APIs and the Task 004 HAL limitation are unchanged.
 
 - The Mat CPU pyramid builder asserts `depth()==CV_8U`; the tracker asserts
   corresponding pyramid sizes and types match. It handles multiple channels

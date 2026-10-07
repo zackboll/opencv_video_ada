@@ -123,6 +123,7 @@ esac
                 if override:
                     metadata = executable("chosen-pkg-config", metadata.read_text())
                 compiler = executable("g++", """
+case "$*" in *'-isystem /mock/opencv-only'*) ;; *) exit 9 ;; esac
 while [ "$#" -gt 0 ]; do
  if [ "$1" = -o ]; then
   shift
@@ -135,7 +136,8 @@ done
 exit 1
 """)
                 (root / "config/opencv_video_install.gpr").write_text(
-                    f'   Cxx_Driver := "{compiler}";\n')
+                    f'   Cxx_Driver := "{compiler}";\n'
+                    '   Include_Switch := "-I/mock/opencv-only";\n')
                 env = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}",
                            OPENCV_CORE_ALIRE_PREFIX=str(root / "core"))
                 env.pop("PKG_CONFIG", None)
