@@ -106,6 +106,32 @@ configuration/shell/diff checks on OpenCV 4.10.0. All commands exit zero.
 Final implementation tests and sanitizers repeated on 4.1.0/5.0.0 also pass,
 including all 16 new pyramid exceptions. No runtime code changed after this head.
 
-Remote qualification pending; no PR/CI pass is claimed by this initial record.
-The review gate requires all final-head PR jobs and the manual pinned matrix,
-open/non-draft/unmerged PR, auto-merge disabled, clean tree and head equality.
+PR [#5 — Add reusable owned PyrLK pyramids](https://github.com/zackboll/opencv_video_ada/pull/5)
+is open/non-draft/unmerged, auto-merge disabled.
+
+Qualification head `b93c6479a5adbebb14dfab94783acd2096224606`:
+[cross-platform run 37561653395](https://github.com/zackboll/opencv_video_ada/actions/runs/37561653395)
+passes repository-checks, linux, macos and linux-sanitizers. Exact complete logs
+retrieved: Linux packaged OpenCV 4.6.0 and macOS ARM64 Homebrew 5.0.0 each report
+59 executed/passed, zero assertion failures/unexpected errors, full native/fault/
+direct-oracle campaign and retained 4/4 example. All pyramid fixtures and metadata
+pass without per-version tolerances. macOS linkage verifies Video/Core shims,
+libc++ and absence of libstdc++. Task 004 KleidiCV sentinel/rejection remains intact.
+Linux actual-Video ASan/UBSan/leak campaign exits zero, no reported findings.
+
+[Manual pinned run 37561650975](https://github.com/zackboll/opencv_video_ada/actions/runs/37561650975)
+passes on that same head. Exact complete logs retrieved: source-built 4.1.0,
+4.10.0 and 5.0.0 **each** reports 59 registered/executed/passed, zero failures/errors,
+all metadata/raw-prebuilt/direct-native/ownership/reuse checks, retained ordinary/
+seeded/quality/composed regressions, native boundaries and injected exceptions,
+ASan/UBSan/leak checks and 4/4 example. No deterministic remote failure or blind
+rerun occurred. Upstream source-build warnings and checkout Node deprecation
+annotations are non-failing; binding warnings remain errors.
+
+This evidence-only follow-up changes no runtime code, tests or workflows. Final-head
+required PR checks and pinned compatibility are verified again at handoff, with exact
+final SHA/run URLs in the PR review-gate comment rather than claiming the earlier
+runs tested a later documentation commit. No unresolved Task 005 implementation
+issue found. The Windows harness correction awaits the policy-prescribed post-merge
+Windows run; no branch Windows pass is claimed. No main change, merge, tag, release,
+amend, rebase, force-push or auto-merge occurred.
