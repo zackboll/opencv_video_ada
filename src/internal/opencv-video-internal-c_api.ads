@@ -2,6 +2,7 @@ with Interfaces;
 with Interfaces.C;
 with Interfaces.C.Strings;
 with OpenCV.Core.Module_Interop;
+with System;
 
 package OpenCV.Video.Internal.C_API is
    subtype Status is Interfaces.Integer_32;
@@ -77,4 +78,23 @@ package OpenCV.Video.Internal.C_API is
      with Import, Convention => C, External_Name => "opencv_video_track_pyr_lk_seeded_min_eigenvalues";
 
    procedure Check (Code : Status; Operation : String);
+
+   function Pyramid_Create
+     (Image : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Width, Height, Requested : Interfaces.Integer_32;
+      Handle : access System.Address) return Status
+     with Import, Convention => C, External_Name => "opencv_video_pyramid_create";
+   procedure Pyramid_Destroy (Handle : System.Address)
+     with Import, Convention => C, External_Name => "opencv_video_pyramid_destroy";
+   function Pyramid_Metadata
+     (Handle : System.Address;
+      Width, Height, Requested, Available : access Interfaces.Integer_32) return Status
+     with Import, Convention => C, External_Name => "opencv_video_pyramid_metadata";
+   function Track_PyrLK_Pyramids
+     (Previous, Next : System.Address;
+      Points : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Next_Points, Track_Status, Track_Error : OpenCV.Core.Module_Interop.Output_Mat_Handle;
+      Width, Height, Level, Iterations : Interfaces.Integer_32;
+      Epsilon, Threshold : Interfaces.C.double) return Status
+     with Import, Convention => C, External_Name => "opencv_video_track_pyr_lk_pyramids";
 end OpenCV.Video.Internal.C_API;

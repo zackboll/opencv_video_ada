@@ -20,6 +20,41 @@ package body OpenCV.Video is
    use type OpenCV.Float32_Value;
    use type OpenCV.Float64_Value;
    use type Interfaces.Unsigned_8;
+   use type System.Address;
+
+   overriding procedure Finalize (Pyramid : in out PyrLK_Pyramid) is
+   begin
+      C.Pyramid_Destroy (Pyramid.Handle);
+      Pyramid.Handle := System.Null_Address;
+   end Finalize;
+
+   function Is_Empty (Pyramid : PyrLK_Pyramid) return Boolean is
+     (Pyramid.Handle = System.Null_Address);
+
+   procedure Require_Pyramid (Pyramid : PyrLK_Pyramid) is
+   begin
+      if Pyramid.Is_Empty then
+         raise OpenCV.OpenCV_Error with "Empty PyrLK pyramid";
+      end if;
+   end Require_Pyramid;
+
+   function Requested_Max_Level (Pyramid : PyrLK_Pyramid) return Natural is
+   begin
+      Require_Pyramid (Pyramid);
+      return Pyramid.Requested;
+   end Requested_Max_Level;
+
+   function Available_Max_Level (Pyramid : PyrLK_Pyramid) return Natural is
+   begin
+      Require_Pyramid (Pyramid);
+      return Pyramid.Available;
+   end Available_Max_Level;
+
+   function Build_Window_Size (Pyramid : PyrLK_Pyramid) return OpenCV.Size is
+   begin
+      Require_Pyramid (Pyramid);
+      return Pyramid.Window;
+   end Build_Window_Size;
 
    function Is_Finite (Value : OpenCV.Float32_Value) return Boolean is
      (Value = Value and then
@@ -89,6 +124,41 @@ package body OpenCV.Video is
       end if;
    end Validate;
 
+   function Build_PyrLK_Pyramid
+     (Image : OpenCV.Core.Mat;
+      Options : PyrLK_Pyramid_Options := (others => <>)) return PyrLK_Pyramid is
+   begin
+      Validate_Images (Image, Image);
+      Validate (PyrLK_Options'(Window_Size => Options.Window_Size,
+                              Max_Level => Options.Max_Level, others => <>));
+      return Result : PyrLK_Pyramid do
+         declare
+            Handle : aliased System.Address := System.Null_Address;
+            Width, Height, Requested, Available : aliased Interfaces.Integer_32;
+            procedure Build (Input : Bridge.Input_Mat_Handle) is
+            begin
+               C.Check (C.Pyramid_Create
+                 (Input, Interfaces.Integer_32 (Options.Window_Size.Width),
+                  Interfaces.Integer_32 (Options.Window_Size.Height),
+                  Interfaces.Integer_32 (Options.Max_Level), Handle'Access),
+                  "Video.Build_PyrLK_Pyramid");
+            end Build;
+         begin
+            Bridge.With_Input_Handle (Image, Build'Access);
+            Result.Handle := Handle;
+            C.Check (C.Pyramid_Metadata
+              (Handle, Width'Access, Height'Access, Requested'Access, Available'Access),
+              "Video.Pyramid_Metadata");
+            Result.Window := (Width => OpenCV.Size_Coordinate (Width),
+                              Height => OpenCV.Size_Coordinate (Height));
+            Result.Requested := Natural (Requested);
+            Result.Available := Natural (Available);
+            Result.Rows := Image.Rows;
+            Result.Columns := Image.Columns;
+         end;
+      end return;
+   end Build_PyrLK_Pyramid;
+
    function Point_Matrix (Points : Tracking_Point_Array) return OpenCV.Core.Mat is
    begin
       if Points'Length = 0 then
@@ -124,7 +194,9 @@ package body OpenCV.Video is
       Initial_Next_Points : Tracking_Point_Array;
       Seeded              : Boolean;
       Options             : PyrLK_Options;
-      Quality             : Boolean := False) return Native_Track_Array
+      Quality             : Boolean := False;
+      Previous_Pyramid    : System.Address := System.Null_Address;
+      Next_Pyramid        : System.Address := System.Null_Address) return Native_Track_Array
    is
       Point_Input : OpenCV.Core.Mat;
       Seed_Input  : OpenCV.Core.Mat;
@@ -167,7 +239,17 @@ package body OpenCV.Video is
                         if Seeded then
                            Bridge.With_Input_Handle (Seed_Input, Seed_Callback'Access);
                         else
-                           if Quality then
+                           if Previous_Pyramid /= System.Null_Address then
+                              Code := C.Track_PyrLK_Pyramids
+                                (Previous_Pyramid, Next_Pyramid, Point_Handle,
+                                 Next_Point_Handle, Status_Handle, Error_Handle,
+                                 Interfaces.Integer_32 (Options.Window_Size.Width),
+                                 Interfaces.Integer_32 (Options.Window_Size.Height),
+                                 Interfaces.Integer_32 (Options.Max_Level),
+                                 Interfaces.Integer_32 (Options.Maximum_Iterations),
+                                 Interfaces.C.double (Options.Epsilon),
+                                 Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                           elsif Quality then
                               Code := C.Track_PyrLK_Quality
                                 (Previous_Handle, Next_Handle, Point_Handle,
                                  Next_Point_Handle, Status_Handle, Error_Handle,
@@ -206,7 +288,9 @@ package body OpenCV.Video is
          Bridge.With_Input_Handle (Next_Image, Next_Callback'Access);
       end Previous_Callback;
    begin
-      Validate_Images (Previous_Image, Next_Image);
+      if Previous_Pyramid = System.Null_Address then
+         Validate_Images (Previous_Image, Next_Image);
+      end if;
       Validate (Points);
       Validate (Options);
       if Seeded then
@@ -291,6 +375,30 @@ package body OpenCV.Video is
          end loop;
       end return;
    end Photometric_Results;
+
+   function Track_PyrLK
+     (Previous_Pyramid : PyrLK_Pyramid;
+      Next_Pyramid : PyrLK_Pyramid;
+      Points : Tracking_Point_Array;
+      Options : PyrLK_Options := (others => <>)) return Point_Track_Array
+   is
+      Empty_Image : OpenCV.Core.Mat;
+   begin
+      Require_Pyramid (Previous_Pyramid);
+      Require_Pyramid (Next_Pyramid);
+      if Previous_Pyramid.Rows /= Next_Pyramid.Rows or else
+        Previous_Pyramid.Columns /= Next_Pyramid.Columns or else
+        Options.Window_Size /= Previous_Pyramid.Window or else
+        Options.Window_Size /= Next_Pyramid.Window or else
+        Options.Max_Level > Previous_Pyramid.Requested or else
+        Options.Max_Level > Next_Pyramid.Requested
+      then
+         raise OpenCV.OpenCV_Error with "Incompatible PyrLK pyramids/options";
+      end if;
+      return Photometric_Results (Track_Internal
+        (Empty_Image, Empty_Image, Points, [], False, Options, False,
+         Previous_Pyramid.Handle, Next_Pyramid.Handle));
+   end Track_PyrLK;
 
    function Quality_Results (Native : Native_Track_Array) return Trackability_Track_Array is
    begin

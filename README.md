@@ -181,6 +181,48 @@ new API deliberately raises `OpenCV_Error` for the entire call on that path,
 instead of fabricating zero. The reviewed fallback CPU implementations write
 defined zero. This does not change ordinary tracking or failed photometric errors.
 
+### Reusable owned PyrLK pyramids (Task 005)
+
+```ada
+declare
+   Previous_Pyramid : constant OpenCV.Video.PyrLK_Pyramid :=
+     OpenCV.Video.Build_PyrLK_Pyramid (Previous);
+   Current_Pyramid : constant OpenCV.Video.PyrLK_Pyramid :=
+     OpenCV.Video.Build_PyrLK_Pyramid (Current);
+begin
+   Tracks := OpenCV.Video.Track_PyrLK
+     (Previous_Pyramid, Current_Pyramid, Points);
+end;
+```
+
+`PyrLK_Pyramid` is a limited private, finalized **binding-owned** object, not a
+native OpenCV class or an alternative application Mat wrapper. It owns every
+image and derivative level after construction; source mutation/finalization and
+Region/parent scope exit do not invalidate it. Default objects are empty and safe
+to finalize. `Is_Empty` is valid for them; all metadata queries and tracking reject
+empty objects with `OpenCV_Error`. No level/derivative/native-handle extraction.
+
+`PyrLK_Pyramid_Options` contains only `Window_Size` (default 21x21, bounds 3..255)
+and `Max_Level` (default 3, bounds 0..30). Builds always use derivatives=true,
+reuse-input=false, `BORDER_REFLECT_101` image borders and `BORDER_CONSTANT`
+derivative borders. A strided Region's parent may contribute border pixels during
+construction, as in raw-image PyrLK; there is no `BORDER_ISOLATED` policy change.
+
+Read-only queries: `Requested_Max_Level`, `Available_Max_Level`,
+`Build_Window_Size`, `Is_Empty`. Native geometry can truncate available levels:
+tracking accepts requests <= **both requested build levels**, then uses the minimum
+of its request and both available levels. Build/track windows must match exactly
+and base geometry must agree, even for empty points. Point bounds, validation,
+photometric error and failed-value normalization retain the ordinary contract.
+
+The native tracker receives the stored vectors directly; it does not rebuild
+pyramids per call. Sequential repeated reuse and next-now/previous-later use are
+supported; general concurrent thread safety is not promised. Precomputing dx/dy
+costs memory but permits reuse when a current frame becomes previous. No universal
+speedup is claimed without measurements. Seeded, trackability and forward/backward
+pyramid overloads are deliberately deferred. See [Task 005](docs/tasks/005-reusable-pyrlk-pyramids.md)
+and its [qualification record](docs/task005-qualification.md).
+
 ## Build
 
 Requirements:
@@ -252,7 +294,7 @@ manual-only.
 
 The first slice does not bind:
 
-- `buildOpticalFlowPyramid` as a public API;
+- seeded, trackability and forward/backward prebuilt-pyramid tracking;
 - Farneback or DIS dense optical flow;
 - ECC registration;
 - KalmanFilter;

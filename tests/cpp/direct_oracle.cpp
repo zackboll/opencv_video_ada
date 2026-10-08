@@ -124,6 +124,35 @@ static void forward_backward(std::ostream &output, int mode) {
 
 int main(int argc, char **argv) {
     try {
+        for (int n : {32,64,96,256}) for (int requested : {0,3,30}) {
+            const auto a=texture(n), b=translated(a,2,1);
+            std::vector<cv::Mat> pa,pb;
+            const int available=cv::buildOpticalFlowPyramid(a,pa,{21,21},requested,true,
+                cv::BORDER_REFLECT_101,cv::BORDER_CONSTANT,false);
+            cv::buildOpticalFlowPyramid(b,pb,{21,21},requested,true,
+                cv::BORDER_REFLECT_101,cv::BORDER_CONSTANT,false);
+            int expected=0, size=n;
+            while (expected<requested && (size=(size+1)/2)>21) ++expected;
+            if (available!=expected || pa.size()!=size_t(2*(available+1)))
+                throw std::runtime_error("direct pyramid metadata");
+            for (int level=0;level<=available;++level)
+                if (pa[size_t(2*level)].type()!=CV_8UC1 || pa[size_t(2*level+1)].type()!=CV_16SC2)
+                    throw std::runtime_error("direct pyramid types");
+            if (n>=64) {
+                const auto points=fixture_points(n==64?64:96);
+                std::vector<cv::Point2f> raw,built;
+                std::vector<unsigned char> rs,bs;
+                std::vector<float> re,be;
+                cv::calcOpticalFlowPyrLK(a,b,points,raw,rs,re,{21,21},requested,{3,30,.01},0);
+                cv::calcOpticalFlowPyrLK(pa,pb,points,built,bs,be,{21,21},requested,{3,30,.01},0);
+                if (rs!=bs) throw std::runtime_error("direct raw/prebuilt status");
+                for (size_t i=0;i<points.size();++i)
+                    if (rs[i] && (cv::norm(raw[i]-built[i])>1e-5 || std::abs(re[i]-be[i])>1e-5))
+                        throw std::runtime_error("direct raw/prebuilt values");
+            }
+            std::cout << "pyramid oracle n=" << n << " requested=" << requested
+                      << " available=" << available << " entries=" << pa.size() << '\n';
+        }
         for (int n : {64, 96}) {
             const auto previous = texture(n);
             const int dx = n == 64 ? 2 : 3, dy = n == 64 ? 1 : 2;

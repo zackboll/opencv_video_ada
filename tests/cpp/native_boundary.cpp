@@ -21,6 +21,7 @@ void opencv_video_test_fault(int stage) {
     if (stage != fault_stage) return;
     if (fault_kind == 1) throw std::bad_alloc();
     if (fault_kind == 2) CV_Error(cv::Error::StsError, "qualification native exception");
+    if (fault_kind == 4) throw std::runtime_error("qualification standard exception");
     throw 42;
 }
 #endif
@@ -491,6 +492,110 @@ void run_quality() {
     }
     std::cout << "PASS: 27 minimum-eigenvalue boundary/native-oracle entries, failed quality retained\n";
 }
+void run_pyramids() {
+    using Pyramid = std::unique_ptr<opencv_video_pyramid_handle,
+        decltype(&opencv_video_pyramid_destroy)>;
+    opencv_video_pyramid_destroy(nullptr);
+    auto a = matrix(64,64,OPENCV_CORE_DEPTH_UINT8,1);
+    auto b = matrix(64,64,OPENCV_CORE_DEPTH_UINT8,1);
+    fill_texture(output(a.get()));
+    shift(output(a.get()),output(b.get()),2,1);
+    auto build = [&](opencv_core_mat_handle *image, int level) {
+        opencv_video_pyramid_handle *p = nullptr;
+        check(opencv_video_pyramid_create(image,21,21,level,&p)==0 && p,
+              "pyramid construction failed");
+        return Pyramid(p,opencv_video_pyramid_destroy);
+    };
+    auto pa = build(a.get(),3), pb = build(b.get(),3);
+    int32_t w=0,h=0,r=0,l=0;
+    check(opencv_video_pyramid_metadata(pa.get(),&w,&h,&r,&l)==0 &&
+          w==21 && h==21 && r==3 && l==1,"pyramid metadata failed");
+    check(opencv_video_pyramid_metadata(nullptr,&w,&h,&r,&l)!=0,"null metadata accepted");
+    auto points=matrix(5,1,OPENCV_CORE_DEPTH_FLOAT32,2);
+    for (int i=0;i<4;++i) output(points.get()).at<cv::Point2f>(i)=fixture_points(64)[size_t(i)];
+    output(points.get()).at<cv::Point2f>(4)={-1000,-1000};
+    auto result=matrix(1,1,OPENCV_CORE_DEPTH_FLOAT32,2);
+    auto status=matrix(1,1,OPENCV_CORE_DEPTH_UINT8,1);
+    auto error=matrix(1,1,OPENCV_CORE_DEPTH_FLOAT32,1);
+    std::vector<cv::Mat> da,db;
+    const int la=cv::buildOpticalFlowPyramid(output(a.get()),da,{21,21},3,true,
+        cv::BORDER_REFLECT_101,cv::BORDER_CONSTANT,false);
+    const int lb=cv::buildOpticalFlowPyramid(output(b.get()),db,{21,21},3,true,
+        cv::BORDER_REFLECT_101,cv::BORDER_CONSTANT,false);
+    cv::Mat expected,flags,errors;
+    cv::calcOpticalFlowPyrLK(da,db,output(points.get()),expected,flags,errors,
+        {21,21},std::min(la,lb),{3,30,.01},0,1e-4);
+    output(a.get()).setTo(0); output(b.get()).setTo(255);
+    a.reset(); b.reset();
+    auto call=[&](const opencv_video_pyramid_handle *p, const opencv_video_pyramid_handle *q,
+                  int window=21,int level=3) {
+        return opencv_video_track_pyr_lk_pyramids(p,q,points.get(),result.get(),
+            status.get(),error.get(),window,window,level,30,.01,1e-4);
+    };
+    for (int repeat=0;repeat<3;++repeat) {
+        check(call(pa.get(),pb.get())==0,"pyramid tracking failed");
+        check(cv::norm(flags,output(status.get()),cv::NORM_INF)==0,"pyramid status oracle");
+        for (int i=0;i<5;++i) {
+            const bool ok=flags.at<unsigned char>(i)!=0;
+            check(cv::norm(output(result.get()).at<cv::Point2f>(i)-
+                (ok?expected.at<cv::Point2f>(i):output(points.get()).at<cv::Point2f>(i)))<1e-5,
+                "pyramid point oracle/normalization");
+            check(std::abs(output(error.get()).at<float>(i)-(ok?errors.at<float>(i):0))<1e-5,
+                "pyramid photometric oracle/normalization");
+        }
+    }
+    const auto before=output(result.get()).clone();
+    const auto before_status=output(status.get()).clone();
+    const auto before_error=output(error.get()).clone();
+    for (int window : {15,31}) check(call(pa.get(),pb.get(),window)!=0,"window mismatch");
+    check(call(nullptr,pb.get())!=0 && call(pa.get(),nullptr)!=0,"empty pyramid accepted");
+    check(cv::norm(before,output(result.get()),cv::NORM_INF)==0,"pyramid failure atomicity");
+    auto source=matrix(64,64,OPENCV_CORE_DEPTH_UINT8,1);
+    auto shallow=build(source.get(),1);
+    check(call(shallow.get(),pb.get())!=0 && call(pa.get(),shallow.get())!=0,
+          "requested depth mismatch accepted");
+    auto other=matrix(63,64,OPENCV_CORE_DEPTH_UINT8,1);
+    auto mismatch=build(other.get(),3);
+    check(call(pa.get(),mismatch.get())!=0,"pyramid base geometry mismatch accepted");
+    for (int slot=0;slot<4;++slot)
+        check(opencv_video_track_pyr_lk_pyramids(pa.get(),pb.get(),
+            slot==0?nullptr:points.get(),slot==1?nullptr:result.get(),
+            slot==2?nullptr:status.get(),slot==3?nullptr:error.get(),21,21,3,30,.01,1e-4)!=0,
+            "null pyramid tracking Core handle accepted");
+    check(opencv_video_track_pyr_lk_pyramids(pa.get(),pb.get(),points.get(),points.get(),
+        status.get(),error.get(),21,21,3,30,.01,1e-4)!=0,"pyramid output input alias accepted");
+    for (int bad : {-1,0,2,256}) {
+        opencv_video_pyramid_handle *raw=pa.get();
+        check(opencv_video_pyramid_create(source.get(),bad,21,3,&raw)!=0 && raw==nullptr,
+              "invalid build window published handle");
+    }
+    auto wrong=matrix(64,64,OPENCV_CORE_DEPTH_FLOAT32,1);
+    opencv_video_pyramid_handle *raw=pa.get();
+    check(opencv_video_pyramid_create(wrong.get(),21,21,3,&raw)!=0 && raw==nullptr,
+          "invalid image published handle");
+    check(opencv_video_pyramid_create(source.get(),21,21,3,nullptr)!=0,"null create output");
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    for (int stage : {3,4}) for (int kind : {1,2,3,4}) {
+        fault_stage=stage; fault_kind=kind;
+        opencv_video_pyramid_handle *raw=pa.get();
+        check(opencv_video_pyramid_create(source.get(),21,21,3,&raw)!=0 && raw==nullptr,
+              "pyramid create fault publication");
+    }
+    for (int stage : {1,2}) for (int kind : {1,2,3,4}) {
+        fault_stage=stage; fault_kind=kind;
+        check(call(pa.get(),pb.get())!=0 &&
+              cv::norm(before,output(result.get()),cv::NORM_INF)==0 &&
+              cv::norm(before_status,output(status.get()),cv::NORM_INF)==0 &&
+              cv::norm(before_error,output(error.get()),cv::NORM_INF)==0,"pyramid track fault atomicity");
+    }
+    fault_stage=0;
+#endif
+    for (int repeat=0;repeat<100;++repeat) {
+        auto source=matrix(64,64,OPENCV_CORE_DEPTH_UINT8,1);
+        auto p=build(source.get(),30);
+    }
+    std::cout << "PASS: owned pyramids, metadata, native oracle, source lifetime, reuse, faults/destruction\n";
+}
 }  // namespace
 
 int main() {
@@ -500,6 +605,7 @@ int main() {
         run(true);
         run_seeded(true);
         run_quality();
+        run_pyramids();
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "FAIL: " << error.what() << '\n';

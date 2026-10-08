@@ -41,6 +41,13 @@ def main() -> None:
     check(declared == imported, f"C/Ada import mismatch: {declared ^ imported}")
     check(all(re.search(r"\b" + re.escape(name) + r"\s*\(", cpp) for name in declared),
           "missing C++ export")
+    check('typedef struct opencv_video_pyramid_handle opencv_video_pyramid_handle;' in header,
+          "missing opaque pyramid declaration")
+    check(not re.search(r'struct\s+opencv_video_pyramid_handle\s*\{', header),
+          "native pyramid definition leaked")
+    public = (ROOT / "src/opencv-video.ads").read_text().split('\nprivate\n')[0]
+    check(not re.search(r'System\.Address|Native_Handle|Get_Level|As_Mat', public),
+          "public native ownership leakage")
 
     bridge_not_vendored()
     check(not list((ROOT / "src").rglob("opencv.ads")), "do not redeclare Core's root package")
@@ -50,7 +57,7 @@ def main() -> None:
 
     tests = (ROOT / "tests/src/video_tests.adb").read_text()
     registrations = re.findall(r"Result\.Add_Test\s*\(Caller\.Create", tests)
-    check(len(registrations) == 51, "update documented AUnit inventory when changing tests")
+    check(len(registrations) == 59, "update documented AUnit inventory when changing tests")
 
     configure = (ROOT / "scripts/configure_opencv.sh").read_text()
     check("opencv2/video/tracking.hpp" in configure and "libopencv_video" in configure,
@@ -69,7 +76,7 @@ def main() -> None:
           "compatibility matrix must remain manual-only")
 
     print(f"PASS: manifests, Core pin {CORE_PIN[:12]}, {len(declared)} ABI declarations/imports, "
-          f"51 AUnit registrations, Core ownership, video backend, CI topology")
+          f"59 AUnit registrations, Core ownership, video backend, CI topology")
 
 
 if __name__ == "__main__":

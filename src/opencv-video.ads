@@ -1,4 +1,6 @@
 with OpenCV.Core;
+with Ada.Finalization;
+with System;
 
 package OpenCV.Video is
    --  Initial bootstrap slice: sparse pyramidal Lucas-Kanade tracking.
@@ -26,6 +28,35 @@ package OpenCV.Video is
    end record;
 
    type Point_Track_Array is array (Positive range <>) of Point_Track;
+
+   --  Binding-owned optimization object, not an OpenCV class. Sequential reuse
+   --  is supported; no general concurrent-use guarantee is made. No shallow copy.
+   type PyrLK_Pyramid is limited private;
+   type PyrLK_Pyramid_Options is record
+      Window_Size : OpenCV.Size := (Width => 21, Height => 21);
+      Max_Level   : Natural := 3;
+   end record;
+   --  Nonempty 2-D UInt8 C1, including strided Regions. Window 3..255,
+   --  requested level 0..30. Always owns image and signed dx/dy derivatives;
+   --  no source allocation is retained. Construction may consult Region parent
+   --  pixels for borders, but neither Region nor parent is needed afterward.
+   function Build_PyrLK_Pyramid
+     (Image : OpenCV.Core.Mat;
+      Options : PyrLK_Pyramid_Options := (others => <>)) return PyrLK_Pyramid;
+   function Is_Empty (Pyramid : PyrLK_Pyramid) return Boolean;
+   --  All metadata queries raise OpenCV_Error on an empty/default object.
+   function Requested_Max_Level (Pyramid : PyrLK_Pyramid) return Natural;
+   function Available_Max_Level (Pyramid : PyrLK_Pyramid) return Natural;
+   function Build_Window_Size (Pyramid : PyrLK_Pyramid) return OpenCV.Size;
+   --  Ordinary photometric mode only. Same geometry, exact build/track window
+   --  equality, and tracking level <= each requested build level are required.
+   --  Effective level is min(tracking request, both available levels).
+   --  Preserves Points'Range and the ordinary success/failure value contract.
+   function Track_PyrLK
+     (Previous_Pyramid : PyrLK_Pyramid;
+      Next_Pyramid : PyrLK_Pyramid;
+      Points : Tracking_Point_Array;
+      Options : PyrLK_Options := (others => <>)) return Point_Track_Array;
 
    --  Track Points from Previous_Image into Next_Image using
    --  cv::calcOpticalFlowPyrLK.
@@ -156,4 +187,12 @@ package OpenCV.Video is
       Options             : Forward_Backward_Options := (others => <>);
       Initial_Next_Points : Tracking_Point_Array)
       return Forward_Backward_Track_Array;
+private
+   type PyrLK_Pyramid is new Ada.Finalization.Limited_Controlled with record
+      Handle : System.Address := System.Null_Address;
+      Window : OpenCV.Size := (Width => 0, Height => 0);
+      Requested, Available : Natural := 0;
+      Rows, Columns : Natural := 0;
+   end record;
+   overriding procedure Finalize (Pyramid : in out PyrLK_Pyramid);
 end OpenCV.Video;

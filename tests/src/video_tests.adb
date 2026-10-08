@@ -16,6 +16,7 @@ package body Video_Tests is
    use type OpenCV.Float64_Value;
    use type OpenCV.Float32_Point;
    use type OpenCV.UInt8_Value;
+   use type OpenCV.Size;
 
    type Fixture is new AUnit.Test_Fixtures.Test_Fixture with null record;
 
@@ -1416,6 +1417,224 @@ package body Video_Tests is
       Ada.Text_IO.Close (File);
    end Quality_Direct_Oracle;
 
+   procedure Pyramid_Metadata (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Requests : constant array (1 .. 3) of Natural := [0, 3, 30];
+      Sizes : constant array (1 .. 4) of Positive := [32, 64, 96, 256];
+   begin
+      for Requested of Requests loop
+         for N of Sizes loop
+            declare
+               Image : constant OpenCV.Core.Mat := Texture (N, N);
+               P : constant PyrLK_Pyramid := Build_PyrLK_Pyramid
+                 (Image, (Window_Size => (21, 21), Max_Level => Requested));
+               Expected : Natural := 0;
+               Size : Natural := N;
+            begin
+               while Expected < Requested loop
+                  Size := (Size + 1) / 2;
+                  exit when Size <= 21;
+                  Expected := Expected + 1;
+               end loop;
+               Assert (not Is_Empty (P) and then Requested_Max_Level (P) = Requested
+                         and then Available_Max_Level (P) = Expected
+                         and then Build_Window_Size (P) = OpenCV.Size'(21, 21),
+                         "pyramid metadata/truncation");
+            end;
+         end loop;
+      end loop;
+   end Pyramid_Metadata;
+
+   procedure Compare_Tracks (Left, Right : Point_Track_Array) is
+   begin
+      Assert (Left'First = Right'First and then Left'Last = Right'Last, "pyramid bounds");
+      for I in Left'Range loop
+         Assert (Left (I).Tracked = Right (I).Tracked and then
+                   Left (I).Previous_Point = Right (I).Previous_Point and then
+                   Near (Left (I).Next_Point.X, Right (I).Next_Point.X, 1.0E-5) and then
+                   Near (Left (I).Next_Point.Y, Right (I).Next_Point.Y, 1.0E-5) and then
+                   Near (Left (I).Error, Right (I).Error, 1.0E-5), "raw/prebuilt disagreement");
+      end loop;
+   end Compare_Tracks;
+
+   procedure Pyramid_Equivalence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : constant OpenCV.Core.Mat := Texture (64, 64);
+      B : constant OpenCV.Core.Mat := Shift (A, 2, 1);
+      PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A);
+      PB : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (B);
+      Points : constant Tracking_Point_Array (7 .. 11) :=
+        [7 => Standard_Points (1), 8 => (-1000.0, -1000.0),
+         9 => Standard_Points (2), 10 => (1000.0, 1000.0), 11 => Standard_Points (3)];
+   begin
+      for Level in 0 .. 3 loop
+         declare
+            Options : constant PyrLK_Options := (Max_Level => Level, others => <>);
+            Raw : constant Point_Track_Array := Track_PyrLK (A, B, Points, Options);
+            Built : constant Point_Track_Array := Track_PyrLK (PA, PB, Points, Options);
+         begin
+            Compare_Tracks (Raw, Built);
+            Assert (not Built (8).Tracked and then Built (8).Next_Point = Points (8)
+                      and then Built (8).Error = 0.0, "pyramid failed normalization");
+            if Level = 1 then
+               Assert (Built (7).Tracked and then Near (Built (7).Next_Point.X, 22.0)
+                         and then Near (Built (7).Next_Point.Y, 21.0), "pyramid translation");
+            end if;
+         end;
+      end loop;
+   end Pyramid_Equivalence;
+
+   procedure Pyramid_Bounds_Empty (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (64, 64);
+      P : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (Image);
+      Points : constant Tracking_Point_Array (Positive'Last .. Positive'Last) :=
+        [others => Standard_Points (1)];
+      Empty : Tracking_Point_Array (9 .. 8);
+      Result : constant Point_Track_Array := Track_PyrLK (P, P, Points);
+      None : constant Point_Track_Array := Track_PyrLK (P, P, Empty);
+   begin
+      Assert (Result'First = Positive'Last and then Result (Positive'Last).Tracked,
+              "extreme pyramid point bound");
+      Assert (None'First = 9 and then None'Last = 8, "empty pyramid point bound");
+   end Pyramid_Bounds_Empty;
+
+   procedure Pyramid_Mutation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : OpenCV.Core.Mat := Texture (64, 64);
+      B : OpenCV.Core.Mat := Shift (A, 2, 1);
+      PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A);
+      PB : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (B);
+      Before : constant Point_Track_Array := Track_PyrLK (PA, PB, Standard_Points);
+   begin
+      for R in 0 .. 63 loop
+         for Col in 0 .. 63 loop
+            OpenCV.Core.UInt8_Access.Set (A, R, Col, 0);
+            OpenCV.Core.UInt8_Access.Set (B, R, Col, 255);
+         end loop;
+      end loop;
+      Compare_Tracks (Before, Track_PyrLK (PA, PB, Standard_Points));
+   end Pyramid_Mutation;
+
+   function Scoped_Pyramid (Region : Boolean; DX, DY : Integer) return PyrLK_Pyramid is
+      Parent : constant OpenCV.Core.Mat := Texture (96, 96);
+      Source : constant OpenCV.Core.Mat := Shift (Parent, DX, DY);
+   begin
+      if Region then
+         declare
+            View : constant OpenCV.Core.Mat := Source.Region ((X => 10, Y => 10, Width => 64, Height => 64));
+         begin
+            Assert (not View.Is_Continuous, "pyramid Region must be strided");
+            return Build_PyrLK_Pyramid (View);
+         end;
+      end if;
+      return Build_PyrLK_Pyramid (Source);
+   end Scoped_Pyramid;
+
+   procedure Pyramid_Lifetime (T : in out Fixture) is
+      pragma Unreferenced (T);
+   begin
+      for Region in Boolean loop
+         declare
+            PA : constant PyrLK_Pyramid := Scoped_Pyramid (Region, 0, 0);
+            PB : constant PyrLK_Pyramid := Scoped_Pyramid (Region, 2, 1);
+            Tracks : constant Point_Track_Array := Track_PyrLK
+              (PA, PB, Standard_Points, (Max_Level => 1, others => <>));
+         begin
+            for I in Tracks'Range loop
+               Assert (Tracks (I).Tracked and then
+                         Near (Tracks (I).Next_Point.X, Standard_Points (I).X + 2.0) and then
+                         Near (Tracks (I).Next_Point.Y, Standard_Points (I).Y + 1.0),
+                         "pyramid source/Region/parent lifetime dependence");
+            end loop;
+         end;
+      end loop;
+   end Pyramid_Lifetime;
+
+   procedure Pyramid_Reuse (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : constant OpenCV.Core.Mat := Texture (64, 64);
+      B : constant OpenCV.Core.Mat := Shift (A, 2, 1);
+      PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A);
+      PB : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (B);
+      First : constant Point_Track_Array := Track_PyrLK (PA, PB, Standard_Points);
+   begin
+      for Repetition in 1 .. 3 loop
+         Compare_Tracks (First, Track_PyrLK (PA, PB, Standard_Points));
+         Compare_Tracks (Track_PyrLK (B, A, Standard_Points),
+                         Track_PyrLK (PB, PA, Standard_Points));
+      end loop;
+   end Pyramid_Reuse;
+
+   procedure Pyramid_Compatibility (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : constant OpenCV.Core.Mat := Texture (64, 64);
+      B : constant OpenCV.Core.Mat := Texture (63, 64);
+      PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A);
+      PB : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (B);
+      Shallow : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A, (Max_Level => 1, others => <>));
+      Empty : PyrLK_Pyramid;
+      procedure Reject (Previous, Next : PyrLK_Pyramid; Options : PyrLK_Options) is
+      begin
+         declare
+            Tracks : constant Point_Track_Array := Track_PyrLK (Previous, Next, [], Options);
+            pragma Unreferenced (Tracks);
+         begin
+            Assert (False, "incompatible pyramid accepted even for empty points");
+         end;
+      exception
+         when OpenCV.OpenCV_Error => null;
+      end Reject;
+   begin
+      Reject (PA, PB, (others => <>));
+      Reject (PA, PA, (Window_Size => (15, 15), others => <>));
+      Reject (PA, PA, (Window_Size => (31, 31), others => <>));
+      Reject (Shallow, PA, (others => <>));
+      Reject (PA, Shallow, (others => <>));
+      Reject (Empty, PA, (others => <>));
+      Reject (PA, Empty, (others => <>));
+      Assert (Is_Empty (Empty), "default pyramid not empty");
+      begin
+         declare
+            Level : constant Natural := Available_Max_Level (Empty);
+            pragma Unreferenced (Level);
+         begin
+            Assert (False, "empty pyramid metadata accepted");
+         end;
+      exception
+         when OpenCV.OpenCV_Error => null;
+      end;
+   end Pyramid_Compatibility;
+
+   procedure Pyramid_Build_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : constant OpenCV.Core.Mat := Texture (64, 64);
+      Empty : OpenCV.Core.Mat;
+      Depth : constant OpenCV.Core.Mat := OpenCV.Core.Create (64, 64, (OpenCV.Core.Float32, 1));
+      Channels : constant OpenCV.Core.Mat := OpenCV.Core.Create (64, 64, (OpenCV.Core.UInt8, 3));
+      Volume : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (OpenCV.Core.Dimension_Array'[4, 4, 4], (OpenCV.Core.UInt8, 1));
+      procedure Reject (Image : OpenCV.Core.Mat; Options : PyrLK_Pyramid_Options) is
+      begin
+         declare
+            P : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (Image, Options);
+            pragma Unreferenced (P);
+         begin
+            Assert (False, "invalid pyramid construction accepted");
+         end;
+      exception
+         when OpenCV.OpenCV_Error => null;
+      end Reject;
+   begin
+      Reject (Empty, (others => <>));
+      Reject (Depth, (others => <>));
+      Reject (Channels, (others => <>));
+      Reject (Volume, (others => <>));
+      Reject (A, (Window_Size => (2, 21), others => <>));
+      Reject (A, (Window_Size => (21, 256), others => <>));
+      Reject (A, (Max_Level => 31, others => <>));
+   end Pyramid_Build_Validation;
+
    package Caller is new AUnit.Test_Caller (Fixture);
 
    function Suite return AUnit.Test_Suites.Access_Test_Suite is
@@ -1472,6 +1691,14 @@ package body Video_Tests is
        Result.Add_Test (Caller.Create ("quality inherited validation both overloads", Quality_Validation'Access));
        Result.Add_Test (Caller.Create ("quality Regions and all input immutability", Quality_Regions_Immutability'Access));
        Result.Add_Test (Caller.Create ("quality independent direct C++ oracle", Quality_Direct_Oracle'Access));
+       Result.Add_Test (Caller.Create ("pyramid metadata level 0 3 30 truncation", Pyramid_Metadata'Access));
+       Result.Add_Test (Caller.Create ("pyramid raw equivalence translation and failed normalization", Pyramid_Equivalence'Access));
+       Result.Add_Test (Caller.Create ("pyramid extreme and empty bounds", Pyramid_Bounds_Empty'Access));
+       Result.Add_Test (Caller.Create ("pyramid source mutation independence", Pyramid_Mutation'Access));
+       Result.Add_Test (Caller.Create ("pyramid source Region parent lifetime", Pyramid_Lifetime'Access));
+       Result.Add_Test (Caller.Create ("pyramid sequential and reversed-role reuse", Pyramid_Reuse'Access));
+       Result.Add_Test (Caller.Create ("pyramid compatibility empty metadata windows depth geometry", Pyramid_Compatibility'Access));
+       Result.Add_Test (Caller.Create ("pyramid construction validation", Pyramid_Build_Validation'Access));
        return Result;
    end Suite;
 end Video_Tests;

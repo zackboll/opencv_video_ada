@@ -9,6 +9,7 @@ extern "C" {
 
 typedef int32_t opencv_video_status;
 typedef struct opencv_core_mat_handle opencv_core_mat_handle;
+typedef struct opencv_video_pyramid_handle opencv_video_pyramid_handle;
 
 #define OPENCV_VIDEO_OK ((opencv_video_status)0)
 #define OPENCV_VIDEO_ERROR_INVALID_ARGUMENT ((opencv_video_status)1)
@@ -20,6 +21,27 @@ typedef struct opencv_core_mat_handle opencv_core_mat_handle;
 const char *opencv_video_native_version(void);
 const char *opencv_video_native_backend(void);
 const char *opencv_video_last_error(void);
+
+/* Owned image/derivative pairs. Create always clears *out before work; destroy
+ * accepts null. No borrowed Core storage survives creation. Metadata rejects
+ * null objects and null outputs. Live handles must not be destroyed during use. */
+opencv_video_status opencv_video_pyramid_create(
+    const opencv_core_mat_handle *image, int32_t window_width,
+    int32_t window_height, int32_t requested_max_level,
+    opencv_video_pyramid_handle **out);
+void opencv_video_pyramid_destroy(opencv_video_pyramid_handle *pyramid);
+opencv_video_status opencv_video_pyramid_metadata(
+    const opencv_video_pyramid_handle *pyramid, int32_t *window_width,
+    int32_t *window_height, int32_t *requested_max_level,
+    int32_t *available_max_level);
+opencv_video_status opencv_video_track_pyr_lk_pyramids(
+    const opencv_video_pyramid_handle *previous,
+    const opencv_video_pyramid_handle *next,
+    const opencv_core_mat_handle *previous_points,
+    opencv_core_mat_handle *next_points, opencv_core_mat_handle *track_status,
+    opencv_core_mat_handle *track_error,
+    int32_t window_width, int32_t window_height, int32_t max_level,
+    int32_t maximum_iterations, double epsilon, double min_eigenvalue_threshold);
 
 /* Handles must be real live Core handles. Output headers must be distinct from
  * each other and all inputs. On failure, existing outputs are unchanged (not
