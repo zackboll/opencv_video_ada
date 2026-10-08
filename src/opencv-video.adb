@@ -596,8 +596,21 @@ package body OpenCV.Video is
       return OpenCV.Float32_Value (Distance);
    end Round_Trip_Distance;
 
+   generic
+      type Source is limited private;
+      with function Seeded_Backward
+        (Previous, Next : Source;
+         Points : Tracking_Point_Array;
+         Options : PyrLK_Options;
+         Seeds : Tracking_Point_Array) return Point_Track_Array;
    function Complete_Backward
-     (Previous_Image, Next_Image : OpenCV.Core.Mat;
+     (Previous_Image, Next_Image : Source;
+      Points : Tracking_Point_Array;
+      Forward : Point_Track_Array;
+      Options : Forward_Backward_Options) return Forward_Backward_Track_Array;
+
+   function Complete_Backward
+     (Previous_Image, Next_Image : Source;
       Points : Tracking_Point_Array;
       Forward : Point_Track_Array;
       Options : Forward_Backward_Options) return Forward_Backward_Track_Array
@@ -622,7 +635,7 @@ package body OpenCV.Video is
          end loop;
          if Count > 0 then
             declare
-               Backward : constant Point_Track_Array := Track_PyrLK
+               Backward : constant Point_Track_Array := Seeded_Backward
                  (Next_Image, Previous_Image, Backward_Points, Options.Tracking, Original_Points);
             begin
                for J in Backward'Range loop
@@ -644,6 +657,9 @@ package body OpenCV.Video is
       end return;
    end Complete_Backward;
 
+   function Complete_Image_Backward is new Complete_Backward (OpenCV.Core.Mat, Track_PyrLK);
+   function Complete_Pyramid_Backward is new Complete_Backward (PyrLK_Pyramid, Track_PyrLK);
+
    function Track_PyrLK_Forward_Backward
      (Previous_Image : OpenCV.Core.Mat;
       Next_Image     : OpenCV.Core.Mat;
@@ -652,7 +668,7 @@ package body OpenCV.Video is
       return Forward_Backward_Track_Array is
    begin
       Validate (Options);
-      return Complete_Backward
+      return Complete_Image_Backward
         (Previous_Image, Next_Image, Points,
          Track_PyrLK (Previous_Image, Next_Image, Points, Options.Tracking), Options);
    end Track_PyrLK_Forward_Backward;
@@ -666,9 +682,36 @@ package body OpenCV.Video is
       return Forward_Backward_Track_Array is
    begin
       Validate (Options);
-      return Complete_Backward
+      return Complete_Image_Backward
         (Previous_Image, Next_Image, Points,
          Track_PyrLK (Previous_Image, Next_Image, Points, Options.Tracking, Initial_Next_Points), Options);
+   end Track_PyrLK_Forward_Backward;
+
+   function Track_PyrLK_Forward_Backward
+     (Previous_Pyramid : PyrLK_Pyramid;
+      Next_Pyramid     : PyrLK_Pyramid;
+      Points           : Tracking_Point_Array;
+      Options          : Forward_Backward_Options := (others => <>))
+      return Forward_Backward_Track_Array is
+   begin
+      Validate (Options);
+      return Complete_Pyramid_Backward
+        (Previous_Pyramid, Next_Pyramid, Points,
+         Track_PyrLK (Previous_Pyramid, Next_Pyramid, Points, Options.Tracking), Options);
+   end Track_PyrLK_Forward_Backward;
+
+   function Track_PyrLK_Forward_Backward
+     (Previous_Pyramid    : PyrLK_Pyramid;
+      Next_Pyramid        : PyrLK_Pyramid;
+      Points              : Tracking_Point_Array;
+      Options             : Forward_Backward_Options := (others => <>);
+      Initial_Next_Points : Tracking_Point_Array)
+      return Forward_Backward_Track_Array is
+   begin
+      Validate (Options);
+      return Complete_Pyramid_Backward
+        (Previous_Pyramid, Next_Pyramid, Points,
+         Track_PyrLK (Previous_Pyramid, Next_Pyramid, Points, Options.Tracking, Initial_Next_Points), Options);
    end Track_PyrLK_Forward_Backward;
 
    function Successful_Count (Tracks : Point_Track_Array) return Natural is

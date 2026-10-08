@@ -94,7 +94,7 @@ static void trackability(std::ostream &output, bool pyramids = false) {
 }
 
 // Diagnostic oracle: direct OpenCV only, including compact-success mapping.
-static void forward_backward(std::ostream &output, int mode) {
+static void forward_backward(std::ostream &output, int mode, bool pyramids = false) {
     const auto previous = texture(96);
     auto next = translated(previous, mode == 0 ? 2 : 12, mode == 0 ? 1 : 7);
     if (mode == 3) next.setTo(0);
@@ -105,7 +105,18 @@ static void forward_backward(std::ostream &output, int mode) {
     const cv::TermCriteria criteria(3, 30, 0.01);
     std::vector<unsigned char> status, back_status;
     std::vector<float> errors, back_errors;
-    cv::calcOpticalFlowPyrLK(previous, next, points, forward, status, errors,
+    std::vector<cv::Mat> previous_levels, next_levels;
+    if (pyramids) {
+        cv::buildOpticalFlowPyramid(previous, previous_levels, {21,21}, 3, true,
+            cv::BORDER_REFLECT_101, cv::BORDER_CONSTANT, false);
+        cv::buildOpticalFlowPyramid(next, next_levels, {21,21}, 3, true,
+            cv::BORDER_REFLECT_101, cv::BORDER_CONSTANT, false);
+    }
+    if (pyramids)
+        cv::calcOpticalFlowPyrLK(previous_levels, next_levels, points, forward, status, errors,
+                            {21,21}, mode == 0 ? 1 : 0, criteria,
+                            mode == 1 || mode == 3 ? cv::OPTFLOW_USE_INITIAL_FLOW : 0);
+    else cv::calcOpticalFlowPyrLK(previous, next, points, forward, status, errors,
                             {21,21}, mode == 0 ? 1 : 0, criteria,
                             mode == 1 || mode == 3 ? cv::OPTFLOW_USE_INITIAL_FLOW : 0);
     std::vector<cv::Point2f> starts, recovered;
@@ -113,9 +124,13 @@ static void forward_backward(std::ostream &output, int mode) {
     for (size_t i = 0; i < points.size(); ++i) if (status[i]) {
         starts.push_back(forward[i]); recovered.push_back(points[i]); indices.push_back(i);
     }
-    if (!starts.empty())
-        cv::calcOpticalFlowPyrLK(next, previous, starts, recovered, back_status, back_errors,
+    if (!starts.empty()) {
+        if (pyramids)
+            cv::calcOpticalFlowPyrLK(next_levels, previous_levels, starts, recovered, back_status, back_errors,
                                 {21,21}, mode == 0 ? 1 : 0, criteria, cv::OPTFLOW_USE_INITIAL_FLOW);
+        else cv::calcOpticalFlowPyrLK(next, previous, starts, recovered, back_status, back_errors,
+                                {21,21}, mode == 0 ? 1 : 0, criteria, cv::OPTFLOW_USE_INITIAL_FLOW);
+    }
     size_t j = 0;
     for (size_t i = 0; i < points.size(); ++i) {
         const bool f = status[i] != 0;
@@ -132,7 +147,9 @@ static void forward_backward(std::ostream &output, int mode) {
             (!outside && mode == 3 && (!f || b)))
             throw std::runtime_error("forward/backward semantic fixture failed");
         output << mode << ' ' << i + 7 << ' ' << int(f) << ' ' << dest.x << ' ' << dest.y
-               << ' ' << int(b) << ' ' << back.x << ' ' << back.y << ' ' << distance << '\n';
+               << ' ' << int(b) << ' ' << back.x << ' ' << back.y << ' ' << distance;
+        if (pyramids) output << ' ' << (f ? errors[i] : 0.0f);
+        output << '\n';
         if (f) {
             if (indices[j] != i) throw std::runtime_error("oracle compact mapping failed");
             ++j;
@@ -242,6 +259,12 @@ int main(int argc, char **argv) {
         auto &output = argc >= 2 ? static_cast<std::ostream &>(file) : std::cout;
         output << std::setprecision(17);
         for (int mode = 0; mode < 4; ++mode) forward_backward(output, mode);
+        if (argc >= 2) {
+            std::ofstream pyramid_file(std::string(argv[1])+".pyramids");
+            if (!pyramid_file) throw std::runtime_error("cannot create pyramid diagnostics oracle");
+            pyramid_file << std::setprecision(17);
+            for (int mode = 0; mode < 4; ++mode) forward_backward(pyramid_file, mode, true);
+        } else for (int mode = 0; mode < 4; ++mode) forward_backward(std::cout, mode, true);
         std::ofstream quality_file;
         if (argc == 3) {
             quality_file.open(argv[2]);
@@ -257,7 +280,7 @@ int main(int argc, char **argv) {
             trackability(pyramid_file,true);
         } else trackability(std::cout,true);
         std::cout << "PASS: independent OpenCV " << CV_VERSION
-                  << " oracle (8 unseeded + 4 seeded + 20 forward/backward + 27 raw quality + 27 pyramid quality entries)\n";
+                  << " oracle (8 unseeded + 4 seeded + 20 raw forward/backward + 20 pyramid forward/backward + 27 raw quality + 27 pyramid quality entries)\n";
         return 0;
     } catch (const std::exception &e) {
         std::cerr << "FAIL: " << e.what() << '\n';

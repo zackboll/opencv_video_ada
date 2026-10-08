@@ -214,6 +214,23 @@ package OpenCV.Video is
       Options             : Forward_Backward_Options := (others => <>);
       Initial_Next_Points : Tracking_Point_Array)
       return Forward_Backward_Track_Array;
+   --  Same diagnostics with owned pyramids. Both legs reuse the stored vectors;
+   --  the backward leg reverses these objects and predicts original positions.
+   --  Existing pyramid compatibility checks apply even to empty point arrays.
+   function Track_PyrLK_Forward_Backward
+     (Previous_Pyramid : PyrLK_Pyramid;
+      Next_Pyramid     : PyrLK_Pyramid;
+      Points           : Tracking_Point_Array;
+      Options          : Forward_Backward_Options := (others => <>))
+      return Forward_Backward_Track_Array;
+
+   function Track_PyrLK_Forward_Backward
+     (Previous_Pyramid    : PyrLK_Pyramid;
+      Next_Pyramid        : PyrLK_Pyramid;
+      Points              : Tracking_Point_Array;
+      Options             : Forward_Backward_Options := (others => <>);
+      Initial_Next_Points : Tracking_Point_Array)
+      return Forward_Backward_Track_Array;
 private
    type PyrLK_Pyramid is new Ada.Finalization.Limited_Controlled with record
       Handle : System.Address := System.Null_Address;
