@@ -213,7 +213,17 @@ package body OpenCV.Video is
                      procedure Error_Callback (Error_Handle : Bridge.Output_Mat_Handle) is
                         procedure Seed_Callback (Seed_Handle : Bridge.Input_Mat_Handle) is
                         begin
-                           if Quality then
+                           if Previous_Pyramid /= System.Null_Address then
+                              Code := C.Track_PyrLK_Pyramids_Seeded
+                                (Previous_Pyramid, Next_Pyramid, Point_Handle, Seed_Handle,
+                                 Next_Point_Handle, Status_Handle, Error_Handle,
+                                 Interfaces.Integer_32 (Options.Window_Size.Width),
+                                 Interfaces.Integer_32 (Options.Window_Size.Height),
+                                 Interfaces.Integer_32 (Options.Max_Level),
+                                 Interfaces.Integer_32 (Options.Maximum_Iterations),
+                                 Interfaces.C.double (Options.Epsilon),
+                                 Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                           elsif Quality then
                               Code := C.Track_PyrLK_Seeded_Quality
                                 (Previous_Handle, Next_Handle, Point_Handle, Seed_Handle,
                                  Next_Point_Handle, Status_Handle, Error_Handle,
@@ -288,6 +298,12 @@ package body OpenCV.Video is
          Bridge.With_Input_Handle (Next_Image, Next_Callback'Access);
       end Previous_Callback;
    begin
+      if (Previous_Pyramid = System.Null_Address) /=
+        (Next_Pyramid = System.Null_Address) or else
+        (Quality and then Previous_Pyramid /= System.Null_Address)
+      then
+         raise OpenCV.OpenCV_Error with "Unsupported private PyrLK routing";
+      end if;
       if Previous_Pyramid = System.Null_Address then
          Validate_Images (Previous_Image, Next_Image);
       end if;
@@ -397,6 +413,31 @@ package body OpenCV.Video is
       end if;
       return Photometric_Results (Track_Internal
         (Empty_Image, Empty_Image, Points, [], False, Options, False,
+         Previous_Pyramid.Handle, Next_Pyramid.Handle));
+   end Track_PyrLK;
+
+   function Track_PyrLK
+     (Previous_Pyramid    : PyrLK_Pyramid;
+      Next_Pyramid        : PyrLK_Pyramid;
+      Points              : Tracking_Point_Array;
+      Options             : PyrLK_Options := (others => <>);
+      Initial_Next_Points : Tracking_Point_Array) return Point_Track_Array
+   is
+      Empty_Image : OpenCV.Core.Mat;
+   begin
+      Require_Pyramid (Previous_Pyramid);
+      Require_Pyramid (Next_Pyramid);
+      if Previous_Pyramid.Rows /= Next_Pyramid.Rows or else
+        Previous_Pyramid.Columns /= Next_Pyramid.Columns or else
+        Options.Window_Size /= Previous_Pyramid.Window or else
+        Options.Window_Size /= Next_Pyramid.Window or else
+        Options.Max_Level > Previous_Pyramid.Requested or else
+        Options.Max_Level > Next_Pyramid.Requested
+      then
+         raise OpenCV.OpenCV_Error with "Incompatible PyrLK pyramids/options";
+      end if;
+      return Photometric_Results (Track_Internal
+        (Empty_Image, Empty_Image, Points, Initial_Next_Points, True, Options, False,
          Previous_Pyramid.Handle, Next_Pyramid.Handle));
    end Track_PyrLK;
 

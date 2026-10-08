@@ -1637,6 +1637,182 @@ package body Video_Tests is
 
    package Caller is new AUnit.Test_Caller (Fixture);
 
+   procedure Seeded_Pyramid_Equivalence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : constant OpenCV.Core.Mat := Texture (96, 96);
+      Points : constant Tracking_Point_Array (5 .. 8) := Quality_Points;
+   begin
+      for Mode in 0 .. 2 loop
+         declare
+            DX : constant Integer := (if Mode = 2 then 12 elsif Mode = 1 then 2 else 0);
+            DY : constant Integer := (if Mode = 2 then 7 elsif Mode = 1 then 1 else 0);
+            B : constant OpenCV.Core.Mat := Shift (A, DX, DY);
+            PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A);
+            PB : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (B);
+            Seeds : Tracking_Point_Array (20 .. 23);
+            Options : constant PyrLK_Options := (Max_Level => 0, others => <>);
+         begin
+            for I in Points'Range loop
+               Seeds (I - Points'First + Seeds'First) :=
+                 (Points (I).X + OpenCV.Float32_Value (DX) + 0.25,
+                  Points (I).Y + OpenCV.Float32_Value (DY) - 0.25);
+            end loop;
+            declare
+               Raw : constant Point_Track_Array := Track_PyrLK (A, B, Points, Options, Seeds);
+               Built : constant Point_Track_Array := Track_PyrLK (PA, PB, Points, Options, Seeds);
+               Plain : constant Point_Track_Array := Track_PyrLK (PA, PB, Points, Options);
+            begin
+               Compare_Tracks (Raw, Built);
+               for I in Points'Range loop
+                  Assert (Built (I).Tracked and then
+                    Near (Built (I).Next_Point.X, Points (I).X + OpenCV.Float32_Value (DX), 0.05) and then
+                    Near (Built (I).Next_Point.Y, Points (I).Y + OpenCV.Float32_Value (DY), 0.05),
+                    "seeded pyramid known translation");
+                  Assert (abs (Built (I).Next_Point.X - Seeds (I - 5 + 20).X) > 0.20,
+                          "prediction was returned without refinement");
+                  if Mode = 2 then
+                     Assert (not Plain (I).Tracked or else
+                       abs (Plain (I).Next_Point.X - Built (I).Next_Point.X) > 5.0,
+                       "distinguishing fixture no longer distinguishes");
+                  end if;
+               end loop;
+            end;
+         end;
+      end loop;
+   end Seeded_Pyramid_Equivalence;
+
+   procedure Seeded_Pyramid_Bounds (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : constant OpenCV.Core.Mat := Texture (96, 96);
+      PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A);
+      Points : constant Tracking_Point_Array := [Positive'Last => (25.0, 25.0)];
+      Tracks : constant Point_Track_Array := Track_PyrLK
+        (PA, PA, Points, Initial_Next_Points => [20 => (25.25, 24.75)]);
+      Empty : constant Point_Track_Array := Track_PyrLK
+        (PA, PA, Tracking_Point_Array'(7 .. 6 => <>),
+         Initial_Next_Points => Tracking_Point_Array'(20 .. 19 => <>));
+   begin
+      Assert (Tracks'First = Positive'Last and then Tracks'Last = Positive'Last and then
+                Tracks (Positive'Last).Tracked and then Empty'First = 7 and then Empty'Last = 6,
+                "seeded pyramid extreme/empty bounds");
+   end Seeded_Pyramid_Bounds;
+
+   procedure Seeded_Pyramid_Failures (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : constant OpenCV.Core.Mat := Texture (96, 96);
+      PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A);
+      Points : constant Tracking_Point_Array := [5 => (-1000.0, -1000.0), 6 => (25.0, 25.0)];
+      Seeds : constant Tracking_Point_Array := [20 => (25.0, 25.0), 21 => (1000.0, 1000.0)];
+      Tracks : constant Point_Track_Array := Track_PyrLK
+        (PA, PA, Points, (Max_Level => 0, others => <>), Seeds);
+   begin
+      for I in Points'Range loop
+         Assert (not Tracks (I).Tracked and then Tracks (I).Next_Point = Points (I) and then
+                   Tracks (I).Previous_Point = Points (I) and then Tracks (I).Error = 0.0,
+                   "failed seeded pyramid exposed prediction/native output");
+      end loop;
+   end Seeded_Pyramid_Failures;
+
+   procedure Seeded_Pyramid_Lifetime (T : in out Fixture) is
+      pragma Unreferenced (T);
+      function Captured (DX, DY : Integer; Region : Boolean) return PyrLK_Pyramid is
+         Parent : OpenCV.Core.Mat := Texture (128, 128);
+         Shifted : constant OpenCV.Core.Mat := Shift (Parent, DX, DY);
+         Image : OpenCV.Core.Mat := (if Region then Shifted.Region ((16, 16, 96, 96))
+                                    else Shifted.Clone);
+      begin
+         return P : PyrLK_Pyramid := Build_PyrLK_Pyramid (Image) do
+            for Row in 0 .. Image.Rows - 1 loop
+               for Column in 0 .. Image.Columns - 1 loop
+                  OpenCV.Core.UInt8_Access.Set (Image, Row, Column, 0);
+               end loop;
+            end loop;
+            OpenCV.Core.UInt8_Access.Set (Parent, 41, 41, 0);
+         end return;
+      end Captured;
+      Points : constant Tracking_Point_Array := [5 => (25.0, 25.0), 6 => (45.0, 32.0)];
+      Seeds : constant Tracking_Point_Array := [20 => (27.25, 25.75), 21 => (47.25, 32.75)];
+   begin
+      for Region in Boolean loop
+         declare
+            PA : constant PyrLK_Pyramid := Captured (0, 0, Region);
+            PB : constant PyrLK_Pyramid := Captured (2, 1, Region);
+            Tracks : constant Point_Track_Array := Track_PyrLK (PA, PB, Points,
+              Initial_Next_Points => Seeds);
+         begin
+            for I in Points'Range loop
+               Assert (Tracks (I).Tracked and then
+                 Near (Tracks (I).Next_Point.X, Points (I).X + 2.0, 0.05) and then
+                 Near (Tracks (I).Next_Point.Y, Points (I).Y + 1.0, 0.05),
+                 "seeded pyramid source/Region lifetime");
+            end loop;
+         end;
+      end loop;
+   end Seeded_Pyramid_Lifetime;
+
+   procedure Seeded_Pyramid_Reuse (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : constant OpenCV.Core.Mat := Texture (96, 96);
+      B : constant OpenCV.Core.Mat := Shift (A, 2, 1);
+      PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A);
+      PB : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (B);
+      Points : constant Tracking_Point_Array := [5 => (25.0, 25.0)];
+      Seeds : constant Tracking_Point_Array := [20 => (27.25, 25.75)];
+      First : constant Point_Track_Array := Track_PyrLK (PA, PB, Points, Initial_Next_Points => Seeds);
+      Second : constant Point_Track_Array := Track_PyrLK
+        (PA, PB, Points, Initial_Next_Points => [30 => (26.75, 26.25)]);
+      Again : constant Point_Track_Array := Track_PyrLK (PA, PB, Points, Initial_Next_Points => Seeds);
+      Back : constant Point_Track_Array := Track_PyrLK
+        (PB, PA, [5 => (27.0, 26.0)], (Max_Level => 0, others => <>), Points);
+   begin
+      Compare_Tracks (First, Again);
+      Assert (Second (5).Tracked and then Back (5).Tracked and then
+        Near (Back (5).Next_Point.X, Points (5).X, 0.05) and then
+        Near (Back (5).Next_Point.Y, Points (5).Y, 0.05), "seeded pyramid reuse/reversal");
+   end Seeded_Pyramid_Reuse;
+
+   procedure Seeded_Pyramid_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : constant OpenCV.Core.Mat := Texture (96, 96);
+      B : constant OpenCV.Core.Mat := Texture (95, 96);
+      PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A);
+      PB : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (B);
+      Shallow : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A, (Max_Level => 0, others => <>));
+      Null_Pyramid : PyrLK_Pyramid;
+   begin
+      for Mode in 0 .. 9 loop
+         begin
+            declare
+               Options : PyrLK_Options := (others => <>);
+               Points : constant Tracking_Point_Array :=
+                 (if Mode = 9 then Tracking_Point_Array'(7 .. 6 => <>) else [5 => (25.0, 25.0)]);
+               Seeds : constant Tracking_Point_Array :=
+                 (if Mode = 9 then Tracking_Point_Array'(20 .. 19 => <>)
+                  elsif Mode = 4 then Tracking_Point_Array'(20 .. 19 => <>)
+                  elsif Mode = 5 then [20 => (536_871_040.0, 0.0)]
+                  else [20 => (25.0, 25.0)]);
+            begin
+               if Mode = 3 then Options.Window_Size := (15, 15); end if;
+               if Mode = 6 then Options.Epsilon := 0.0; end if;
+               if Mode = 7 then Options.Min_Eigenvalue_Threshold := -1.0; end if;
+               if Mode in 8 .. 9 then Options.Max_Level := 31; end if;
+               declare
+                  Tracks : constant Point_Track_Array :=
+                    (if Mode = 0 then Track_PyrLK (Null_Pyramid, PA, Points, Options, Seeds)
+                     elsif Mode = 1 then Track_PyrLK (PA, PB, Points, Options, Seeds)
+                     elsif Mode = 2 then Track_PyrLK (PA, Shallow, Points, Options, Seeds)
+                     else Track_PyrLK (PA, PA, Points, Options, Seeds));
+                  pragma Unreferenced (Tracks);
+               begin
+                  Assert (False, "seeded pyramid validation bypassed");
+               end;
+            end;
+         exception
+            when OpenCV.OpenCV_Error => null;
+         end;
+      end loop;
+   end Seeded_Pyramid_Validation;
+
    function Suite return AUnit.Test_Suites.Access_Test_Suite is
       Result : constant AUnit.Test_Suites.Access_Test_Suite := AUnit.Test_Suites.New_Suite;
    begin
@@ -1699,6 +1875,12 @@ package body Video_Tests is
        Result.Add_Test (Caller.Create ("pyramid sequential and reversed-role reuse", Pyramid_Reuse'Access));
        Result.Add_Test (Caller.Create ("pyramid compatibility empty metadata windows depth geometry", Pyramid_Compatibility'Access));
        Result.Add_Test (Caller.Create ("pyramid construction validation", Pyramid_Build_Validation'Access));
-       return Result;
+        Result.Add_Test (Caller.Create ("seeded pyramid identity translation consumption raw equivalence", Seeded_Pyramid_Equivalence'Access));
+        Result.Add_Test (Caller.Create ("seeded pyramid differing extreme empty bounds", Seeded_Pyramid_Bounds'Access));
+        Result.Add_Test (Caller.Create ("seeded pyramid failed predictions normalize", Seeded_Pyramid_Failures'Access));
+        Result.Add_Test (Caller.Create ("seeded pyramid mutated finalized sources Regions parents", Seeded_Pyramid_Lifetime'Access));
+        Result.Add_Test (Caller.Create ("seeded pyramid repeated predictions reversed roles truncation", Seeded_Pyramid_Reuse'Access));
+        Result.Add_Test (Caller.Create ("seeded pyramid validation including empty points", Seeded_Pyramid_Validation'Access));
+        return Result;
    end Suite;
 end Video_Tests;

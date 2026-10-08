@@ -194,6 +194,28 @@ int main(int argc, char **argv) {
                       << " prediction=" << seeds[i] << " refined=" << seeded[i]
                       << " error=" << error[i] << '\n';
         }
+        std::vector<cv::Mat> previous_pyramid, next_pyramid;
+        cv::buildOpticalFlowPyramid(previous, previous_pyramid, {21,21}, 0, true,
+            cv::BORDER_REFLECT_101, cv::BORDER_CONSTANT, false);
+        cv::buildOpticalFlowPyramid(next, next_pyramid, {21,21}, 0, true,
+            cv::BORDER_REFLECT_101, cv::BORDER_CONSTANT, false);
+        const auto saved_seeds = seeds;
+        std::vector<cv::Point2f> first;
+        for (int repetition = 0; repetition < 3; ++repetition) {
+            auto predictions = seeds;
+            if (repetition == 1) for (auto &p : predictions) p += cv::Point2f(-.5f,.5f);
+            cv::calcOpticalFlowPyrLK(previous_pyramid, next_pyramid, points, predictions,
+                status, error, {21,21}, 0, criteria, cv::OPTFLOW_USE_INITIAL_FLOW);
+            for (size_t i = 0; i < points.size(); ++i) {
+                if (!status[i] || cv::norm(predictions[i]-points[i]-cv::Point2f(12,7)) > .05 ||
+                    cv::norm(predictions[i]-seeds[i]) < .20 || !std::isfinite(error[i]) || error[i]<0 ||
+                    (repetition == 2 && cv::norm(predictions[i]-first[i]) > 1e-5))
+                    throw std::runtime_error("direct seeded pyramid consumption/reuse");
+            }
+            if (repetition == 0) first = predictions;
+            if (seeds != saved_seeds) throw std::runtime_error("direct pyramid seeds mutated");
+        }
+        std::cout << "PASS: direct flag-4 derivative-interleaved seeded pyramids, refinement, private predictions, reuse\n";
         std::ofstream file;
         if (argc >= 2) {
             file.open(argv[1]);
