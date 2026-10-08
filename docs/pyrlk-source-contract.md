@@ -1,3 +1,5 @@
+# PyrLK portable source contract (Tasks 001–007)
+
 ## Vector-pyramid minimum-eigenvalue source review (Task 007)
 
 Re-read tagged tracking.hpp, lkpyramid.cpp and test_optflowpyrlk.cpp for 4.1.0,
@@ -53,7 +55,6 @@ bitwise equality. Native vector experiments measure the established texture and
 corner/edge/flat fixtures and thresholds on each selected build; exact results and
 external flag-8/flag-4 mutation evidence are recorded separately.
 
-# PyrLK portable source contract (Tasks 001, 002, 004, 005 and 006)
 
 ## Seeded vector-pyramid source review (Task 006)
 

@@ -521,7 +521,7 @@ void run_quality(bool pyramids = false) {
         for (int i=0;i<int(f.seeds.size());++i)
             check(output(seeds.get()).at<cv::Point2f>(i)==f.seeds[i],"quality seeds mutated");
     }
-    std::cout << "PASS: 27 minimum-eigenvalue boundary/native-oracle entries, failed quality retained\n";
+    std::cout << "PASS: 31 minimum-eigenvalue boundary/native-oracle entries (including seeded unavailable previous), failed quality retained\n";
 }
 void run_pyramids() {
     using Pyramid = std::unique_ptr<opencv_video_pyramid_handle,

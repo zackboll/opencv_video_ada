@@ -2062,6 +2062,9 @@ package body Video_Tests is
       PB : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (B);
       Shallow : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A, (Max_Level => 0, others => <>));
       Null_Pyramid : PyrLK_Pyramid;
+      function From_Bits is new Ada.Unchecked_Conversion
+        (Interfaces.Unsigned_32, OpenCV.Float32_Value);
+      type Bit_Array is array (Positive range <>) of Interfaces.Unsigned_32;
    begin
       for Seeded in Boolean loop
       for Mode in 0 .. 9 loop
@@ -2103,6 +2106,19 @@ package body Video_Tests is
          end;
       end if;
       end loop;
+      end loop;
+      for Bits of Bit_Array'[16#7FC0_0000#, 16#7F80_0000#] loop
+         begin
+            declare
+               Tracks : constant Trackability_Track_Array := Track_PyrLK_Trackability
+                 (PA, PA, [1 => (25.0, 25.0)], Initial_Next_Points => [20 => (25.0, From_Bits (Bits))]);
+               pragma Unreferenced (Tracks);
+            begin
+               Assert (False, "nonfinite pyramid quality seed accepted");
+            end;
+         exception
+            when OpenCV.OpenCV_Error | Constraint_Error => null;
+         end;
       end loop;
    end Quality_Pyramid_Validation;
 

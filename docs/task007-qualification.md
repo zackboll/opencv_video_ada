@@ -127,8 +127,26 @@ exports, no fault hook. Retained example 4/4 on each version.
 
 ## Remote/clean-clone milestone
 
-Independent clean clone and final 73-test reruns, PR/CI URLs and actual macOS
-vector backend results will be recorded at their completed milestones. No pending
+Final serial local campaign on **each** 4.1.0/4.10.0/5.0.0: public build,
+**73 registered / 73 executed / 73 passed / 0 assertions / 0 errors**, direct
+27-entry vector quality oracle plus every retained oracle, actual shim/Core raw
+boundary and fault campaigns, ASan/UBSan/leak checks and retained 4/4 example all
+pass. Configured versions and ldd-loaded version-specific Video libraries agree.
+CPU builds write defined zero for unavailable previous quality in both new modes.
+Final Development/Validation/Release builds and Validation 73/73 pass. Static,
+eight configuration, C11 and shell/diff checks pass; nm inventory is 14.
+
+Independent clean Git clone of implementation commit
+`4a01bab638a6803f94cee9fb06601b68d57f34c4`, with no generated products copied,
+reproduces 4.10.0 build, 73/73 (zero failures/errors), complete direct/native/fault/
+sanitizer campaigns, retained 4/4 example and repository/configuration/shell/diff
+checks, exit zero and clean clone worktree. A follow-up adds explicit Ada IEEE
+special-seed validation (GNAT may raise Constraint_Error at its validity barrier,
+as in prior tests); raw C++ directly rejects both coordinate components without
+that barrier. Validation AUnit 73/73 and complete native campaigns were repeated.
+
+PR/CI URLs and actual macOS vector backend results will be recorded at their
+completed milestones. No pending
 workflow is counted successful. Review gate requires open/non-draft/unmerged PR,
 auto-merge disabled, clean tree and local/remote/PR-head equality. No merge, tag,
 release, amend, published-history rebase or force-push is authorized or performed.
