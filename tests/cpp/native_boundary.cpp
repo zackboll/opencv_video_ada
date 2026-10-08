@@ -436,9 +436,11 @@ void run_seeded(bool quality = false) {
           output(error.get()).empty(), "seeded empty pair failed");
     std::cout << (quality ? "quality " : "photometric ") << "PASS: seeded actual-shim/Core boundary, oracle, validation, aliases and atomicity\n";
 }
-void run_quality() {
-    for (int mode=0; mode<9; ++mode) {
-        const auto f=quality_fixture(mode);
+void run_quality(bool pyramids = false) {
+    for (int scenario=0; scenario<10; ++scenario) {
+        const int mode=scenario==9 ? 3 : scenario;
+        auto f=quality_fixture(mode);
+        if (scenario==9) f.seeded=true;
         auto previous=matrix(96,96,OPENCV_CORE_DEPTH_UINT8,1);
         auto next=matrix(96,96,OPENCV_CORE_DEPTH_UINT8,1);
         auto points=matrix(int(f.points.size()),1,OPENCV_CORE_DEPTH_FLOAT32,2);
@@ -452,23 +454,52 @@ void run_quality() {
             output(points.get()).at<cv::Point2f>(i)=f.points[i];
             output(seeds.get()).at<cv::Point2f>(i)=f.seeds[i];
         }
-        const auto code=f.seeded ? opencv_video_track_pyr_lk_seeded_min_eigenvalues(
+        using Pyramid = std::unique_ptr<opencv_video_pyramid_handle,
+            decltype(&opencv_video_pyramid_destroy)>;
+        auto build = [](opencv_core_mat_handle *image) {
+            opencv_video_pyramid_handle *p=nullptr;
+            check(opencv_video_pyramid_create(image,21,21,3,&p)==0,"quality pyramid build");
+            return Pyramid(p,opencv_video_pyramid_destroy);
+        };
+        auto pa=build(previous.get()),pb=build(next.get());
+        std::vector<cv::Mat> da,db;
+        cv::buildOpticalFlowPyramid(f.previous,da,{21,21},3,true,
+            cv::BORDER_REFLECT_101,cv::BORDER_CONSTANT,false);
+        cv::buildOpticalFlowPyramid(f.next,db,{21,21},3,true,
+            cv::BORDER_REFLECT_101,cv::BORDER_CONSTANT,false);
+        const auto old_result=output(result.get());
+        const auto old_status=output(status.get());
+        const auto old_values=output(values.get());
+        output(result.get()).setTo(cv::Scalar(17,19));
+        output(status.get()).setTo(23); output(values.get()).setTo(29);
+        const auto code=pyramids ? (f.seeded ?
+            opencv_video_track_pyr_lk_pyramids_seeded_min_eigenvalues(
+                pa.get(),pb.get(),points.get(),seeds.get(),result.get(),status.get(),values.get(),
+                21,21,0,30,.01,f.threshold) : opencv_video_track_pyr_lk_pyramids_min_eigenvalues(
+                pa.get(),pb.get(),points.get(),result.get(),status.get(),values.get(),
+                21,21,0,30,.01,f.threshold)) : (f.seeded ? opencv_video_track_pyr_lk_seeded_min_eigenvalues(
             previous.get(),next.get(),points.get(),seeds.get(),result.get(),status.get(),values.get(),
             21,21,0,30,.01,f.threshold) : opencv_video_track_pyr_lk_min_eigenvalues(
             previous.get(),next.get(),points.get(),result.get(),status.get(),values.get(),
-            21,21,0,30,.01,f.threshold);
+            21,21,0,30,.01,f.threshold));
         cv::Mat dest=output(seeds.get()).clone(), native_status;
         cv::Mat eigenvalues(int(f.points.size()),1,CV_32F,
                             cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
         const auto *storage=eigenvalues.data;
-        cv::calcOpticalFlowPyrLK(f.previous,f.next,output(points.get()),dest,native_status,eigenvalues,
-            {21,21},0,{3,30,.01},cv::OPTFLOW_LK_GET_MIN_EIGENVALS |
-            (f.seeded ? cv::OPTFLOW_USE_INITIAL_FLOW : 0),f.threshold);
+        const int flags=cv::OPTFLOW_LK_GET_MIN_EIGENVALS |
+            (f.seeded ? cv::OPTFLOW_USE_INITIAL_FLOW : 0);
+        if (pyramids) cv::calcOpticalFlowPyrLK(da,db,output(points.get()),dest,native_status,eigenvalues,
+            {21,21},0,{3,30,.01},flags,f.threshold);
+        else cv::calcOpticalFlowPyrLK(f.previous,f.next,output(points.get()),dest,native_status,eigenvalues,
+            {21,21},0,{3,30,.01},flags,f.threshold);
         check(storage==eigenvalues.data,"native sentinel storage not reused");
         if (mode==3 && std::isnan(eigenvalues.at<float>(1))) {
             check(code==OPENCV_VIDEO_ERROR_OPENCV,"unwritten HAL quality was exposed");
-            check(output(result.get()).rows==1 && output(status.get()).rows==1 &&
-                  output(values.get()).rows==1,"unwritten HAL quality published partial outputs");
+            check(output(result.get()).data==old_result.data && output(status.get()).data==old_status.data &&
+                  output(values.get()).data==old_values.data &&
+                  output(result.get()).at<cv::Point2f>(0)==cv::Point2f(17,19) &&
+                  output(status.get()).at<unsigned char>(0)==23 && output(values.get()).at<float>(0)==29,
+                  "unwritten HAL quality published partial outputs");
             continue;
         }
         check(code==OPENCV_VIDEO_OK,"quality boundary call failed");
@@ -596,12 +627,12 @@ void run_pyramids() {
     }
     std::cout << "PASS: owned pyramids, metadata, native oracle, source lifetime, reuse, faults/destruction\n";
 }
-void run_seeded_pyramids() {
+void run_seeded_pyramids(bool quality = false, bool seeded = true) {
     using Pyramid = std::unique_ptr<opencv_video_pyramid_handle,
         decltype(&opencv_video_pyramid_destroy)>;
     auto a=matrix(96,96,OPENCV_CORE_DEPTH_UINT8,1);
     auto b=matrix(96,96,OPENCV_CORE_DEPTH_UINT8,1);
-    output(a.get())=texture(96); output(b.get())=translated(output(a.get()),12,7);
+    output(a.get())=texture(96); output(b.get())=seeded ? translated(output(a.get()),12,7) : output(a.get()).clone();
     std::vector<cv::Mat> da,db;
     cv::buildOpticalFlowPyramid(output(a.get()),da,{21,21},3,true,
         cv::BORDER_REFLECT_101,cv::BORDER_CONSTANT,false);
@@ -627,12 +658,19 @@ void run_seeded_pyramids() {
                  const opencv_core_mat_handle *pts, const opencv_core_mat_handle *sds,
                  opencv_core_mat_handle *r, opencv_core_mat_handle *s, opencv_core_mat_handle *e,
                  int window=21,int level=0,double epsilon=.01) {
-        return opencv_video_track_pyr_lk_pyramids_seeded(p,q,pts,sds,r,s,e,
-            window,21,level,30,epsilon,1e-4);
+        if (!seeded) {
+            return opencv_video_track_pyr_lk_pyramids_min_eigenvalues(p,q,pts,r,s,e,
+                window,21,level,30,epsilon,1e-4);
+        }
+        const auto track=quality ? opencv_video_track_pyr_lk_pyramids_seeded_min_eigenvalues :
+            opencv_video_track_pyr_lk_pyramids_seeded;
+        return track(p,q,pts,sds,r,s,e,window,21,level,30,epsilon,1e-4);
     };
     const auto saved_seeds=output(seeds.get()).clone();
     cv::Mat direct=saved_seeds.clone(),ds,de;
-    cv::calcOpticalFlowPyrLK(da,db,output(points.get()),direct,ds,de,{21,21},0,{3,30,.01},4);
+    if (quality) de=cv::Mat(4,1,CV_32F,cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
+    cv::calcOpticalFlowPyrLK(da,db,output(points.get()),direct,ds,de,{21,21},0,{3,30,.01},
+        (seeded ? 4 : 0) | (quality ? 8 : 0));
     for (int repetition=0;repetition<3;++repetition) {
         check(call(pa.get(),pb.get(),points.get(),seeds.get(),result.get(),status.get(),error.get())==0,
               "valid seeded pyramid failed");
@@ -643,7 +681,7 @@ void run_seeded_pyramids() {
         for (int i=0;i<4;++i)
             check(output(status.get()).at<unsigned char>(i)==1 &&
                   cv::norm(output(result.get()).at<cv::Point2f>(i)-fixture_points(96)[size_t(i)]-
-                           cv::Point2f(12,7))<.05,"seeded pyramid predictions ignored");
+                           (seeded ? cv::Point2f(12,7) : cv::Point2f(0,0)))<.05,"seeded pyramid predictions ignored");
     }
     auto snapshot=[&]() { return std::vector<cv::Mat>{output(result.get()),output(status.get()),output(error.get())}; };
     const auto headers=snapshot();
@@ -658,6 +696,7 @@ void run_seeded_pyramids() {
               cv::norm(re,output(error.get()),cv::NORM_INF)==0,"failed seeded pyramid changed storage");
     };
     for (int slot=0;slot<7;++slot) {
+        if (!seeded && slot==3) continue;
         check(call(slot==0?nullptr:pa.get(),slot==1?nullptr:pb.get(),slot==2?nullptr:points.get(),
             slot==3?nullptr:seeds.get(),slot==4?nullptr:result.get(),slot==5?nullptr:status.get(),
             slot==6?nullptr:error.get())!=0,"null seeded pyramid argument accepted"); unchanged();
@@ -676,8 +715,10 @@ void run_seeded_pyramids() {
         case 7: output(bad.get()).at<cv::Point2f>(0).x=536871040.f; break;
         default: output(bad.get()).at<cv::Point2f>(0).y=-536871040.f;
         }
-        check(call(pa.get(),pb.get(),points.get(),bad.get(),result.get(),status.get(),error.get())!=0,
-              "invalid seeded pyramid seed schema accepted"); unchanged();
+        if (seeded) check(call(pa.get(),pb.get(),points.get(),bad.get(),result.get(),status.get(),error.get())!=0,
+              "invalid seeded pyramid seed schema accepted");
+        if (mode != 2 || seeded) check(call(pa.get(),pb.get(),bad.get(),seeds.get(),result.get(),status.get(),error.get())!=0,
+              "invalid pyramid point schema accepted"); unchanged();
     }
     check(call(pa.get(),pb.get(),points.get(),seeds.get(),result.get(),status.get(),error.get(),15)!=0,
           "seeded pyramid window mismatch"); unchanged();
@@ -692,10 +733,26 @@ void run_seeded_pyramids() {
           "seeded pyramid geometry mismatch"); unchanged();
     check(call(shallow.get(),shallow.get(),points.get(),seeds.get(),result.get(),status.get(),error.get(),21,1)!=0,
           "seeded pyramid requested build depth mismatch"); unchanged();
-    check(call(pa.get(),pb.get(),points.get(),seeds.get(),seeds.get(),status.get(),error.get())!=0,
+    if (seeded) check(call(pa.get(),pb.get(),points.get(),seeds.get(),seeds.get(),status.get(),error.get())!=0,
           "seeded pyramid seed/output alias"); unchanged();
+    check(call(pa.get(),pb.get(),points.get(),seeds.get(),points.get(),status.get(),error.get())!=0,
+          "pyramid point/output alias"); unchanged();
     check(call(pa.get(),pb.get(),points.get(),seeds.get(),result.get(),result.get(),error.get())!=0,
           "seeded pyramid output/output alias"); unchanged();
+    for (int out=0;out<3;++out) {
+        check(call(pa.get(),pb.get(),points.get(),seeds.get(),
+            out==0?points.get():result.get(),out==1?points.get():status.get(),
+            out==2?points.get():error.get())!=0,"point/output header alias"); unchanged();
+        if (seeded) {
+            check(call(pa.get(),pb.get(),points.get(),seeds.get(),
+                out==0?seeds.get():result.get(),out==1?seeds.get():status.get(),
+                out==2?seeds.get():error.get())!=0,"seed/output header alias"); unchanged();
+        }
+    }
+    check(call(pa.get(),pb.get(),points.get(),seeds.get(),result.get(),status.get(),status.get())!=0,
+          "status/scalar header alias"); unchanged();
+    check(call(pa.get(),pb.get(),points.get(),seeds.get(),result.get(),status.get(),result.get())!=0,
+          "point/scalar header alias"); unchanged();
 #ifdef OPENCV_VIDEO_TEST_FAULTS
     for (int stage : {1,2}) for (int kind : {1,2,3,4}) {
         fault_stage=stage; fault_kind=kind;
@@ -716,6 +773,7 @@ void run_seeded_pyramids() {
     output(result.get())=output(seeds.get());
     check(call(pa.get(),pb.get(),points.get(),seeds.get(),result.get(),status.get(),error.get())==0 &&
           cv::norm(saved_seeds,output(seeds.get()),cv::NORM_INF)==0,"shared seed success mutation");
+    if (!quality) {
     output(points.get()).at<cv::Point2f>(0)={-1000,-1000};
     output(seeds.get()).at<cv::Point2f>(1)={1000,1000};
     check(call(pa.get(),pb.get(),points.get(),seeds.get(),result.get(),status.get(),error.get())==0,
@@ -723,13 +781,15 @@ void run_seeded_pyramids() {
     for (int i : {0,1}) check(output(status.get()).at<unsigned char>(i)==0 &&
         output(result.get()).at<cv::Point2f>(i)==output(points.get()).at<cv::Point2f>(i) &&
         output(error.get()).at<float>(i)==0,"failed seeded pyramid not normalized");
+    }
     output(points.get())=cv::Mat(0,1,CV_32FC2); output(seeds.get())=cv::Mat(0,1,CV_32FC2);
     check(call(pa.get(),pb.get(),points.get(),seeds.get(),result.get(),status.get(),error.get(),15)!=0,
           "empty seeded pyramid bypassed compatibility");
     check(call(pa.get(),pb.get(),points.get(),seeds.get(),result.get(),status.get(),error.get())==0 &&
           output(result.get()).empty() && output(status.get()).empty() && output(error.get()).empty(),
           "empty seeded pyramid outputs");
-    std::cout << "PASS: seeded pyramid actual shim flag 4 oracle, ownership, reuse, schema, aliases, atomicity, faults\n";
+    std::cout << "PASS: pyramid actual shim flags " << (quality ? (seeded ? 12 : 8) : 4)
+              << " oracle, ownership, reuse, schema, aliases, atomicity, faults\n";
 }
 }  // namespace
 
@@ -742,6 +802,9 @@ int main() {
         run_quality();
         run_pyramids();
         run_seeded_pyramids();
+        run_quality(true);
+        run_seeded_pyramids(true);
+        run_seeded_pyramids(true,false);
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "FAIL: " << error.what() << '\n';

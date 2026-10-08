@@ -55,6 +55,28 @@ opencv_video_status opencv_video_track_pyr_lk_pyramids_seeded(
     int32_t window_width, int32_t window_height, int32_t max_level,
     int32_t maximum_iterations, double epsilon, double min_eigenvalue_threshold);
 
+/* Quality modes: flags 8/12, strict initialized-storage contract. */
+opencv_video_status opencv_video_track_pyr_lk_pyramids_min_eigenvalues(
+    const opencv_video_pyramid_handle *previous,
+    const opencv_video_pyramid_handle *next,
+    const opencv_core_mat_handle *previous_points,
+    opencv_core_mat_handle *next_points, opencv_core_mat_handle *track_status,
+    opencv_core_mat_handle *minimum_eigenvalues,
+    int32_t window_width, int32_t window_height, int32_t max_level,
+    int32_t maximum_iterations, double epsilon, double min_eigenvalue_threshold);
+
+/* Owned pyramid quality tracking, flags exactly 12. Same seed/private-clone
+ * and failure-atomic publication contract as the raw-image seeded export. */
+opencv_video_status opencv_video_track_pyr_lk_pyramids_seeded_min_eigenvalues(
+    const opencv_video_pyramid_handle *previous,
+    const opencv_video_pyramid_handle *next,
+    const opencv_core_mat_handle *previous_points,
+    const opencv_core_mat_handle *initial_next_points,
+    opencv_core_mat_handle *next_points, opencv_core_mat_handle *track_status,
+    opencv_core_mat_handle *minimum_eigenvalues,
+    int32_t window_width, int32_t window_height, int32_t max_level,
+    int32_t maximum_iterations, double epsilon, double min_eigenvalue_threshold);
+
 /* Handles must be real live Core handles. Output headers must be distinct from
  * each other and all inputs. On failure, existing outputs are unchanged (not
  * cleared); Ada supplies initially empty outputs. On successful empty points,

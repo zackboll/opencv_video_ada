@@ -1,5 +1,44 @@
 # OpenCV Video for Ada
 
+### Minimum-eigenvalue trackability with owned pyramids (Task 007)
+
+```ada
+Previous_Pyramid : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (Previous_Image);
+Current_Pyramid  : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (Current_Image);
+Quality : constant Trackability_Track_Array := Track_PyrLK_Trackability
+  (Previous_Pyramid, Current_Pyramid, Points);
+Seeded_Quality : constant Trackability_Track_Array := Track_PyrLK_Trackability
+  (Previous_Pyramid, Current_Pyramid, Points,
+   Initial_Next_Points => Predicted_Points);
+```
+
+This usage fragment assumes application images and arrays. Options precedes the
+required predictions; named predictions permit default options. Counts must match,
+but array lower bounds may differ. Both overloads preserve `Points'Range`. Stored
+image/derivative vectors are reused directly, with flags **8 / 12** respectively;
+seeds are privately cloned and refined, never returned as failed coordinates.
+Pyramid geometry/window/requested-depth compatibility is checked even for empty
+points; available depth can truncate naturally.
+
+`Minimum_Eigenvalue` measures **previous-patch LK conditioning**, normalized by
+window area. It is not photometric difference, round-trip error or probability:
+
+- `Point_Track.Error`: photometric patch difference;
+- `Trackability_Track.Minimum_Eigenvalue`: previous-patch LK conditioning;
+- `Forward_Backward_Track.Round_Trip_Error`: geometric round-trip inconsistency.
+
+A failed track returns the original previous point but retains valid native
+quality, including a positive eigenvalue on failed next search or threshold
+rejection. Every quality slot must be defined, finite and nonnegative. Native
+unwritten/invalid quality raises `OpenCV_Error` for the entire call; no zero is
+fabricated. In particular OpenCV 5.0 KleidiCV can leave unavailable-previous
+quality unwritten: prebuilt vectors still reach the per-level HAL, so they are
+not a workaround for that backend contract. See the [source contract](docs/pyrlk-source-contract.md)
+and [qualification](docs/task007-qualification.md) for actual backend evidence.
+No universal application/navigation quality threshold or combined score is given.
+Owned pyramids survive source/Region/parent finalization and support sequential
+reuse/role reversal; concurrent safety is not claimed.
+
 ### Seeded tracking with reusable owned pyramids
 
 ```ada
@@ -249,8 +288,8 @@ The native tracker receives the stored vectors directly; it does not rebuild
 pyramids per call. Sequential repeated reuse and next-now/previous-later use are
 supported; general concurrent thread safety is not promised. Precomputing dx/dy
 costs memory but permits reuse when a current frame becomes previous. No universal
-speedup is claimed without measurements. Seeded, trackability and forward/backward
-pyramid overloads are deliberately deferred. See [Task 005](docs/tasks/005-reusable-pyrlk-pyramids.md)
+speedup is claimed without measurements. Seeded and trackability overloads are now available; forward/backward
+pyramid composition remains deferred. See [Task 005](docs/tasks/005-reusable-pyrlk-pyramids.md)
 and its [qualification record](docs/task005-qualification.md).
 
 ## Build
@@ -324,7 +363,7 @@ manual-only.
 
 The first slice does not bind:
 
-- seeded, trackability and forward/backward prebuilt-pyramid tracking;
+- forward/backward prebuilt-pyramid composition;
 - Farneback or DIS dense optical flow;
 - ECC registration;
 - KalmanFilter;

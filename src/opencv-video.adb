@@ -214,15 +214,27 @@ package body OpenCV.Video is
                         procedure Seed_Callback (Seed_Handle : Bridge.Input_Mat_Handle) is
                         begin
                            if Previous_Pyramid /= System.Null_Address then
-                              Code := C.Track_PyrLK_Pyramids_Seeded
-                                (Previous_Pyramid, Next_Pyramid, Point_Handle, Seed_Handle,
-                                 Next_Point_Handle, Status_Handle, Error_Handle,
-                                 Interfaces.Integer_32 (Options.Window_Size.Width),
-                                 Interfaces.Integer_32 (Options.Window_Size.Height),
-                                 Interfaces.Integer_32 (Options.Max_Level),
-                                 Interfaces.Integer_32 (Options.Maximum_Iterations),
-                                 Interfaces.C.double (Options.Epsilon),
-                                 Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                              if Quality then
+                                 Code := C.Track_PyrLK_Pyramids_Seeded_Quality
+                                   (Previous_Pyramid, Next_Pyramid, Point_Handle, Seed_Handle,
+                                    Next_Point_Handle, Status_Handle, Error_Handle,
+                                    Interfaces.Integer_32 (Options.Window_Size.Width),
+                                    Interfaces.Integer_32 (Options.Window_Size.Height),
+                                    Interfaces.Integer_32 (Options.Max_Level),
+                                    Interfaces.Integer_32 (Options.Maximum_Iterations),
+                                    Interfaces.C.double (Options.Epsilon),
+                                    Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                              else
+                                 Code := C.Track_PyrLK_Pyramids_Seeded
+                                   (Previous_Pyramid, Next_Pyramid, Point_Handle, Seed_Handle,
+                                    Next_Point_Handle, Status_Handle, Error_Handle,
+                                    Interfaces.Integer_32 (Options.Window_Size.Width),
+                                    Interfaces.Integer_32 (Options.Window_Size.Height),
+                                    Interfaces.Integer_32 (Options.Max_Level),
+                                    Interfaces.Integer_32 (Options.Maximum_Iterations),
+                                    Interfaces.C.double (Options.Epsilon),
+                                    Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                              end if;
                            elsif Quality then
                               Code := C.Track_PyrLK_Seeded_Quality
                                 (Previous_Handle, Next_Handle, Point_Handle, Seed_Handle,
@@ -250,15 +262,27 @@ package body OpenCV.Video is
                            Bridge.With_Input_Handle (Seed_Input, Seed_Callback'Access);
                         else
                            if Previous_Pyramid /= System.Null_Address then
-                              Code := C.Track_PyrLK_Pyramids
-                                (Previous_Pyramid, Next_Pyramid, Point_Handle,
-                                 Next_Point_Handle, Status_Handle, Error_Handle,
-                                 Interfaces.Integer_32 (Options.Window_Size.Width),
-                                 Interfaces.Integer_32 (Options.Window_Size.Height),
-                                 Interfaces.Integer_32 (Options.Max_Level),
-                                 Interfaces.Integer_32 (Options.Maximum_Iterations),
-                                 Interfaces.C.double (Options.Epsilon),
-                                 Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                              if Quality then
+                                 Code := C.Track_PyrLK_Pyramids_Quality
+                                   (Previous_Pyramid, Next_Pyramid, Point_Handle,
+                                    Next_Point_Handle, Status_Handle, Error_Handle,
+                                    Interfaces.Integer_32 (Options.Window_Size.Width),
+                                    Interfaces.Integer_32 (Options.Window_Size.Height),
+                                    Interfaces.Integer_32 (Options.Max_Level),
+                                    Interfaces.Integer_32 (Options.Maximum_Iterations),
+                                    Interfaces.C.double (Options.Epsilon),
+                                    Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                              else
+                                 Code := C.Track_PyrLK_Pyramids
+                                   (Previous_Pyramid, Next_Pyramid, Point_Handle,
+                                    Next_Point_Handle, Status_Handle, Error_Handle,
+                                    Interfaces.Integer_32 (Options.Window_Size.Width),
+                                    Interfaces.Integer_32 (Options.Window_Size.Height),
+                                    Interfaces.Integer_32 (Options.Max_Level),
+                                    Interfaces.Integer_32 (Options.Maximum_Iterations),
+                                    Interfaces.C.double (Options.Epsilon),
+                                    Interfaces.C.double (Options.Min_Eigenvalue_Threshold));
+                              end if;
                            elsif Quality then
                               Code := C.Track_PyrLK_Quality
                                 (Previous_Handle, Next_Handle, Point_Handle,
@@ -299,8 +323,7 @@ package body OpenCV.Video is
       end Previous_Callback;
    begin
       if (Previous_Pyramid = System.Null_Address) /=
-        (Next_Pyramid = System.Null_Address) or else
-        (Quality and then Previous_Pyramid /= System.Null_Address)
+        (Next_Pyramid = System.Null_Address)
       then
          raise OpenCV.OpenCV_Error with "Unsupported private PyrLK routing";
       end if;
@@ -450,6 +473,55 @@ package body OpenCV.Video is
          end loop;
       end return;
    end Quality_Results;
+
+   function Track_PyrLK_Trackability
+     (Previous_Pyramid : PyrLK_Pyramid;
+      Next_Pyramid : PyrLK_Pyramid;
+      Points : Tracking_Point_Array;
+      Options : PyrLK_Options := (others => <>)) return Trackability_Track_Array
+   is
+      Empty_Image : OpenCV.Core.Mat;
+   begin
+      Require_Pyramid (Previous_Pyramid);
+      Require_Pyramid (Next_Pyramid);
+      if Previous_Pyramid.Rows /= Next_Pyramid.Rows or else
+        Previous_Pyramid.Columns /= Next_Pyramid.Columns or else
+        Options.Window_Size /= Previous_Pyramid.Window or else
+        Options.Window_Size /= Next_Pyramid.Window or else
+        Options.Max_Level > Previous_Pyramid.Requested or else
+        Options.Max_Level > Next_Pyramid.Requested
+      then
+         raise OpenCV.OpenCV_Error with "Incompatible PyrLK pyramids/options";
+      end if;
+      return Quality_Results (Track_Internal
+        (Empty_Image, Empty_Image, Points, [], False, Options, True,
+         Previous_Pyramid.Handle, Next_Pyramid.Handle));
+   end Track_PyrLK_Trackability;
+
+   function Track_PyrLK_Trackability
+     (Previous_Pyramid    : PyrLK_Pyramid;
+      Next_Pyramid        : PyrLK_Pyramid;
+      Points              : Tracking_Point_Array;
+      Options             : PyrLK_Options := (others => <>);
+      Initial_Next_Points : Tracking_Point_Array) return Trackability_Track_Array
+   is
+      Empty_Image : OpenCV.Core.Mat;
+   begin
+      Require_Pyramid (Previous_Pyramid);
+      Require_Pyramid (Next_Pyramid);
+      if Previous_Pyramid.Rows /= Next_Pyramid.Rows or else
+        Previous_Pyramid.Columns /= Next_Pyramid.Columns or else
+        Options.Window_Size /= Previous_Pyramid.Window or else
+        Options.Window_Size /= Next_Pyramid.Window or else
+        Options.Max_Level > Previous_Pyramid.Requested or else
+        Options.Max_Level > Next_Pyramid.Requested
+      then
+         raise OpenCV.OpenCV_Error with "Incompatible PyrLK pyramids/options";
+      end if;
+      return Quality_Results (Track_Internal
+        (Empty_Image, Empty_Image, Points, Initial_Next_Points, True, Options, True,
+         Previous_Pyramid.Handle, Next_Pyramid.Handle));
+   end Track_PyrLK_Trackability;
 
    function Track_PyrLK
      (Previous_Image : OpenCV.Core.Mat;

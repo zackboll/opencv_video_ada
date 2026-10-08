@@ -1,3 +1,58 @@
+## Vector-pyramid minimum-eigenvalue source review (Task 007)
+
+Re-read tagged tracking.hpp, lkpyramid.cpp and test_optflowpyrlk.cpp for 4.1.0,
+4.10.0 and 5.0.0 from the authoritative URLs below. The legacy accuracy/Mat-point
+regressions do not qualify initialized failed-slot quality on vector inputs;
+Task 007 adds a separate direct oracle and actual Core/shim comparison.
+
+| source fact | 4.1.0 lkpyramid.cpp | 4.10.0 | 5.0.0 |
+| --- | --- | --- | --- |
+| vector/derivative detection | 1271–1331 | 1302–1362 | 1093–1153 |
+| previous derivative reuse/invoker | 1345–1369 | 1376–1400 | 1167–1191 |
+| unavailable previous CPU write | 214–226 | 218–230 | 165–177 |
+| eigenvalue before rejection | 442–458 | 472–488 | 417–433 |
+| photometric branch excluded with bit 8 | 656–693 | 684–721 | 628–664 |
+
+STD_VECTOR_MAT is recognized by an odd final index and the derivative member's
+signed-16 depth and twice-image channel count; level stride becomes two. Previous
+`prevPyr[level*2+1]` derivatives are reused directly. Next derivatives are not read
+in that direction but remain available for later reversal. Both vector depths
+clamp maxLevel; Video also checks requested build-depth compatibility, using the
+minimum of request and both available depths.
+
+The same invoker computes the previous-image 2x2 LK normal matrix and minimum
+eigenvalue divided by window area. Bit 8 writes quality before threshold or
+singular-matrix rejection, and suppresses the final photometric L1 write. A valid
+previous patch followed by next-search failure retains its eigenvalue; unavailable
+previous patch at level zero writes zero in CPU fallback. Bit 4 changes only the
+initial destination estimate/coarsest scaling and finer-level refinement, not the
+previous-patch conditioning calculation. Thus flags 8 and 12 measure the same
+quantity for the same previous patch, independently of predictions.
+
+Dispatch is not assumed identical to arbitrary raw-image inputs. Vector Mats
+cannot trigger the UMat/OpenCL gate; 4.1/4.10 OpenVX is disabled. Crucially 5.0
+`LKTrackerInvoker` scales predictions (133–143) then calls the per-level HAL
+(148–157), even with stored derivatives. The HAL receives the stored derivative
+pointer and quality Boolean, not an initial-flow Boolean. A successful vendor HAL
+bypasses CPU writes. Re-reviewed KleidiCV 26.03 common implementation 118–152:
+unavailable previous patch sets false status then continues without touching err;
+valid previous patch writes eigenvalue before threshold and next-search failures.
+Prebuilt vectors therefore do not remove this source-backed definedness risk.
+Direct oracle records vector sentinel behavior independently from raw behavior;
+Ada and boundary tests demand whole-call rejection if vector quality is unwritten.
+Actual macOS results belong in task007-qualification.md, not inferred from source.
+
+Private continuous Nx1 CV_32F quality is NaN-initialized, its data identity saved,
+and reuse/schema/all-slot finite nonnegative checks precede publication. No valid
+failed-status eigenvalue is discarded; failed coordinates alone normalize. Existing
+raw 0/4/8/12 and pyramid 0/4 routes retain their behavior. No pyramid reconstruction,
+derivative regeneration, backend disablement or fabricated quality is introduced.
+
+Same-build oracle comparisons use 1e-5 scalar/coordinate tolerances, not cross-tag
+bitwise equality. Native vector experiments measure the established texture and
+corner/edge/flat fixtures and thresholds on each selected build; exact results and
+external flag-8/flag-4 mutation evidence are recorded separately.
+
 # PyrLK portable source contract (Tasks 001, 002, 004, 005 and 006)
 
 ## Seeded vector-pyramid source review (Task 006)
@@ -33,7 +88,7 @@ value: it substitutes previous point and zero error, not the seed. Seeds need no
 be inside image bounds; no maximum displacement is introduced. A private seed
 clone and private status/error storage isolate all native mutation, then complete
 schema/success-value validation precedes three-header publication. Flags are
-exactly 4 for seeded pyramids; unsupported pyramid-quality routing is rejected.
+exactly 4 for seeded pyramids; pyramid quality was deferred in Task 006 and is added in Task 007.
 
 ## Evidence
 
