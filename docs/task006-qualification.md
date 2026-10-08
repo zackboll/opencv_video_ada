@@ -96,3 +96,27 @@ configuration/diff checks, all exit zero.
 Final-head PR and pinned run evidence is recorded after completion below, with
 exact final SHA/run URLs in the PR review-gate comment. Earlier runs are never
 claimed to test later documentation commits.
+
+PR [#6](https://github.com/zackboll/opencv_video_ada/pull/6) is open/non-draft,
+unmerged, auto-merge disabled. Qualification head
+`09830f7d9c3b61edbebb8ae1e81f661667a87701` passed
+[required CI run 37709997315](https://github.com/zackboll/opencv_video_ada/actions/runs/37709997315):
+repository-checks, linux, macos, linux-sanitizers. Exact job logs retrieved:
+Linux OpenCV 4.6.0 and macOS ARM64 Homebrew 5.0.0 each pass 65/65, zero assertion
+failures/unexpected errors, complete direct/native/fault campaigns and 4/4 example.
+macOS Video/Core shim linkage verifies libc++ and absence of libstdc++ linkage;
+GNAT toolchain emits a non-failing macOS deployment-version linker warning.
+Linux actual-shim ASan/UBSan/leak campaign passes with no reported findings.
+
+[Pinned run 37709995714](https://github.com/zackboll/opencv_video_ada/actions/runs/37709995714)
+passes on that same head. Retrieved exact logs for independently source-built
+4.1.0, 4.10.0 and 5.0.0: each passes public build, 65/65 AUnit, zero assertions/
+errors, seeded-vector direct oracle, actual-shim boundary/faults, ASan/UBSan/leaks,
+retained Task 001–005 regressions and 4/4 example. Selected native version checks
+pass; no fallback to system version accepted. No deterministic CI failure or
+blind rerun occurred. No unresolved Task 006 implementation issue found.
+
+This evidence-only follow-up changes no code/tests/workflows. Required PR and
+pinned workflows are verified again on its final pushed head; those final-head
+run URLs and SHA are recorded in the PR review-gate comment. No merge/tag/release/
+amend/published-history rebase/force-push/auto-merge occurred.
