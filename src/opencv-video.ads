@@ -58,6 +58,16 @@ package OpenCV.Video is
       Points : Tracking_Point_Array;
       Options : PyrLK_Options := (others => <>)) return Point_Track_Array;
 
+   --  Initial predictions correspond by iteration position, not array index.
+   --  Equal lengths are required; different lower bounds are supported. Seeds
+   --  are privately copied, refined with flag 4, and never used for failures.
+   function Track_PyrLK
+     (Previous_Pyramid    : PyrLK_Pyramid;
+      Next_Pyramid        : PyrLK_Pyramid;
+      Points              : Tracking_Point_Array;
+      Options             : PyrLK_Options := (others => <>);
+      Initial_Next_Points : Tracking_Point_Array) return Point_Track_Array;
+
    --  Track Points from Previous_Image into Next_Image using
    --  cv::calcOpticalFlowPyrLK.
    --

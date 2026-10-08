@@ -1,4 +1,39 @@
-# PyrLK portable source contract (Tasks 001, 002, 004 and 005)
+# PyrLK portable source contract (Tasks 001, 002, 004, 005 and 006)
+
+## Seeded vector-pyramid source review (Task 006)
+
+The authoritative tagged tracking.hpp declarations (4.1/4.10 lines 106–164,
+5.0 lines 110–172) permit buildOpticalFlowPyramid inputs and define initial flow
+as flag 4. Reviewed each tag's modules/video/src/lkpyramid.cpp and
+modules/video/test/test_optflowpyrlk.cpp. The latter's legacy image/point test and
+Mat-point regression do not independently prove seeded vector behavior; the new
+direct and actual-shim experiments provide that evidence.
+
+CPU calc: 4.1 lines 1229–1369, 4.10 1260–1400, 5.0 1051–1191. Both point
+arrays require checkVector(2,CV_32F,true) and equal count; flag 4 suppresses native
+next-point creation. STD_VECTOR_MAT recognition checks odd last index, derivative
+channels twice image channels and signed derivative depth, selecting step 2.
+Each available depth clamps maxLevel independently. The binding additionally
+rejects requests beyond either requested build depth and mismatched windows.
+Previous derivatives come directly from prevPyr[level*2+1]; they are not rebuilt.
+Next derivatives are stored for later role reversal, not read in that direction.
+
+Invoker seed scaling: 4.1 lines 197–207, 4.10 201–211, 5.0 133–143.
+At effective coarsest level, predictions divide by 2**level; finer levels double
+the preceding refined result. These operations depend on flags and effective
+maxLevel, not whether inputs originated as images or vector pyramids. OpenCV 5.0
+scales predictions before CALL_HAL(LKOpticalFlowLevel), passing the same stored
+derivatives and already-scaled next points. HAL does not receive a separate
+initial-flow switch. Fallback and HAL rounding prohibit cross-version bitwise
+promises; the Task 004 KleidiCV quality definedness limitation remains unchanged.
+
+Status and photometric L1 error follow the existing ordinary/seeded contract.
+Failed native next/error are not promised meaningful. Video reads neither failed
+value: it substitutes previous point and zero error, not the seed. Seeds need not
+be inside image bounds; no maximum displacement is introduced. A private seed
+clone and private status/error storage isolate all native mutation, then complete
+schema/success-value validation precedes three-header publication. Flags are
+exactly 4 for seeded pyramids; unsupported pyramid-quality routing is rejected.
 
 ## Evidence
 

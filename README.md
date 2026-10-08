@@ -1,5 +1,35 @@
 # OpenCV Video for Ada
 
+### Seeded tracking with reusable owned pyramids
+
+```ada
+declare
+   Previous_Pyramid : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (Previous_Image);
+   Current_Pyramid  : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (Current_Image);
+   Tracks : constant Point_Track_Array := Track_PyrLK
+     (Previous_Pyramid    => Previous_Pyramid,
+      Next_Pyramid        => Current_Pyramid,
+      Points              => Points,
+      Initial_Next_Points => Predicted_Points);
+begin
+   for Track of Tracks loop
+      if Track.Tracked then
+         Process_Tracked_Point (Track.Next_Point);
+      end if;
+   end loop;
+end;
+```
+
+This usage fragment assumes application images, point arrays and processing
+procedure. Predictions assist convergence, not guarantee a physically correct
+match. Equal array lengths are required; lower bounds may differ. Predictions
+are privately copied and refined with native flag 4. Failed tracks return the
+previous point and zero photometric error, never the prediction. Owned pyramids
+remain usable after source Mats/Regions/parents are finalized and support
+sequential reuse and frame-role reversal, not a general thread-safety guarantee.
+Task 006 retains the original 59 tests and adds six focused campaigns (65 AUnit
+registrations); the C ABI inventory is twelve semantic exports/imports.
+
 Handwritten thick Ada binding for the OpenCV **video** module used by temporal
 tracking in the GPS-denied navigation stack. Repository: `opencv_video_ada`;
 Alire crate: `opencv_video`; public package: `OpenCV.Video`.

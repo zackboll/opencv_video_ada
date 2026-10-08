@@ -43,6 +43,18 @@ opencv_video_status opencv_video_track_pyr_lk_pyramids(
     int32_t window_width, int32_t window_height, int32_t max_level,
     int32_t maximum_iterations, double epsilon, double min_eigenvalue_threshold);
 
+/* Owned pyramid photometric tracking, flags exactly 4. Same seed/private-clone
+ * and failure-atomic publication contract as the raw-image seeded export. */
+opencv_video_status opencv_video_track_pyr_lk_pyramids_seeded(
+    const opencv_video_pyramid_handle *previous,
+    const opencv_video_pyramid_handle *next,
+    const opencv_core_mat_handle *previous_points,
+    const opencv_core_mat_handle *initial_next_points,
+    opencv_core_mat_handle *next_points, opencv_core_mat_handle *track_status,
+    opencv_core_mat_handle *track_error,
+    int32_t window_width, int32_t window_height, int32_t max_level,
+    int32_t maximum_iterations, double epsilon, double min_eigenvalue_threshold);
+
 /* Handles must be real live Core handles. Output headers must be distinct from
  * each other and all inputs. On failure, existing outputs are unchanged (not
  * cleared); Ada supplies initially empty outputs. On successful empty points,
