@@ -113,7 +113,44 @@ pass. No warnings policy was weakened.
 
 ## Final qualification and review gate
 
-Final added oracle/mapping checks, isolated backward flag-4 mutation, independent
-clean clone and hosted final-head results are recorded when completed. Pending
-results are never counted as passes. No merge, tag, release, amend, published
-history rebase, force-push or auto-merge is authorized or performed.
+Implementation head `0be2b9ea802756e1e4bd89ce45c8276974de8423`
+(Add forward-backward consistency using owned PyrLK pyramids) was pushed and
+[PR #8](https://github.com/zackboll/opencv_video_ada/pull/8) opened non-draft
+against main, auto-merge disabled, unmerged.
+
+Final strengthened photometric-error and independent backward-mapping checks
+pass complete local campaigns on actual 4.1.0/4.10.0/5.0.0: **92 registered /
+92 executed / 92 passed / 0 assertions / 0 errors**, with configured and loaded
+versions checked, actual boundary/faults, vector oracle, ASan/UBSan/leaks and
+retained example all passing. Logs are preserved under
+`/home/zboll/.cache/video-task008/` (`test-VERSION.log`,
+`sanitizers-VERSION.log`, `example-VERSION.log`, `oracle-VERSION.txt`).
+
+An independent no-hardlinks Git clone of the implementation head passes complete
+test/native/fault/oracle/sanitizer/example campaigns, all public profiles,
+Validation AUnit 92/92, `alr -n test` 92/92, repository/configuration/shell/diff
+checks, exit 0 and clean tree. Scratch `/tmp` filled during the first final rerun,
+causing compiler/binder writes to fail. The task-owned scratch data was moved
+to the home filesystem and compiler TMPDIR selected there; interrupted checks
+were rerun successfully without changing implementation or other agents' files.
+
+Isolated scratch-clone mutation disabling flag 4 in pyramid photometric mode
+fails 8 assertions (84/92 pass). A second directional mutation preserves forward
+flag 4 for the distinguishing positive-translation fixture but removes it for
+reverse predictions (prediction X < backward source X). The good seeded (12,7)
+forward fixture then fails round-trip recovery; compact mapping and vector-oracle
+comparisons fail too (86/92 pass, 6 assertions, 0 errors). Thus backward original
+destination predictions genuinely matter, not merely forward seeds. Neither
+mutation is committed; scratch source is restored. No production fault hook added.
+
+[Implementation-head PR CI 37718063365](https://github.com/zackboll/opencv_video_ada/actions/runs/37718063365)
+repository-checks passed. At the last inspected milestone Linux and Linux
+sanitizers were in “Run alire-project/setup-alire@latest”, macOS in “Install native
+dependencies”. This is not completed CI. Manual pinned dispatch was attempted
+but rejected with HTTP 403 API rate limit exceeded, user 4860920, request
+`9C73:2C85D9:383DF8:B9A838:6AC6FFF4`, timestamp 2026-10-08 02:29:08 UTC.
+No Task 008 pinned hosted run is claimed. Authenticated Actions inspection also
+returns HTTP 403; anonymous public inspection confirmed Task 007 pinned 5.0
+remains in dependency installation. Completed local qualification is retained.
+Pending results are never counted as passes. No merge, tag, release, amend,
+published history rebase, force-push or auto-merge was performed.
