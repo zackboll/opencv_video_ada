@@ -42,7 +42,10 @@ valid previous patch writes eigenvalue before threshold and next-search failures
 Prebuilt vectors therefore do not remove this source-backed definedness risk.
 Direct oracle records vector sentinel behavior independently from raw behavior;
 Ada and boundary tests demand whole-call rejection if vector quality is unwritten.
-Actual macOS results belong in task007-qualification.md, not inferred from source.
+Actual PR macOS ARM64 Homebrew 5.0.0 oracle reports NaN retained for both raw and
+vector inputs at (-1000,-1000), false status; both new semantic modes reject the
+entire call atomically. Thus the KleidiCV undefined-quality behavior persists with
+prebuilt derivatives. Exact run/head evidence is in task007-qualification.md.
 
 Private continuous Nx1 CV_32F quality is NaN-initialized, its data identity saved,
 and reuse/schema/all-slot finite nonnegative checks precede publication. No valid

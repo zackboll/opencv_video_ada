@@ -145,8 +145,53 @@ special-seed validation (GNAT may raise Constraint_Error at its validity barrier
 as in prior tests); raw C++ directly rejects both coordinate components without
 that barrier. Validation AUnit 73/73 and complete native campaigns were repeated.
 
-PR/CI URLs and actual macOS vector backend results will be recorded at their
-completed milestones. No pending
+Pushed qualification head `857635fd85e28904981cb77ee16a44ddf9d2a853` was then
+requalified locally on all three actual versions: 73/73, zero failures/errors,
+complete native/fault/oracle/ASan/UBSan/leak/example campaigns, exit zero. All
+three external mutations still fail; production source unchanged. Independent
+clean clone updated to this exact head also passes the complete 4.10.0 campaign,
+all three public profiles, Validation AUnit 73/73 and `alr -n test` (73/73).
+All 65 prior registrations, three public result records, four ordinary overloads,
+two forward/backward overloads, twelve prior C signatures, manifests and workflows
+were compared against main and are unchanged.
+
+PR [#7](https://github.com/zackboll/opencv_video_ada/pull/7) opened non-draft against
+main; auto-merge disabled. Initial-head [PR run 37716206535](https://github.com/zackboll/opencv_video_ada/actions/runs/37716206535)
+and [manual pinned run 37716205562](https://github.com/zackboll/opencv_video_ada/actions/runs/37716205562)
+were triggered on that head. At the local final-requalification milestone,
+repository-checks passed, Linux/macOS were testing, Linux sanitizers instrumenting,
+and all three pinned jobs were building native modules. These are pending, not
+passes. Actual macOS vector evidence and later CI states are recorded in PR
+milestone comments as they become available; completed runs are not attributed
+to later evidence-only commits.
+
+No pending
 workflow is counted successful. Review gate requires open/non-draft/unmerged PR,
 auto-merge disabled, clean tree and local/remote/PR-head equality. No merge, tag,
 release, amend, published-history rebase or force-push is authorized or performed.
+
+### Completed implementation-head required CI
+
+[Cross-platform 37716206535](https://github.com/zackboll/opencv_video_ada/actions/runs/37716206535)
+completed **SUCCESS** on `857635fd85e28904981cb77ee16a44ddf9d2a853`:
+repository-checks, Linux, macOS and Linux sanitizers all pass. Exact completed job
+logs retrieved. Linux OpenCV 4.6.0 and macOS ARM64 Homebrew 5.0.0 each report
+**73 executed / 73 passed / 0 assertions / 0 errors**, complete direct vector
+oracle, actual shim/Core boundary and exception campaigns, retained 4/4 example.
+Linux ASan/UBSan/leaks has zero reported binding-attributable findings. macOS
+linkage verifies Video/Core shims and libc++ without libstdc++.
+
+Actual macOS direct oracle explicitly reports, at previous (-1000,-1000),
+status false and eigenvalue **NaN sentinel retained**, with both `pyramids=0`
+and **`pyramids=1`**. Precomputed derivatives do **not** bypass KleidiCV per-level
+LK or cure its unwritten-quality path. Both new Ada modes require OpenCV_Error
+for that complete call; actual boundary flag 8/12 cases reject it and preserve
+pre-existing output headers/storage atomically. Valid patches, threshold rejection
+and failed next searches still publish defined quality. No backend disabled,
+missing value fabricated, status altered or tolerance weakened.
+
+At this completed-PR milestone, pinned 4.1/4.10 are executing their test campaigns
+and pinned 5.0 is building native modules; none is called a completed pass yet.
+This evidence-only follow-up changes no implementation/tests/workflows. Final-head
+required and pinned results are recorded in the PR review-gate comment, rather
+than attributing earlier runs to the later documentation commit.
