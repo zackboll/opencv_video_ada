@@ -104,4 +104,18 @@ package OpenCV.Video.Internal.C_API is
       Width, Height, Level, Iterations : Interfaces.Integer_32;
       Epsilon, Threshold : Interfaces.C.double) return Status
      with Import, Convention => C, External_Name => "opencv_video_track_pyr_lk_pyramids_seeded";
+   function Track_PyrLK_Pyramids_Quality
+     (Previous, Next : System.Address;
+      Points : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Next_Points, Track_Status, Track_Error : OpenCV.Core.Module_Interop.Output_Mat_Handle;
+      Width, Height, Level, Iterations : Interfaces.Integer_32;
+      Epsilon, Threshold : Interfaces.C.double) return Status
+     with Import, Convention => C, External_Name => "opencv_video_track_pyr_lk_pyramids_min_eigenvalues";
+   function Track_PyrLK_Pyramids_Seeded_Quality
+     (Previous, Next : System.Address;
+      Points, Seeds : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Next_Points, Track_Status, Track_Error : OpenCV.Core.Module_Interop.Output_Mat_Handle;
+      Width, Height, Level, Iterations : Interfaces.Integer_32;
+      Epsilon, Threshold : Interfaces.C.double) return Status
+     with Import, Convention => C, External_Name => "opencv_video_track_pyr_lk_pyramids_seeded_min_eigenvalues";
 end OpenCV.Video.Internal.C_API;

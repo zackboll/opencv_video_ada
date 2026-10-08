@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <limits>
 
-static void trackability(std::ostream &output) {
+static void trackability(std::ostream &output, bool pyramids = false) {
     float structures[3] = {};
     std::vector<float> identity;
     for (int mode = 0; mode < 9; ++mode) {
@@ -22,15 +22,28 @@ static void trackability(std::ostream &output) {
         cv::Mat values(int(f.points.size()),1,CV_32F,
                        cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
         const auto *storage = values.data;
-        cv::calcOpticalFlowPyrLK(f.previous,f.next,points,dest,status,values,{21,21},0,{3,30,.01},
-            cv::OPTFLOW_LK_GET_MIN_EIGENVALS | (f.seeded ? cv::OPTFLOW_USE_INITIAL_FLOW : 0),f.threshold);
+        std::vector<cv::Mat> previous_levels, next_levels;
+        if (pyramids) {
+            cv::buildOpticalFlowPyramid(f.previous,previous_levels,{21,21},3,true,
+                cv::BORDER_REFLECT_101,cv::BORDER_CONSTANT,false);
+            cv::buildOpticalFlowPyramid(f.next,next_levels,{21,21},3,true,
+                cv::BORDER_REFLECT_101,cv::BORDER_CONSTANT,false);
+        }
+        const int flags = cv::OPTFLOW_LK_GET_MIN_EIGENVALS |
+            (f.seeded ? cv::OPTFLOW_USE_INITIAL_FLOW : 0);
+        if (pyramids)
+            cv::calcOpticalFlowPyrLK(previous_levels,next_levels,points,dest,status,values,
+                {21,21},0,{3,30,.01},flags,f.threshold);
+        else
+            cv::calcOpticalFlowPyrLK(f.previous,f.next,points,dest,status,values,
+                {21,21},0,{3,30,.01},flags,f.threshold);
         if (storage != values.data) throw std::runtime_error("native quality storage not reused");
         for (int i = 0; i < int(f.points.size()); ++i) {
             const float e = values.at<float>(i);
             const bool tracked = status.at<unsigned char>(i) != 0;
             if (!std::isfinite(e) || e < 0) {
                 std::cerr << "native quality violation: version=" << CV_VERSION << " mode=" << mode
-                          << " point=" << i << " status=" << int(tracked) << " eigenvalue=" << e
+                          << " pyramids=" << pyramids << " point=" << i << " status=" << int(tracked) << " eigenvalue=" << e
                           << " previous=" << f.points[i] << " seed=" << f.seeds[i] << '\n';
                 // KleidiCV 26.03 intentionally skips err for unavailable prev.
                 // Record absence explicitly; Ada/shim MUST reject the whole call.
@@ -65,10 +78,15 @@ static void trackability(std::ostream &output) {
     for (double multiplier : {.5,2.0}) {
         std::vector<cv::Point2f> points{{48,48}}, dest;
         std::vector<unsigned char> status;
-        std::vector<float> values;
-        cv::calcOpticalFlowPyrLK(image,image,points,dest,status,values,{21,21},0,{3,30,.01},
+        cv::Mat values(1,1,CV_32F,cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
+        std::vector<cv::Mat> levels;
+        cv::buildOpticalFlowPyramid(image,levels,{21,21},0,true,
+            cv::BORDER_REFLECT_101,cv::BORDER_CONSTANT,false);
+        if (pyramids) cv::calcOpticalFlowPyrLK(levels,levels,points,dest,status,values,{21,21},0,{3,30,.01},
                                 cv::OPTFLOW_LK_GET_MIN_EIGENVALS,structures[0]*multiplier);
-        if (bool(status[0]) != (multiplier < 1) || std::abs(values[0]-structures[0]) > 1e-5)
+        else cv::calcOpticalFlowPyrLK(image,image,points,dest,status,values,{21,21},0,{3,30,.01},
+                                cv::OPTFLOW_LK_GET_MIN_EIGENVALS,structures[0]*multiplier);
+        if (bool(status[0]) != (multiplier < 1) || std::abs(values.at<float>(0)-structures[0]) > 1e-5)
             throw std::runtime_error("factor-two eigenvalue threshold failed");
     }
     std::cout << "quality corner=" << structures[0] << " edge=" << structures[1]
@@ -232,8 +250,14 @@ int main(int argc, char **argv) {
         auto &quality_output = argc == 3 ? static_cast<std::ostream &>(quality_file) : std::cout;
         quality_output << std::setprecision(17);
         trackability(quality_output);
+        if (argc == 3) {
+            std::ofstream pyramid_file(std::string(argv[2])+".pyramids");
+            if (!pyramid_file) throw std::runtime_error("cannot create pyramid oracle");
+            pyramid_file << std::setprecision(17);
+            trackability(pyramid_file,true);
+        } else trackability(std::cout,true);
         std::cout << "PASS: independent OpenCV " << CV_VERSION
-                  << " oracle (8 unseeded + 4 seeded + 20 forward/backward + 27 quality entries)\n";
+                  << " oracle (8 unseeded + 4 seeded + 20 forward/backward + 27 raw quality + 27 pyramid quality entries)\n";
         return 0;
     } catch (const std::exception &e) {
         std::cerr << "FAIL: " << e.what() << '\n';

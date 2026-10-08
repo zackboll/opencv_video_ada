@@ -152,6 +152,23 @@ package OpenCV.Video is
       Initial_Next_Points : Tracking_Point_Array)
       return Trackability_Track_Array;
 
+   --  Owned derivative-interleaved pyramids, flags 8/12. Same compatibility
+   --  rules as photometric pyramids; defined quality is retained on failure.
+   function Track_PyrLK_Trackability
+     (Previous_Pyramid : PyrLK_Pyramid;
+      Next_Pyramid     : PyrLK_Pyramid;
+      Points           : Tracking_Point_Array;
+      Options          : PyrLK_Options := (others => <>))
+      return Trackability_Track_Array;
+
+   function Track_PyrLK_Trackability
+     (Previous_Pyramid    : PyrLK_Pyramid;
+      Next_Pyramid        : PyrLK_Pyramid;
+      Points              : Tracking_Point_Array;
+      Options             : PyrLK_Options := (others => <>);
+      Initial_Next_Points : Tracking_Point_Array)
+      return Trackability_Track_Array;
+
    type Forward_Backward_Options is record
       Tracking                 : PyrLK_Options := (others => <>);
       --  Pixels; finite and nonnegative. Zero is legal; no silent clamping.

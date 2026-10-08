@@ -1813,6 +1813,401 @@ package body Video_Tests is
       end loop;
    end Seeded_Pyramid_Validation;
 
+   function Pyramid_Previous_Quality_Defined return Boolean is
+      package Integers is new Ada.Text_IO.Integer_IO (Integer);
+      package Floats is new Ada.Text_IO.Float_IO (OpenCV.Float64_Value);
+      File : Ada.Text_IO.File_Type;
+      Mode, Index, Status : Integer;
+      Value : OpenCV.Float64_Value;
+      Defined : Boolean := True;
+   begin
+      Ada.Text_IO.Open (File, Ada.Text_IO.In_File,
+        Ada.Environment_Variables.Value ("VIDEO_TRACKABILITY_ORACLE", "../obj/oracle/trackability.txt") & ".pyramids");
+      for Record_Number in 1 .. 27 loop
+         Integers.Get (File, Mode); Integers.Get (File, Index); Integers.Get (File, Status);
+         for Component in 1 .. 3 loop Floats.Get (File, Value); end loop;
+         if Status = -1 then
+            Assert (Mode = 3 and then Index = 1, "unexpected undefined native quality path");
+            Defined := False;
+         end if;
+      end loop;
+      Ada.Text_IO.Close (File);
+      return Defined;
+   end Pyramid_Previous_Quality_Defined;
+
+
+
+   procedure Pyramid_Quality_Direct_Oracle (T : in out Fixture) is
+      pragma Unreferenced (T);
+      package Integers is new Ada.Text_IO.Integer_IO (Integer);
+      package Floats is new Ada.Text_IO.Float_IO (OpenCV.Float64_Value);
+      File : Ada.Text_IO.File_Type;
+      Compared : Natural := 0;
+      Previous_Defined : constant Boolean := Pyramid_Previous_Quality_Defined;
+      function Close (Actual : OpenCV.Float32_Value; Expected : OpenCV.Float64_Value) return Boolean is
+        (abs (OpenCV.Float64_Value (Actual) - Expected) <= 1.0E-5);
+   begin
+      Ada.Text_IO.Open (File, Ada.Text_IO.In_File,
+        Ada.Environment_Variables.Value ("VIDEO_TRACKABILITY_ORACLE", "../obj/oracle/trackability.txt") & ".pyramids");
+      for Mode in 0 .. 8 loop
+         declare
+            Previous : constant OpenCV.Core.Mat :=
+              (if Mode in 5 .. 7 then Quality_Structure (Mode - 5) else Texture (96, 96));
+            Next : constant OpenCV.Core.Mat := (if Mode = 1 then Shift (Previous, 12, 7) else Previous);
+            PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (Previous);
+            PB : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (Next);
+            Points : Tracking_Point_Array :=
+              (if Mode in 5 .. 7 then Tracking_Point_Array'[5 => (48.0, 48.0)] else Quality_Points);
+            Seeds : Tracking_Point_Array (20 .. 19 + Points'Length);
+            Options : PyrLK_Options := Quality_Options;
+         begin
+            for I in Points'Range loop
+               Seeds (I - 5 + 20) := (Points (I).X + (if Mode = 1 then 12.25 elsif Mode = 8 then 32.0 else 0.0),
+                                     Points (I).Y + (if Mode = 1 then 6.75 elsif Mode = 8 then 20.0 else 0.0));
+            end loop;
+            if Mode = 2 then Options.Min_Eigenvalue_Threshold := 100.0; end if;
+            if Mode = 3 then Points (6) := (-1000.0, -1000.0); end if;
+            if Mode = 4 then Seeds (21) := (-1000.0, -1000.0); end if;
+            if Mode = 3 and then not Previous_Defined then
+               begin
+                  declare
+                     Tracks : constant Trackability_Track_Array :=
+                       Track_PyrLK_Trackability (PA, PB, Points, Options);
+                     pragma Unreferenced (Tracks);
+                  begin
+                     Assert (False, "native unwritten quality accepted by Ada");
+                  end;
+               exception
+                  when OpenCV.OpenCV_Error => null;
+               end;
+               for I in 0 .. 3 loop
+                  declare
+                     Native_Mode, Index, Status : Integer;
+                     X, Y, Eigenvalue : OpenCV.Float64_Value;
+                  begin
+                     Integers.Get (File, Native_Mode); Integers.Get (File, Index); Integers.Get (File, Status);
+                     Floats.Get (File, X); Floats.Get (File, Y); Floats.Get (File, Eigenvalue);
+                     Assert (Native_Mode = 3 and then Index = I and then
+                               Status = (if I = 1 then -1 else 1), "undefined-quality oracle mapping");
+                     Compared := Compared + 1;
+                  end;
+               end loop;
+            else
+            declare
+               Tracks : constant Trackability_Track_Array :=
+                 (if Mode = 1 or else Mode = 4 or else Mode = 8 then
+                    Track_PyrLK_Trackability (PA, PB, Points, Options, Seeds)
+                  else Track_PyrLK_Trackability (PA, PB, Points, Options));
+            begin
+               for I in Tracks'Range loop
+                  declare
+                     Native_Mode, Index, Status : Integer;
+                     X, Y, Eigenvalue : OpenCV.Float64_Value;
+                  begin
+                     Integers.Get (File, Native_Mode); Integers.Get (File, Index); Integers.Get (File, Status);
+                     Floats.Get (File, X); Floats.Get (File, Y); Floats.Get (File, Eigenvalue);
+                     Assert (Native_Mode = Mode and then Index = I - 5, "quality oracle mapping");
+                     Assert (Tracks (I).Tracked = (Status = 1) and then Close (Tracks (I).Next_Point.X, X)
+                               and then Close (Tracks (I).Next_Point.Y, Y) and then
+                               Close (Tracks (I).Minimum_Eigenvalue, Eigenvalue), "quality differs from direct OpenCV");
+                     Compared := Compared + 1;
+                  end;
+               end loop;
+            end;
+            end if;
+         end;
+      end loop;
+      Assert (Compared = 27 and then Ada.Text_IO.End_Of_File (File), "quality oracle inventory");
+      Ada.Text_IO.Close (File);
+   end Pyramid_Quality_Direct_Oracle;
+
+
+
+   procedure Quality_Pyramid_Equivalence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : constant OpenCV.Core.Mat := Texture (96, 96);
+      Points : constant Tracking_Point_Array (5 .. 8) := Quality_Points;
+   begin
+      for Mode in 0 .. 2 loop
+         declare
+            DX : constant Integer := (if Mode = 2 then 12 elsif Mode = 1 then 2 else 0);
+            DY : constant Integer := (if Mode = 2 then 7 elsif Mode = 1 then 1 else 0);
+            B : constant OpenCV.Core.Mat := Shift (A, DX, DY);
+            PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A);
+            PB : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (B);
+            Seeds : Tracking_Point_Array (20 .. 23);
+            Options : constant PyrLK_Options := (Max_Level => 0, others => <>);
+         begin
+            for I in Points'Range loop
+               Seeds (I - Points'First + Seeds'First) :=
+                 (Points (I).X + OpenCV.Float32_Value (DX) + 0.25,
+                  Points (I).Y + OpenCV.Float32_Value (DY) - 0.25);
+            end loop;
+            declare
+               Raw : constant Trackability_Track_Array := Track_PyrLK_Trackability (A, B, Points, Options, Seeds);
+               Built : constant Trackability_Track_Array := Track_PyrLK_Trackability (PA, PB, Points, Options, Seeds);
+               Plain : constant Trackability_Track_Array := Track_PyrLK_Trackability (PA, PB, Points, Options);
+            begin
+               for I in Raw'Range loop
+                  Assert (Raw (I).Tracked = Built (I).Tracked and then
+                    Near (Raw (I).Next_Point.X, Built (I).Next_Point.X, 1.0E-5) and then
+                    Near (Raw (I).Next_Point.Y, Built (I).Next_Point.Y, 1.0E-5) and then
+                    Near (Raw (I).Minimum_Eigenvalue, Built (I).Minimum_Eigenvalue, 1.0E-5),
+                    "raw/pyramid quality or repeat differs");
+               end loop;
+               for I in Points'Range loop
+                  Assert (Built (I).Tracked and then
+                    Near (Built (I).Next_Point.X, Points (I).X + OpenCV.Float32_Value (DX), 0.05) and then
+                    Near (Built (I).Next_Point.Y, Points (I).Y + OpenCV.Float32_Value (DY), 0.05),
+                    "seeded pyramid known translation");
+                  Assert (abs (Built (I).Next_Point.X - Seeds (I - 5 + 20).X) > 0.20,
+                          "prediction was returned without refinement");
+                  if Mode = 2 then
+                     Assert (not Plain (I).Tracked or else
+                       abs (Plain (I).Next_Point.X - Built (I).Next_Point.X) > 5.0,
+                       "distinguishing fixture no longer distinguishes");
+                  end if;
+               end loop;
+            end;
+         end;
+      end loop;
+   end Quality_Pyramid_Equivalence;
+
+   procedure Quality_Pyramid_Bounds (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : constant OpenCV.Core.Mat := Texture (96, 96);
+      PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A);
+      Points : constant Tracking_Point_Array := [Positive'Last => (25.0, 25.0)];
+      Tracks : constant Trackability_Track_Array := Track_PyrLK_Trackability
+        (PA, PA, Points, Initial_Next_Points => [20 => (25.25, 24.75)]);
+      Empty : constant Trackability_Track_Array := Track_PyrLK_Trackability
+        (PA, PA, Tracking_Point_Array'(7 .. 6 => <>),
+         Initial_Next_Points => Tracking_Point_Array'(20 .. 19 => <>));
+   begin
+      Assert (Tracks'First = Positive'Last and then Tracks'Last = Positive'Last and then
+                Tracks (Positive'Last).Tracked and then Empty'First = 7 and then Empty'Last = 6,
+                "seeded pyramid extreme/empty bounds");
+   end Quality_Pyramid_Bounds;
+
+   procedure Quality_Pyramid_Lifetime (T : in out Fixture) is
+      pragma Unreferenced (T);
+      function Captured (DX, DY : Integer; Region : Boolean) return PyrLK_Pyramid is
+         Parent : OpenCV.Core.Mat := Texture (128, 128);
+         Shifted : constant OpenCV.Core.Mat := Shift (Parent, DX, DY);
+         Image : OpenCV.Core.Mat := (if Region then Shifted.Region ((16, 16, 96, 96))
+                                    else Shifted.Clone);
+      begin
+         return P : PyrLK_Pyramid := Build_PyrLK_Pyramid (Image) do
+            for Row in 0 .. Image.Rows - 1 loop
+               for Column in 0 .. Image.Columns - 1 loop
+                  OpenCV.Core.UInt8_Access.Set (Image, Row, Column, 0);
+               end loop;
+            end loop;
+            OpenCV.Core.UInt8_Access.Set (Parent, 41, 41, 0);
+         end return;
+      end Captured;
+      Points : constant Tracking_Point_Array := [5 => (25.0, 25.0), 6 => (45.0, 32.0)];
+      Seeds : constant Tracking_Point_Array := [20 => (27.25, 25.75), 21 => (47.25, 32.75)];
+   begin
+      for Region in Boolean loop
+         declare
+            PA : constant PyrLK_Pyramid := Captured (0, 0, Region);
+            PB : constant PyrLK_Pyramid := Captured (2, 1, Region);
+            Plain : constant Trackability_Track_Array := Track_PyrLK_Trackability (PA, PB, Points);
+            Tracks : constant Trackability_Track_Array := Track_PyrLK_Trackability (PA, PB, Points,
+              Initial_Next_Points => Seeds);
+         begin
+            for I in Points'Range loop
+               Assert (Plain (I).Tracked and then Tracks (I).Tracked and then
+                 Near (Tracks (I).Next_Point.X, Points (I).X + 2.0, 0.05) and then
+                 Near (Tracks (I).Next_Point.Y, Points (I).Y + 1.0, 0.05),
+                 "seeded pyramid source/Region lifetime");
+            end loop;
+         end;
+      end loop;
+   end Quality_Pyramid_Lifetime;
+
+   procedure Quality_Pyramid_Reuse (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : constant OpenCV.Core.Mat := Texture (96, 96);
+      B : constant OpenCV.Core.Mat := Shift (A, 2, 1);
+      PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A);
+      PB : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (B);
+      Points : constant Tracking_Point_Array := [5 => (25.0, 25.0)];
+      Seeds : constant Tracking_Point_Array := [20 => (27.25, 25.75)];
+      First : constant Trackability_Track_Array := Track_PyrLK_Trackability (PA, PB, Points, Initial_Next_Points => Seeds);
+      Second : constant Trackability_Track_Array := Track_PyrLK_Trackability
+        (PA, PB, Points, Initial_Next_Points => [30 => (26.75, 26.25)]);
+      Again : constant Trackability_Track_Array := Track_PyrLK_Trackability (PA, PB, Points, Initial_Next_Points => Seeds);
+      Back : constant Trackability_Track_Array := Track_PyrLK_Trackability
+        (PB, PA, [5 => (27.0, 26.0)], (Max_Level => 0, others => <>), Points);
+   begin
+      for I in First'Range loop
+                  Assert (First (I).Tracked = Again (I).Tracked and then
+                    Near (First (I).Next_Point.X, Again (I).Next_Point.X, 1.0E-5) and then
+                    Near (First (I).Next_Point.Y, Again (I).Next_Point.Y, 1.0E-5) and then
+                    Near (First (I).Minimum_Eigenvalue, Again (I).Minimum_Eigenvalue, 1.0E-5),
+                    "raw/pyramid quality or repeat differs");
+               end loop;
+      Assert (Second (5).Tracked and then Back (5).Tracked and then
+        Near (Back (5).Next_Point.X, Points (5).X, 0.05) and then
+        Near (Back (5).Next_Point.Y, Points (5).Y, 0.05), "seeded pyramid reuse/reversal");
+   end Quality_Pyramid_Reuse;
+
+   procedure Quality_Pyramid_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : constant OpenCV.Core.Mat := Texture (96, 96);
+      B : constant OpenCV.Core.Mat := Texture (95, 96);
+      PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A);
+      PB : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (B);
+      Shallow : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A, (Max_Level => 0, others => <>));
+      Null_Pyramid : PyrLK_Pyramid;
+      function From_Bits is new Ada.Unchecked_Conversion
+        (Interfaces.Unsigned_32, OpenCV.Float32_Value);
+      type Bit_Array is array (Positive range <>) of Interfaces.Unsigned_32;
+   begin
+      for Seeded in Boolean loop
+      for Mode in 0 .. 9 loop
+         if Seeded or else Mode not in 4 .. 5 then
+         begin
+            declare
+               Options : PyrLK_Options := (others => <>);
+               Points : constant Tracking_Point_Array :=
+                 (if Mode = 9 then Tracking_Point_Array'(7 .. 6 => <>) else [5 => (25.0, 25.0)]);
+               Seeds : constant Tracking_Point_Array :=
+                 (if Mode = 9 then Tracking_Point_Array'(20 .. 19 => <>)
+                  elsif Mode = 4 then Tracking_Point_Array'(20 .. 19 => <>)
+                  elsif Mode = 5 then [20 => (536_871_040.0, 0.0)]
+                  else [20 => (25.0, 25.0)]);
+            begin
+               if Mode = 3 then Options.Window_Size := (15, 15); end if;
+               if Mode = 6 then Options.Epsilon := 0.0; end if;
+               if Mode = 7 then Options.Min_Eigenvalue_Threshold := -1.0; end if;
+               if Mode in 8 .. 9 then Options.Max_Level := 31; end if;
+               declare
+                  Tracks : constant Trackability_Track_Array :=
+                    (if Seeded then
+                       (if Mode = 0 then Track_PyrLK_Trackability (Null_Pyramid, PA, Points, Options, Seeds)
+                        elsif Mode = 1 then Track_PyrLK_Trackability (PA, PB, Points, Options, Seeds)
+                        elsif Mode = 2 then Track_PyrLK_Trackability (PA, Shallow, Points, Options, Seeds)
+                        else Track_PyrLK_Trackability (PA, PA, Points, Options, Seeds))
+                     else
+                       (if Mode = 0 then Track_PyrLK_Trackability (Null_Pyramid, PA, Points, Options)
+                        elsif Mode = 1 then Track_PyrLK_Trackability (PA, PB, Points, Options)
+                        elsif Mode = 2 then Track_PyrLK_Trackability (PA, Shallow, Points, Options)
+                        else Track_PyrLK_Trackability (PA, PA, Points, Options)));
+                  pragma Unreferenced (Tracks);
+               begin
+                  Assert (False, "seeded pyramid validation bypassed");
+               end;
+            end;
+         exception
+            when OpenCV.OpenCV_Error => null;
+         end;
+      end if;
+      end loop;
+      end loop;
+      for Bits of Bit_Array'[16#7FC0_0000#, 16#7F80_0000#] loop
+         begin
+            declare
+               Tracks : constant Trackability_Track_Array := Track_PyrLK_Trackability
+                 (PA, PA, [1 => (25.0, 25.0)], Initial_Next_Points => [20 => (25.0, From_Bits (Bits))]);
+               pragma Unreferenced (Tracks);
+            begin
+               Assert (False, "nonfinite pyramid quality seed accepted");
+            end;
+         exception
+            when OpenCV.OpenCV_Error | Constraint_Error => null;
+         end;
+      end loop;
+   end Quality_Pyramid_Validation;
+
+   procedure Pyramid_Quality_Semantics (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Values : array (0 .. 2) of OpenCV.Float32_Value;
+   begin
+      for Kind in Values'Range loop
+         declare
+            Image : constant OpenCV.Core.Mat := Quality_Structure (Kind);
+            P : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (Image);
+            Points : constant Tracking_Point_Array := [7 => (48.0, 48.0)];
+            Baseline : constant Trackability_Track_Array :=
+              Track_PyrLK_Trackability (P, P, Points, Quality_Options);
+         begin
+            Values (Kind) := Baseline (7).Minimum_Eigenvalue;
+            Assert (Baseline (7).Tracked = (Kind = 0), "pyramid structure status");
+            if Kind = 0 then
+               for Seeded in Boolean loop
+                  for Below in Boolean loop
+                     declare
+                        Options : PyrLK_Options := Quality_Options;
+                     begin
+                        Options.Min_Eigenvalue_Threshold := OpenCV.Float64_Value (Values (Kind)) *
+                          (if Below then 0.5 else 2.0);
+                        declare
+                           Tracks : constant Trackability_Track_Array :=
+                             (if Seeded then Track_PyrLK_Trackability (P, P, Points, Options, Points)
+                              else Track_PyrLK_Trackability (P, P, Points, Options));
+                        begin
+                           Assert (Tracks (7).Tracked = Below and then
+                             Tracks (7).Minimum_Eigenvalue = Values (Kind) and then
+                             Tracks (7).Next_Point = Points (7), "pyramid threshold discarded quality");
+                        end;
+                     end;
+                  end loop;
+               end loop;
+            end if;
+         end;
+      end loop;
+      Assert (Values (0) > 0.5 and then Values (1) = 0.0 and then Values (2) = 0.0,
+              "pyramid corner/edge/flat relationship");
+      declare
+         Image : constant OpenCV.Core.Mat := Texture (96, 96);
+         P : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (Image);
+         Points : constant Tracking_Point_Array := Quality_Points;
+         Plain : constant Point_Track_Array := Track_PyrLK (P, P, Points, Quality_Options);
+         Quality : constant Trackability_Track_Array := Track_PyrLK_Trackability (P, P, Points, Quality_Options);
+         Seeded : constant Trackability_Track_Array := Track_PyrLK_Trackability (P, P, Points, Quality_Options, Points);
+         Failed : constant Trackability_Track_Array := Track_PyrLK_Trackability
+           (P, P, [7 => Points (5)], Quality_Options, [20 => (-1000.0, -1000.0)]);
+      begin
+         for I in Points'Range loop
+            Assert (Plain (I).Tracked and then Quality (I).Tracked and then Seeded (I).Tracked and then
+              Plain (I).Error = 0.0 and then Quality (I).Minimum_Eigenvalue > 0.0 and then
+              Quality (I).Minimum_Eigenvalue = Seeded (I).Minimum_Eigenvalue and then
+              Quality (I).Next_Point = Points (I), "pyramid metrics/identity/seed independence");
+         end loop;
+         Assert (not Failed (7).Tracked and then Failed (7).Next_Point = Points (5) and then
+           Failed (7).Minimum_Eigenvalue = Quality (5).Minimum_Eigenvalue,
+           "pyramid next failure discarded quality");
+      end;
+   end Pyramid_Quality_Semantics;
+
+   procedure Pyramid_Quality_Previous_Unavailable (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (96, 96);
+      P : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (Image);
+      Points : constant Tracking_Point_Array := [7 => (25.0, 25.0), 8 => (-1000.0, -1000.0)];
+      Defined : constant Boolean := Pyramid_Previous_Quality_Defined;
+   begin
+      for Seeded in Boolean loop
+         begin
+            declare
+               Tracks : constant Trackability_Track_Array :=
+                 (if Seeded then Track_PyrLK_Trackability (P, P, Points, Quality_Options, Points)
+                  else Track_PyrLK_Trackability (P, P, Points, Quality_Options));
+            begin
+               Assert (Defined, "native undefined previous quality accepted");
+               Assert (Tracks (7).Tracked and then not Tracks (8).Tracked and then
+                 Tracks (8).Minimum_Eigenvalue = 0.0 and then Tracks (8).Next_Point = Points (8),
+                 "defined CPU previous quality/failed normalization");
+            end;
+         exception
+            when OpenCV.OpenCV_Error => Assert (not Defined, "defined native previous quality rejected");
+         end;
+      end loop;
+   end Pyramid_Quality_Previous_Unavailable;
+
    function Suite return AUnit.Test_Suites.Access_Test_Suite is
       Result : constant AUnit.Test_Suites.Access_Test_Suite := AUnit.Test_Suites.New_Suite;
    begin
@@ -1881,6 +2276,14 @@ package body Video_Tests is
         Result.Add_Test (Caller.Create ("seeded pyramid mutated finalized sources Regions parents", Seeded_Pyramid_Lifetime'Access));
         Result.Add_Test (Caller.Create ("seeded pyramid repeated predictions reversed roles truncation", Seeded_Pyramid_Reuse'Access));
         Result.Add_Test (Caller.Create ("seeded pyramid validation including empty points", Seeded_Pyramid_Validation'Access));
-        return Result;
+        Result.Add_Test (Caller.Create ("Pyramid_Quality_Direct_Oracle", Pyramid_Quality_Direct_Oracle'Access));
+      Result.Add_Test (Caller.Create ("Quality_Pyramid_Equivalence", Quality_Pyramid_Equivalence'Access));
+      Result.Add_Test (Caller.Create ("Quality_Pyramid_Bounds", Quality_Pyramid_Bounds'Access));
+      Result.Add_Test (Caller.Create ("Quality_Pyramid_Lifetime", Quality_Pyramid_Lifetime'Access));
+      Result.Add_Test (Caller.Create ("Quality_Pyramid_Reuse", Quality_Pyramid_Reuse'Access));
+      Result.Add_Test (Caller.Create ("Quality_Pyramid_Validation", Quality_Pyramid_Validation'Access));
+      Result.Add_Test (Caller.Create ("pyramid quality metric semantics", Pyramid_Quality_Semantics'Access));
+      Result.Add_Test (Caller.Create ("pyramid previous quality backend definedness", Pyramid_Quality_Previous_Unavailable'Access));
+      return Result;
    end Suite;
 end Video_Tests;

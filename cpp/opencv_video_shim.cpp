@@ -189,7 +189,7 @@ static opencv_video_status track_pyr_lk(
 
         opencv_video_status status = OPENCV_VIDEO_OK;
         if (previous_pyramid || next_pyramid) {
-            if (error_mode != ErrorMode::Photometric || !previous_pyramid || !next_pyramid ||
+            if (!previous_pyramid || !next_pyramid ||
                 !valid_pyramid(*previous_pyramid) || !valid_pyramid(*next_pyramid) ||
                 previous_pyramid->window != cv::Size(window_width, window_height) ||
                 next_pyramid->window != cv::Size(window_width, window_height) ||
@@ -315,7 +315,8 @@ static opencv_video_status track_pyr_lk(
                 computed_next, computed_status, computed_error,
                 cv::Size(window_width, window_height),
                 std::min({max_level, previous_pyramid->available, next_pyramid->available}),
-                criteria, seeded ? cv::OPTFLOW_USE_INITIAL_FLOW : 0, min_eigenvalue_threshold);
+                criteria, (seeded ? cv::OPTFLOW_USE_INITIAL_FLOW : 0) |
+                    (quality ? cv::OPTFLOW_LK_GET_MIN_EIGENVALS : 0), min_eigenvalue_threshold);
         } else cv::calcOpticalFlowPyrLK(*previous, *next, *points,
                                  computed_next, computed_status, computed_error,
                                  cv::Size(window_width, window_height), max_level,
@@ -408,6 +409,30 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk_pyramids_seeded(
     if (!previous || !next)
         return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Empty pyramid");
     return track_pyr_lk(nullptr, nullptr, points, seeds, true, ErrorMode::Photometric,
+        result, status, error, width, height, level, iterations, epsilon, threshold, previous, next);
+}
+
+extern "C" opencv_video_status opencv_video_track_pyr_lk_pyramids_min_eigenvalues(
+    const opencv_video_pyramid_handle *previous, const opencv_video_pyramid_handle *next,
+    const opencv_core_mat_handle *points, opencv_core_mat_handle *result,
+    opencv_core_mat_handle *status, opencv_core_mat_handle *error,
+    int32_t width, int32_t height, int32_t level, int32_t iterations,
+    double epsilon, double threshold) {
+    if (!previous || !next)
+        return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Empty pyramid");
+    return track_pyr_lk(nullptr, nullptr, points, nullptr, false, ErrorMode::MinimumEigenvalue,
+        result, status, error, width, height, level, iterations, epsilon, threshold, previous, next);
+}
+
+extern "C" opencv_video_status opencv_video_track_pyr_lk_pyramids_seeded_min_eigenvalues(
+    const opencv_video_pyramid_handle *previous, const opencv_video_pyramid_handle *next,
+    const opencv_core_mat_handle *points, const opencv_core_mat_handle *seeds,
+    opencv_core_mat_handle *result, opencv_core_mat_handle *status, opencv_core_mat_handle *error,
+    int32_t width, int32_t height, int32_t level, int32_t iterations,
+    double epsilon, double threshold) {
+    if (!previous || !next)
+        return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Empty pyramid");
+    return track_pyr_lk(nullptr, nullptr, points, seeds, true, ErrorMode::MinimumEigenvalue,
         result, status, error, width, height, level, iterations, epsilon, threshold, previous, next);
 }
 
