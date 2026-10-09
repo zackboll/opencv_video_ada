@@ -1,23 +1,27 @@
-# Task 009 — dense Farnebäck flow: safety stop
+# Task 009 — dense Farnebäck flow
 
-Requested: an unseeded, box-refinement `Calculate_Farneback_Flow` returning
-a Core-owned full-resolution Float32 C2 Mat, flags exactly zero, with no
+Add an unseeded, box-refinement `OpenCV.Video.Calculate_Farneback_Flow` returning
+a Core-owned full-resolution Float32 C2 Mat, native flags exactly zero, with no
 PyrLK-pyramid reuse or application policy. Core pin, dependencies, version,
-ownership and existing APIs must remain unchanged.
+ownership and existing APIs are unchanged; the production ABI grows from 14 to 15
+exports (`opencv_video_calc_farneback_flow`).
 
-**Not implemented:** source review and direct-native experiments established
-an upstream CPU undefined-behavior path in required versions 4.1.0 and 4.10.0.
-The task explicitly requires a safety stop if a defensible restricted contract
-cannot be established. See [source evidence](../farneback-source-contract.md)
-and [actual qualification status](../task009-qualification.md).
+## Disposition history
 
-The proposed parameter subset (scale .25–.90, levels 1–8, odd window 5–63,
-iterations 1–30, neighborhood 5 or 7, finite sigma .1–10) does not exclude
-the reproduced failure: it occurs with default options on ordinary identity and translated images.
-Increasing the minimum image size does not exclude it either.
+1. **Safety stop (commit `353a68a`, superseded).** Source review and direct-native
+   experiments found that OpenCV 4.1.0, 4.6.0 and 4.10.0 form an out-of-range
+   pointer in `FarnebackUpdateMatrices` before the bounds check (undefined
+   behavior even though it is never dereferenced). No size/option preflight can
+   exclude it. Work stopped for an owner decision. That evidence is preserved in
+   [the source contract](../farneback-source-contract.md).
+2. **Owner decision: `ACCEPT_KNOWN_UPSTREAM_UB_FOR_COMPATIBILITY`.** The project
+   owner reviewed the finding and explicitly authorized implementation against
+   native `cv::calcOpticalFlowFarneback` on every supported version, with no copied
+   or patched algorithm, no restriction to 5.0.0 and no private implementation.
+   This is an accepted upstream compatibility exception, **not** a Task 009
+   blocker. It covers only that pointer formation; it is not permission to ignore
+   any new defect (invalid read/write, use-after-free, heap corruption,
+   binding-introduced UB, unexplained sanitizer failure), which would still stop
+   the task.
 
-No production C export, Ada API, flags argument, backend workaround, upstream
-patch, or substitute flow field was added. Resumption requires an explicitly
-approved way to guarantee corrected native execution on every supported version,
-or an approved change to supported versions. Merely validating results after
-the native call cannot prevent undefined behavior during the call.
+See [qualification](../task009-qualification.md) for actual results.

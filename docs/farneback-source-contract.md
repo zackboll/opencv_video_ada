@@ -1,6 +1,17 @@
-# Farnebäck source review — unresolved native safety finding
+# Farnebäck source review — KNOWN_UPSTREAM_UB_ACCEPTED
 
-This is a safety finding, **not** a qualified binding contract.
+> **Status update.** The original safety-stop disposition is **superseded** by the
+> project owner's explicit decision `ACCEPT_KNOWN_UPSTREAM_UB_FOR_COMPATIBILITY`.
+> The finding below is unchanged and remains true; it is now an *accepted upstream
+> compatibility exception* (classification **KNOWN_UPSTREAM_UB_ACCEPTED**) for
+> OpenCV 4.1.0, 4.6.0 and 4.10.0 (4.6.0 has the identical expression at line 242;
+> its file differs from 4.10.0 only in universal-intrinsic spellings). The binding
+> calls native `cv::calcOpticalFlowFarneback` and does not copy or patch it.
+> **Safety-sensitive deployments should treat this as a documented limitation**:
+> an instrumented build of the older CPU algorithm reports the diagnostic below.
+> Any *other* sanitizer finding is not covered by this acceptance.
+
+The remainder is the original source review.
 
 ## Authoritative sources
 
@@ -48,8 +59,8 @@ intermediate flow will stay within the image at every iteration. Rejecting all
 older-version calls would not implement the requested compatible feature.
 Full-field finite validation after return is too late. Exceptions do not contain
 undefined behavior. Cropping the returned field does not prevent the algorithm
-from processing its own borders. Therefore a correct execution boundary for the
-requested supported range has not been established.
+from processing its own borders. Therefore no execution boundary excluding the pointer formation exists for older
+versions; the owner accepted this risk (see status update above).
 
 ## Output initialization is not the blocker
 

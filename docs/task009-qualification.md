@@ -1,4 +1,14 @@
-# Task 009 qualification — stopped on demonstrated upstream safety issue
+# Task 009 qualification
+
+> **Disposition update.** The earlier safety stop is superseded. Project owner decision
+> **ACCEPT_KNOWN_UPSTREAM_UB_FOR_COMPATIBILITY** authorizes implementation despite the
+> documented upstream pointer formation in 4.1.0, 4.6.0 and 4.10.0. That finding is
+> reported separately below as **KNOWN_UPSTREAM_UB_ACCEPTED**; it is *not* labelled
+> sanitizer-clean and nothing unrelated is suppressed.
+>
+> The sections from "Baseline and provenance" through "Smallest reproducer" are the
+> preserved research evidence from commit `353a68a`. Implementation results follow in
+> "Implementation qualification".
 
 ## Baseline and provenance
 
@@ -95,18 +105,76 @@ SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior ...:247:35
 Prebuilt upstream libraries and Core are not claimed fully instrumented.
 This scratch compilation instruments the actual Farnebäck CPU source only.
 
-## Not completed / not claimed
+## Implementation qualification
 
-No binding implementation or PR was created. Production ABI remains **14**;
-the proposed fifteenth export and public Ada API do not exist. All 92 existing
-AUnit registrations remain unchanged, but the complete suite was not rerun for
-this safety-only investigation. No new binding ownership/Region/fault/oracle
-comparison/mutation/ASan/leak/clean-clone qualification or final-head hosted CI
-is claimed. Constant-image behavior and a second texture were not qualified.
-No final-head pinned workflow was dispatched. This is a safety-stop handoff,
-not an open-PR review-gate success.
+### Binding
 
-No merge, tag, release, amend, published-history rebase, force-push, branch
-deletion, main change or auto-merge occurred. Production shim, Ada sources,
-manifests, workflows and prior tests are unchanged. The standalone reproducer
-is intentionally outside normal regression registration and has no fault export.
+`OpenCV.Video.Calculate_Farneback_Flow (Previous, Next, Options)` and export 15,
+`opencv_video_calc_farneback_flow`, call native `cv::calcOpticalFlowFarneback`
+with flags **0** (box refinement, no initial flow, no Gaussian flag). Ada validates
+images (nonempty, 2-D, UInt8 C1, identical geometry, >= 16x16, <= 2^27 pixels;
+Regions accepted) and options (scale .25-.90, levels 1-8, odd window 5-63,
+iterations 1-30, neighborhood 5 or 7, sigma .1-10, finite) before any native call;
+the C shim repeats every check, rejects output aliasing either input header, and
+checks signed-arithmetic bounds. The native result is computed into a private
+NaN-sentinel `CV_32FC2` Mat (reuse of that storage is required and verified),
+schema- and full-field finite-validated, and only then moved into the Core-owned
+output header, so a failure of any kind leaves the output unchanged. All C++
+exceptions (cv::Exception, std::exception, unknown) are contained. Ada re-validates
+the schema and every component. Direction: channel 0 = dx, channel 1 = dy,
+`Previous(y,x) ~ Next(y+dy, x+dx)`; translation (2,1) gives about (+2,+1).
+
+### Results (this machine, serial runs)
+
+| OpenCV | AUnit | direct oracle | ASan/UBSan/leak shim campaigns |
+|---|---|---|---|
+| 4.1.0 | 99/99, 0 assertions, 0 errors | pass | exit 0 |
+| 4.6.0 (Debian 12 container) | 99/99, 0 errors | pass | exit 0 |
+| 4.10.0 | 99/99, 0 errors | pass | exit 0 |
+| 5.0.0 | 99/99, 0 errors | pass | exit 0 |
+
+AUnit grows from 92 to 99 registrations (7 Farneback tests: identity, translation
+directions, schema/ownership, Regions vs compact copy, validation incl. boundary
+values, direct-native oracle comparison with <= 1e-5 agreement over 3 flows of
+96x96, minimum-size/extreme options). Repository checker: 15 ABI declarations/
+imports, 99 registrations. Release, Validation and Development root builds, the
+tests Validation build + AUnit, `alr -n test` (99/99), the example, shell syntax,
+configuration tests and `git diff --check` all pass.
+
+The native boundary (actual shim + Core bridge, ASan+UBSan+leak) adds: oracle
+equality, schema, 30+ validation rejections that leave published output unchanged,
+alias rejection, private-storage proof, 8 injected exceptions (allocation, native,
+standard, unknown at two stages) and 3 injected post-native NaN/+Inf/-Inf
+corruptions (test-only hook, compiled solely in the fault-injection binary), all
+contained atomically.
+
+Mutation checks (each applied to the shim, caught by the named failure): nonzero
+flags, images swapped, even window accepted, alias check removed, size floor
+removed, finite validation weakened, and publish-before-validate. The first run
+survived two mutants (finite check, publish-before-validate) because no test could
+reach a nonfinite native result; the post-native corruption hook was added and both
+are now killed. (Survivors are recorded, not hidden.)
+
+### KNOWN_UPSTREAM_UB_ACCEPTED (reported separately)
+
+Re-run of the committed reproducer in this session, instrumenting the exact upstream
+CPU translation unit with Clang 19 `-fsanitize=undefined,pointer-overflow`:
+
+| Version | Result |
+|---|---|
+| 4.1.0 | exit 1: `addition of unsigned offset ... overflowed` at instrumented line 247 (upstream 242) |
+| 4.6.0 | same source expression (line 242); not separately instrumented here |
+| 4.10.0 | exit 1, same diagnostic |
+| 5.0.0 | exit 0, no diagnostic (not claimed exhaustive) |
+
+The prebuilt OpenCV libraries are not instrumented, so the binding's own
+ASan/UBSan campaigns neither exhibit nor mask this diagnostic and are *not* a claim
+that the older native code is sanitizer-clean. No finding other than this one was
+observed; no invalid memory access, leak, or binding-introduced UB was found.
+
+### Not claimed
+
+No claim that Farneback is exhaustively safe on any version. Clean-clone, hosted
+PR CI and final-head pinned compatibility results are recorded in the PR, not here.
+No merge, tag, release, amend, published-history rebase, force-push or auto-merge
+occurred.
