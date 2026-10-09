@@ -36,4 +36,4 @@ env -u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u LIBRARY_PATH \
     -u GCC_EXEC_PREFIX -u COMPILER_PATH \
     "$compiler" "$@" -std=c++17 -Wall -Wextra -Wpedantic -Werror $cflags \
     tests/cpp/direct_oracle.cpp $("$pkg_config" --libs "$package") -o obj/oracle/direct-oracle
-sh scripts/run_native.sh obj/oracle/direct-oracle obj/oracle/forward-backward.txt obj/oracle/trackability.txt
+sh scripts/run_native.sh obj/oracle/direct-oracle obj/oracle/forward-backward.txt obj/oracle/trackability.txt obj/oracle/farneback.txt

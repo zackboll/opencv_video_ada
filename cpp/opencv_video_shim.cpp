@@ -482,3 +482,79 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk_seeded_min_eigenvalues(
                         next_points, track_status, minimum_eigenvalues, window_width, window_height,
                         max_level, maximum_iterations, epsilon, min_eigenvalue_threshold);
 }
+
+extern "C" opencv_video_status opencv_video_calc_farneback_flow(
+    const opencv_core_mat_handle *previous_image,
+    const opencv_core_mat_handle *next_image,
+    opencv_core_mat_handle *flow,
+    double pyramid_scale, int32_t levels, int32_t window_size,
+    int32_t iterations, int32_t poly_neighborhood, double poly_sigma) {
+    try {
+        clear_error();
+        const cv::Mat *previous = nullptr;
+        const cv::Mat *next = nullptr;
+        cv::Mat *published = nullptr;
+        auto status = resolve_input(previous_image, &previous, "previous image");
+        if (status != OPENCV_VIDEO_OK) return status;
+        status = resolve_input(next_image, &next, "next image");
+        if (status != OPENCV_VIDEO_OK) return status;
+        status = resolve_output(flow, &published, "flow");
+        if (status != OPENCV_VIDEO_OK) return status;
+        if (published == previous || published == next)
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Aliased input/output headers");
+        if (previous->empty() || next->empty() || previous->dims != 2 || next->dims != 2 ||
+            previous->type() != CV_8UC1 || next->type() != CV_8UC1 ||
+            previous->size() != next->size() ||
+            previous->rows < 16 || previous->cols < 16)
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                        "Farneback images must be matching 2-D UInt8 C1 Mats, at least 16x16");
+        if (!std::isfinite(pyramid_scale) || pyramid_scale < 0.25 || pyramid_scale > 0.90 ||
+            levels < 1 || levels > 8 || window_size < 5 || window_size > 63 ||
+            window_size % 2 == 0 || iterations < 1 || iterations > 30 ||
+            (poly_neighborhood != 5 && poly_neighborhood != 7) ||
+            !std::isfinite(poly_sigma) || poly_sigma < 0.1 || poly_sigma > 10.0)
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Invalid Farneback options");
+        const int64_t pixels = int64_t(previous->rows) * int64_t(previous->cols);
+        if (pixels > int64_t(std::numeric_limits<int>::max() / 16) ||
+            previous->step[0] > size_t(std::numeric_limits<int>::max() / 16) ||
+            next->step[0] > size_t(std::numeric_limits<int>::max() / 16))
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                        "Image exceeds safe native arithmetic bounds");
+
+        // Private sentinel-filled output: unwritten components cannot look valid.
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        cv::Mat computed(previous->rows, previous->cols, CV_32FC2, cv::Scalar(nan, nan));
+        const auto *storage = computed.data;
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+        opencv_video_test_fault(1);
+#endif
+        cv::calcOpticalFlowFarneback(*previous, *next, computed, pyramid_scale, levels,
+                                     window_size, iterations, poly_neighborhood,
+                                     poly_sigma, 0);
+        if (computed.data != storage)
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "Farneback replaced output storage");
+        if (computed.dims != 2 || computed.type() != CV_32FC2 ||
+            computed.rows != previous->rows || computed.cols != previous->cols ||
+            !computed.isContinuous())
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "OpenCV returned an unexpected Farneback schema");
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+        opencv_video_test_fault(2);
+#endif
+        const float *values = computed.ptr<float>();
+        const size_t count = size_t(pixels) * 2;
+        for (size_t i = 0; i < count; ++i)
+            if (!std::isfinite(values[i]))
+                return fail(OPENCV_VIDEO_ERROR_OPENCV, "Farneback produced a nonfinite component");
+
+        *published = std::move(computed);
+        clear_error();
+        return OPENCV_VIDEO_OK;
+    } catch (const cv::Exception &e) {
+        return fail(OPENCV_VIDEO_ERROR_OPENCV, e.what());
+    } catch (const std::exception &e) {
+        return fail(OPENCV_VIDEO_ERROR_STANDARD, e.what());
+    } catch (...) {
+        return fail(OPENCV_VIDEO_ERROR_UNKNOWN, "Unknown Farneback exception");
+    }
+}
