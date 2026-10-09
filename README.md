@@ -1,5 +1,39 @@
 # OpenCV Video for Ada
 
+### Forward/backward consistency with owned pyramids (Task 008)
+
+```ada
+Previous_Pyramid : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (Previous_Image);
+Current_Pyramid  : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (Current_Image);
+Diagnostics : constant Forward_Backward_Track_Array :=
+  Track_PyrLK_Forward_Backward (Previous_Pyramid, Current_Pyramid, Points);
+Seeded_Diagnostics : constant Forward_Backward_Track_Array :=
+  Track_PyrLK_Forward_Backward
+    (Previous_Pyramid, Current_Pyramid, Points,
+     Initial_Next_Points => Predicted_Points);
+```
+
+This usage fragment assumes application images and arrays. Optional forward
+predictions correspond by iteration position; counts must match but lower bounds
+may differ. Options precede required predictions, as for the raw-image overloads.
+Both legs use the same two owned objects, reversed for backward tracking, without
+rebuilding pyramids. Only forward successes enter the backward call: its sources
+are forward locations and its destination predictions are the original points.
+This is Ada composition, not a single native OpenCV forward/backward API.
+
+Results preserve every input index and the complete forward photometric error.
+If either leg fails, recovery is the original point, distance is zero, and
+`Backward_Tracked`/`Consistent` are false. Successful tracks can still be
+geometrically inconsistent. The finite nonnegative caller threshold (including
+zero) compares against the returned Float32 Euclidean round-trip distance, with
+equality accepted. Low error is evidence, not proof, of physical correspondence.
+The same pyramid compatibility checks apply even with empty arrays. Source,
+Region and parent lifetimes do not constrain owned pyramids; sequential reuse
+is supported, not general concurrent-use safety. See the
+[contract](docs/forward-backward-contract.md) and
+[qualification](docs/task008-qualification.md). Task 008 retains all 73 prior
+tests and adds 19 registrations (92 total); the production ABI remains 14 exports.
+
 ### Minimum-eigenvalue trackability with owned pyramids (Task 007)
 
 ```ada

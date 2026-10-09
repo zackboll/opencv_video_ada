@@ -987,6 +987,572 @@ package body Video_Tests is
          raise;
    end FB_Direct_Oracle;
 
+   procedure Pyramid_FB_Identity (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (64, 64);
+      Tracks : constant Forward_Backward_Track_Array :=
+        Track_PyrLK_Forward_Backward (Build_PyrLK_Pyramid (Image), Build_PyrLK_Pyramid (Image), Standard_Points);
+   begin
+      for I in Tracks'Range loop
+         Assert_Good (Tracks (I), Standard_Points (I));
+      end loop;
+   end Pyramid_FB_Identity;
+
+   procedure Pyramid_FB_Small_Translation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous : constant OpenCV.Core.Mat := Texture (96, 96);
+      Next : constant OpenCV.Core.Mat := Shift (Previous, 2, 1);
+      Options : constant Forward_Backward_Options :=
+        (Tracking => (Max_Level => 1, others => <>), Maximum_Round_Trip_Error => 0.05);
+      Tracks : constant Forward_Backward_Track_Array :=
+        Track_PyrLK_Forward_Backward (Build_PyrLK_Pyramid (Previous), Build_PyrLK_Pyramid (Next), FB_Points, Options);
+      Ordinary : constant Point_Track_Array := Track_PyrLK (Build_PyrLK_Pyramid (Previous), Build_PyrLK_Pyramid (Next), FB_Points, Options.Tracking);
+   begin
+      for I in Tracks'Range loop
+         Assert_Good (Tracks (I), FB_Points (I));
+         Assert (Tracks (I).Forward = Ordinary (I), "ordinary PyrLK behavior changed");
+         Assert (Near (Tracks (I).Forward.Next_Point.X, FB_Points (I).X + 2.0, 0.05) and then
+                   Near (Tracks (I).Forward.Next_Point.Y, FB_Points (I).Y + 1.0, 0.05),
+                 "forward translation differs");
+      end loop;
+   end Pyramid_FB_Small_Translation;
+
+   procedure Pyramid_FB_Seeded_Translation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous : constant OpenCV.Core.Mat := Texture (96, 96);
+      Next : constant OpenCV.Core.Mat := Shift (Previous, 12, 7);
+      Saved_Previous : constant OpenCV.Core.Mat := Previous.Clone;
+      Saved_Next : constant OpenCV.Core.Mat := Next.Clone;
+      Points : Tracking_Point_Array := FB_Points;
+      Seeds : Tracking_Point_Array (20 .. 23);
+   begin
+      for I in Points'Range loop
+         Seeds (I - Points'First + Seeds'First) := (Points (I).X + 12.25, Points (I).Y + 6.75);
+      end loop;
+      declare
+         Saved_Seeds : constant Tracking_Point_Array := Seeds;
+         Tracks : constant Forward_Backward_Track_Array :=
+           Track_PyrLK_Forward_Backward (Build_PyrLK_Pyramid (Previous), Build_PyrLK_Pyramid (Next), Points, FB_Options, Seeds);
+         Ordinary : constant Point_Track_Array :=
+           Track_PyrLK (Build_PyrLK_Pyramid (Previous), Build_PyrLK_Pyramid (Next), Points, FB_Options.Tracking, Seeds);
+      begin
+         Assert (Tracks'First = Points'First and then Tracks'Last = Points'Last, "seed bounds leaked");
+         Assert (Points = FB_Points and then Seeds = Saved_Seeds, "caller arrays mutated");
+         for I in Tracks'Range loop
+            Assert_Good (Tracks (I), Points (I));
+            Assert (Tracks (I).Forward = Ordinary (I), "seeded PyrLK behavior changed");
+            Assert (Near (Tracks (I).Forward.Next_Point.X, Points (I).X + 12.0, 0.05) and then
+                      Near (Tracks (I).Forward.Next_Point.Y, Points (I).Y + 7.0, 0.05),
+                    "large seeded translation differs");
+         end loop;
+         Points (5) := (0.0, 0.0);
+         Seeds (20) := (0.0, 0.0);
+         Assert (Tracks (5).Forward.Previous_Point = FB_Points (5), "result aliases caller points");
+      end;
+      for R in 0 .. 95 loop
+         for C in 0 .. 95 loop
+            Assert (OpenCV.Core.UInt8_Access.Get (Previous, R, C) =
+                      OpenCV.Core.UInt8_Access.Get (Saved_Previous, R, C) and then
+                    OpenCV.Core.UInt8_Access.Get (Next, R, C) =
+                      OpenCV.Core.UInt8_Access.Get (Saved_Next, R, C), "FB images mutated");
+         end loop;
+      end loop;
+   end Pyramid_FB_Seeded_Translation;
+
+   procedure Pyramid_FB_Inconsistent (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous : constant OpenCV.Core.Mat := Texture (96, 96);
+      Next : constant OpenCV.Core.Mat := Shift (Previous, 12, 7);
+      Tracks : constant Forward_Backward_Track_Array :=
+        Track_PyrLK_Forward_Backward (Build_PyrLK_Pyramid (Previous), Build_PyrLK_Pyramid (Next), FB_Points,
+                                     (Tracking => FB_Options.Tracking, Maximum_Round_Trip_Error => 1.0));
+   begin
+      Assert (Tracks (5).Forward.Tracked and then Tracks (5).Backward_Tracked and then
+                Tracks (5).Round_Trip_Error > 2.0 and then not Tracks (5).Consistent,
+              "native forward-successful inconsistency not diagnosed");
+   end Pyramid_FB_Inconsistent;
+
+   procedure Pyramid_FB_Thresholds (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous : constant OpenCV.Core.Mat := Texture (96, 96);
+      Next : constant OpenCV.Core.Mat := Shift (Previous, 12, 7);
+      Points : constant Tracking_Point_Array := [7 => FB_Points (5)];
+      Measured : constant Forward_Backward_Track_Array :=
+        Track_PyrLK_Forward_Backward (Build_PyrLK_Pyramid (Previous), Build_PyrLK_Pyramid (Next), Points, FB_Options);
+      Distance : constant OpenCV.Float32_Value := Measured (7).Round_Trip_Error;
+   begin
+      Assert (Measured (7).Backward_Tracked and then Distance > 2.0, "threshold fixture not measurable");
+      for Mode in 1 .. 3 loop
+         declare
+            Threshold : constant OpenCV.Float32_Value :=
+              (case Mode is when 1 => Distance + 0.001, when 2 => Distance - 0.001, when others => Distance);
+            Tracks : constant Forward_Backward_Track_Array := Track_PyrLK_Forward_Backward
+              (Build_PyrLK_Pyramid (Previous), Build_PyrLK_Pyramid (Next), Points,
+               (Tracking => FB_Options.Tracking, Maximum_Round_Trip_Error => Threshold));
+         begin
+            Assert (Tracks (7).Round_Trip_Error = Distance and then
+                      Tracks (7).Consistent = (Mode /= 2), "threshold <= comparison differs");
+         end;
+      end loop;
+   end Pyramid_FB_Thresholds;
+
+   procedure Pyramid_FB_Zero (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous : constant OpenCV.Core.Mat := Texture (96, 96);
+      Next : constant OpenCV.Core.Mat := Shift (Previous, 2, 1);
+      Options : constant Forward_Backward_Options :=
+        (Tracking => (Max_Level => 1, others => <>), Maximum_Round_Trip_Error => 0.0);
+      Identity : constant Forward_Backward_Track_Array :=
+        Track_PyrLK_Forward_Backward (Build_PyrLK_Pyramid (Previous), Build_PyrLK_Pyramid (Previous), FB_Points, Options);
+      Moved : constant Forward_Backward_Track_Array :=
+        Track_PyrLK_Forward_Backward (Build_PyrLK_Pyramid (Previous), Build_PyrLK_Pyramid (Next), FB_Points, Options);
+      Positive_Distance : Boolean := False;
+   begin
+      for I in Identity'Range loop
+         Assert (Identity (I).Backward_Tracked and then Identity (I).Round_Trip_Error = 0.0
+                   and then Identity (I).Consistent, "exact identity with zero threshold failed");
+         Assert (Moved (I).Backward_Tracked and then
+                   Moved (I).Consistent = (Moved (I).Round_Trip_Error = 0.0), "zero threshold was clamped");
+         Positive_Distance := Positive_Distance or Moved (I).Round_Trip_Error > 0.0;
+      end loop;
+      Assert (Positive_Distance, "zero-threshold rejection not exercised");
+   end Pyramid_FB_Zero;
+
+   procedure Pyramid_FB_Forward_Failure (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : OpenCV.Core.Mat := OpenCV.Core.Create
+        (64, 64, (Depth => OpenCV.Core.UInt8, Channels => 1));
+      Tracks : Forward_Backward_Track_Array (Standard_Points'Range);
+   begin
+      Image.Set_To ((others => 0.0));
+      Tracks := Track_PyrLK_Forward_Backward (Build_PyrLK_Pyramid (Image), Build_PyrLK_Pyramid (Image), Standard_Points);
+      for I in Tracks'Range loop
+         Assert (not Tracks (I).Forward.Tracked and then Tracks (I).Forward.Error = 0.0 and then
+                   Tracks (I).Forward.Next_Point = Standard_Points (I), "forward failure differs");
+         Assert_Unavailable (Tracks (I), Standard_Points (I));
+      end loop;
+   end Pyramid_FB_Forward_Failure;
+
+   procedure Pyramid_FB_Backward_Failure (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous : constant OpenCV.Core.Mat := Texture (96, 96);
+      Next : OpenCV.Core.Mat := OpenCV.Core.Create
+        (96, 96, (Depth => OpenCV.Core.UInt8, Channels => 1));
+      Seeds : Tracking_Point_Array (20 .. 23);
+   begin
+      Next.Set_To ((others => 0.0));
+      for I in FB_Points'Range loop
+         Seeds (I - 5 + 20) := (FB_Points (I).X + 12.25, FB_Points (I).Y + 6.75);
+      end loop;
+      declare
+         Tracks : constant Forward_Backward_Track_Array :=
+           Track_PyrLK_Forward_Backward (Build_PyrLK_Pyramid (Previous), Build_PyrLK_Pyramid (Next), FB_Points, FB_Options, Seeds);
+      begin
+         for I in Tracks'Range loop
+            Assert (Tracks (I).Forward.Tracked, "blank destination forward fixture no longer succeeds");
+            Assert_Unavailable (Tracks (I), FB_Points (I));
+         end loop;
+      end;
+   end Pyramid_FB_Backward_Failure;
+
+   procedure Pyramid_FB_Compact_Mapping (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous : constant OpenCV.Core.Mat := Texture (96, 96);
+      Next : constant OpenCV.Core.Mat := Shift (Previous, 12, 7);
+      Points : constant Tracking_Point_Array (7 .. 11) :=
+        [(25.0, 25.0), (-1000.0, -1000.0), (45.0, 32.0), (1000.0, 1000.0), (60.0, 50.0)];
+      Seeds : constant Tracking_Point_Array (20 .. 24) :=
+        [(37.25, 31.75), (-1000.0, -1000.0), (77.0, 52.0), (1000.0, 1000.0), (72.25, 56.75)];
+      Tracks : constant Forward_Backward_Track_Array :=
+        Track_PyrLK_Forward_Backward (Build_PyrLK_Pyramid (Previous), Build_PyrLK_Pyramid (Next), Points, FB_Options, Seeds);
+   begin
+      Assert (Tracks'First = 7 and then Tracks'Last = 11, "compact bounds exposed");
+      Assert_Good (Tracks (7), Points (7));
+      Assert_Good (Tracks (11), Points (11));
+      Assert (Tracks (9).Forward.Tracked and then Tracks (9).Backward_Tracked and then
+                Tracks (9).Round_Trip_Error > 2.0 and then not Tracks (9).Consistent,
+              "interleaved inconsistent slot mis-mapped");
+      for I in Points'Range loop
+         Assert (Tracks (I).Forward.Previous_Point = Points (I), "source slot mis-mapped");
+         if I = 8 or else I = 10 then
+            Assert (not Tracks (I).Forward.Tracked, "outside source unexpectedly succeeded");
+            Assert_Unavailable (Tracks (I), Points (I));
+         else
+            declare
+               Single : constant Forward_Backward_Track_Array := Track_PyrLK_Forward_Backward
+                 (Build_PyrLK_Pyramid (Previous), Build_PyrLK_Pyramid (Next), [I => Points (I)], FB_Options,
+                  [1 => Seeds (I - Points'First + Seeds'First)]);
+               Backward : constant Point_Track_Array := Track_PyrLK
+                 (Build_PyrLK_Pyramid (Next), Build_PyrLK_Pyramid (Previous),
+                  [I => Tracks (I).Forward.Next_Point], FB_Options.Tracking, [20 => Points (I)]);
+            begin
+               Assert (Tracks (I) = Single (I), "compact entry differs from independent single call");
+               Assert (Backward (I).Tracked = Tracks (I).Backward_Tracked and then
+                 Backward (I).Next_Point = Tracks (I).Recovered_Previous_Point,
+                 "compact recovery differs from one-point seeded backward");
+            end;
+         end if;
+      end loop;
+   end Pyramid_FB_Compact_Mapping;
+
+   procedure Pyramid_FB_Extreme_Bounds (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (64, 64);
+      Points : constant Tracking_Point_Array := [Positive'Last => (20.0, 20.0)];
+      Tracks : constant Forward_Backward_Track_Array :=
+        Track_PyrLK_Forward_Backward (Build_PyrLK_Pyramid (Image), Build_PyrLK_Pyramid (Image), Points, Initial_Next_Points => [3 => (20.0, 20.0)]);
+   begin
+      Assert (Tracks'First = Positive'Last and then Tracks'Last = Positive'Last, "extreme bounds lost");
+      Assert_Good (Tracks (Positive'Last), Points (Positive'Last));
+   end Pyramid_FB_Extreme_Bounds;
+
+   procedure Pyramid_FB_Empty_Counts (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (64, 64);
+      Empty : constant Tracking_Point_Array (7 .. 6) := [];
+      Plain : constant Forward_Backward_Track_Array := Track_PyrLK_Forward_Backward (Build_PyrLK_Pyramid (Image), Build_PyrLK_Pyramid (Image), Empty);
+      Seeded : constant Forward_Backward_Track_Array := Track_PyrLK_Forward_Backward
+        (Build_PyrLK_Pyramid (Image), Build_PyrLK_Pyramid (Image), Empty, Initial_Next_Points => Tracking_Point_Array'(20 .. 19 => <>));
+   begin
+      Assert (Plain'First = 7 and then Plain'Last = 6 and then
+                Seeded'First = 7 and then Seeded'Last = 6, "FB empty bounds lost");
+      for Mode in 1 .. 3 loop
+         begin
+            declare
+               Tracks : constant Forward_Backward_Track_Array := Track_PyrLK_Forward_Backward
+                 (Build_PyrLK_Pyramid (Image), Build_PyrLK_Pyramid (Image), (if Mode = 1 then Empty else Standard_Points),
+                  Initial_Next_Points => (if Mode = 2 then Empty else [1 => (20.0, 20.0)]));
+               pragma Unreferenced (Tracks);
+            begin
+               Assert (False, "FB mismatched seed count accepted");
+            end;
+         exception
+            when OpenCV.OpenCV_Error => null;
+         end;
+      end loop;
+   end Pyramid_FB_Empty_Counts;
+
+   procedure Pyramid_FB_Invalid_Threshold (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (64, 64);
+      function From_Bits is new Ada.Unchecked_Conversion (Interfaces.Unsigned_32, OpenCV.Float32_Value);
+   begin
+      for Mode in 1 .. 4 loop
+         begin
+            declare
+               Threshold : constant OpenCV.Float32_Value := (case Mode is
+                 when 1 => -0.01, when 2 => From_Bits (16#7FC0_0000#),
+                 when 3 => From_Bits (16#7F80_0000#), when others => From_Bits (16#FF80_0000#));
+               Tracks : constant Forward_Backward_Track_Array := Track_PyrLK_Forward_Backward
+                 (Build_PyrLK_Pyramid (Image), Build_PyrLK_Pyramid (Image), Standard_Points, (Maximum_Round_Trip_Error => Threshold, others => <>));
+               pragma Unreferenced (Tracks);
+            begin
+               Assert (False, "invalid threshold accepted");
+            end;
+         exception
+            when OpenCV.OpenCV_Error => null;
+            when Constraint_Error => Assert (Mode /= 1, "negative threshold hit validity barrier");
+         end;
+      end loop;
+      declare
+         Tracks : constant Forward_Backward_Track_Array := Track_PyrLK_Forward_Backward
+           (Build_PyrLK_Pyramid (Image), Build_PyrLK_Pyramid (Image), Standard_Points,
+            (Maximum_Round_Trip_Error => OpenCV.Float32_Value'Last, others => <>));
+      begin
+         Assert_Good (Tracks (1), Standard_Points (1));
+      end;
+   end Pyramid_FB_Invalid_Threshold;
+
+   procedure Pyramid_FB_Regions (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous_Parent : constant OpenCV.Core.Mat := Texture (96, 96);
+      Next_Parent : constant OpenCV.Core.Mat := Shift (Previous_Parent, 2, 1);
+      Previous : constant OpenCV.Core.Mat := Previous_Parent.Region ((8, 8, 64, 64));
+      Next : constant OpenCV.Core.Mat := Next_Parent.Region ((8, 8, 64, 64));
+      Seeds : Tracking_Point_Array (20 .. 23);
+   begin
+      Assert (not Previous.Is_Continuous and then not Next.Is_Continuous, "FB Regions contiguous");
+      for I in Standard_Points'Range loop
+         Seeds (I + 19) := (Standard_Points (I).X + 2.25, Standard_Points (I).Y + 0.75);
+      end loop;
+      declare
+         Plain : constant Forward_Backward_Track_Array :=
+           Track_PyrLK_Forward_Backward (Build_PyrLK_Pyramid (Previous), Build_PyrLK_Pyramid (Next), Standard_Points);
+         Seeded : constant Forward_Backward_Track_Array := Track_PyrLK_Forward_Backward
+           (Build_PyrLK_Pyramid (Previous), Build_PyrLK_Pyramid (Next), Standard_Points, Initial_Next_Points => Seeds);
+      begin
+         for I in Plain'Range loop
+            Assert_Good (Plain (I), Standard_Points (I));
+            Assert_Good (Seeded (I), Standard_Points (I));
+         end loop;
+      end;
+   end Pyramid_FB_Regions;
+
+   procedure Pyramid_FB_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (64, 64);
+      Empty_Image : OpenCV.Core.Mat;
+   begin
+      for Mode in 1 .. 4 loop
+         begin
+            declare
+               Options : Forward_Backward_Options;
+            begin
+               if Mode = 2 then
+                  Options.Tracking.Max_Level := 31;
+               end if;
+               declare
+                  Tracks : constant Forward_Backward_Track_Array := Track_PyrLK_Forward_Backward
+                    (Build_PyrLK_Pyramid ((if Mode = 1 then Empty_Image else Image)), Build_PyrLK_Pyramid (Image),
+                     (if Mode <= 2 then Tracking_Point_Array'(7 .. 6 => <>) else Standard_Points),
+                     Options, Initial_Next_Points =>
+                       (if Mode <= 2 then Tracking_Point_Array'(20 .. 19 => <>)
+                        elsif Mode = 3 then Tracking_Point_Array'(1 .. 4 => (OpenCV.Float32_Value'Last, 0.0))
+                        else Tracking_Point_Array'(1 .. 4 => (536_871_040.0, 0.0))));
+                  pragma Unreferenced (Tracks);
+               begin
+                  Assert (False, "FB bypassed existing validation");
+               end;
+            end;
+         exception
+            when OpenCV.OpenCV_Error => null;
+         end;
+      end loop;
+   end Pyramid_FB_Validation;
+
+   procedure Pyramid_FB_Direct_Oracle (T : in out Fixture) is
+      pragma Unreferenced (T);
+      package Integers is new Ada.Text_IO.Integer_IO (Integer);
+      package Floats is new Ada.Text_IO.Float_IO (OpenCV.Float64_Value);
+      File : Ada.Text_IO.File_Type;
+      Previous : constant OpenCV.Core.Mat := Texture (96, 96);
+      Points : constant Tracking_Point_Array (7 .. 11) :=
+        [(25.0, 25.0), (-1000.0, -1000.0), (45.0, 32.0), (1000.0, 1000.0), (60.0, 50.0)];
+      Seeds : Tracking_Point_Array (20 .. 24);
+      Compared : Natural := 0;
+      function Close (Actual : OpenCV.Float32_Value; Expected : OpenCV.Float64_Value) return Boolean is
+        (abs (OpenCV.Float64_Value (Actual) - Expected) <= 1.0E-5);
+   begin
+      Ada.Text_IO.Open (File, Ada.Text_IO.In_File,
+        Ada.Environment_Variables.Value ("VIDEO_FORWARD_BACKWARD_ORACLE", "../obj/oracle/forward-backward.txt") & ".pyramids");
+      for I in Points'Range loop
+         Seeds (I - 7 + 20) := (Points (I).X + 12.25, Points (I).Y + 6.75);
+      end loop;
+      for Mode in 0 .. 3 loop
+         declare
+            Next : OpenCV.Core.Mat := Shift (Previous, (if Mode = 0 then 2 else 12),
+                                            (if Mode = 0 then 1 else 7));
+            Options : constant Forward_Backward_Options :=
+              (Tracking => (Max_Level => (if Mode = 0 then 1 else 0), others => <>), others => <>);
+         begin
+            if Mode = 3 then
+               Next.Set_To ((others => 0.0));
+            end if;
+            declare
+               Tracks : constant Forward_Backward_Track_Array :=
+                 (if Mode = 1 or else Mode = 3 then
+                    Track_PyrLK_Forward_Backward (Build_PyrLK_Pyramid (Previous), Build_PyrLK_Pyramid (Next), Points, Options, Seeds)
+                  else Track_PyrLK_Forward_Backward (Build_PyrLK_Pyramid (Previous), Build_PyrLK_Pyramid (Next), Points, Options));
+            begin
+               for I in Tracks'Range loop
+                  declare
+                     Native_Mode, Index, Forward_Status, Backward_Status : Integer;
+                     X, Y, Recovered_X, Recovered_Y, Distance, Error : OpenCV.Float64_Value;
+                  begin
+                     Integers.Get (File, Native_Mode);
+                     Integers.Get (File, Index);
+                     Integers.Get (File, Forward_Status);
+                     Floats.Get (File, X);
+                     Floats.Get (File, Y);
+                     Integers.Get (File, Backward_Status);
+                     Floats.Get (File, Recovered_X);
+                     Floats.Get (File, Recovered_Y);
+                     Floats.Get (File, Distance);
+                     Floats.Get (File, Error);
+                     Assert (Native_Mode = Mode and then Index = I, "oracle order differs");
+                     Assert (Tracks (I).Forward.Tracked = (Forward_Status = 1) and then
+                               Tracks (I).Backward_Tracked = (Backward_Status = 1), "oracle statuses differ");
+                     Assert (Close (Tracks (I).Forward.Next_Point.X, X) and then
+                               Close (Tracks (I).Forward.Next_Point.Y, Y) and then
+                               Close (Tracks (I).Recovered_Previous_Point.X, Recovered_X) and then
+                               Close (Tracks (I).Recovered_Previous_Point.Y, Recovered_Y) and then
+                               Close (Tracks (I).Round_Trip_Error, Distance) and then
+                               Close (Tracks (I).Forward.Error, Error), "direct C++/Ada diagnostics differ");
+                     Compared := Compared + 1;
+                  end;
+               end loop;
+            end;
+         end;
+      end loop;
+      Assert (Compared = 20, "oracle comparison count differs");
+      Ada.Text_IO.Close (File);
+   exception
+      when others =>
+         if Ada.Text_IO.Is_Open (File) then
+            Ada.Text_IO.Close (File);
+         end if;
+         raise;
+   end Pyramid_FB_Direct_Oracle;
+
+
+   procedure Pyramid_FB_Equivalence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : constant OpenCV.Core.Mat := Texture (96, 96);
+      Points : constant Tracking_Point_Array := FB_Points;
+      Seeds : Tracking_Point_Array (20 .. 23);
+   begin
+      for Mode in 0 .. 3 loop
+         declare
+            B : OpenCV.Core.Mat := Shift (A, (if Mode = 0 then 2 else 12), (if Mode = 0 then 1 else 7));
+            Options : constant Forward_Backward_Options :=
+              (Tracking => (Max_Level => (if Mode = 0 then 1 else 0), others => <>), others => <>);
+         begin
+            if Mode = 3 then B.Set_To ((others => 0.0)); end if;
+            for I in Points'Range loop Seeds (I + 15) := (Points (I).X + 12.25, Points (I).Y + 6.75); end loop;
+            declare
+               PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A);
+               PB : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (B);
+               Raw : constant Forward_Backward_Track_Array :=
+                 (if Mode = 1 or else Mode = 3 then Track_PyrLK_Forward_Backward (A, B, Points, Options, Seeds)
+                  else Track_PyrLK_Forward_Backward (A, B, Points, Options));
+               Built : constant Forward_Backward_Track_Array :=
+                 (if Mode = 1 or else Mode = 3 then Track_PyrLK_Forward_Backward (PA, PB, Points, Options, Seeds)
+                  else Track_PyrLK_Forward_Backward (PA, PB, Points, Options));
+            begin
+               Assert (Raw'First = Built'First and then Raw'Last = Built'Last, "equivalence bounds");
+               for I in Points'Range loop
+                  Assert (Raw (I).Forward.Tracked = Built (I).Forward.Tracked and then
+                    Raw (I).Backward_Tracked = Built (I).Backward_Tracked and then
+                    Raw (I).Consistent = Built (I).Consistent, "equivalence status");
+                  Assert (Near (Raw (I).Forward.Next_Point.X, Built (I).Forward.Next_Point.X, 1.0E-5) and then
+                    Near (Raw (I).Forward.Next_Point.Y, Built (I).Forward.Next_Point.Y, 1.0E-5) and then
+                    Near (Raw (I).Forward.Error, Built (I).Forward.Error, 1.0E-5) and then
+                    Near (Raw (I).Recovered_Previous_Point.X, Built (I).Recovered_Previous_Point.X, 1.0E-5) and then
+                    Near (Raw (I).Recovered_Previous_Point.Y, Built (I).Recovered_Previous_Point.Y, 1.0E-5) and then
+                    Near (Raw (I).Round_Trip_Error, Built (I).Round_Trip_Error, 1.0E-5), "raw/prebuilt numerics");
+               end loop;
+            end;
+         end;
+      end loop;
+   end Pyramid_FB_Equivalence;
+
+   procedure Pyramid_FB_Lifetime_Reuse (T : in out Fixture) is
+      pragma Unreferenced (T);
+      function Captured (DX, DY : Integer; Region : Boolean) return PyrLK_Pyramid is
+         Parent : OpenCV.Core.Mat := Texture (128, 128);
+         Shifted : OpenCV.Core.Mat := Shift (Parent, DX, DY);
+         Image : OpenCV.Core.Mat := (if Region then Shifted.Region ((16, 16, 96, 96)) else Shifted.Clone);
+      begin
+         Assert (not Region or else not Image.Is_Continuous, "lifetime Region contiguous");
+         return P : PyrLK_Pyramid := Build_PyrLK_Pyramid (Image) do
+            for R in 0 .. 95 loop
+               for C in 0 .. 95 loop OpenCV.Core.UInt8_Access.Set (Image, R, C, 0); end loop;
+            end loop;
+            Parent.Set_To ((others => 0.0));
+            Shifted.Set_To ((others => 0.0));
+         end return;
+      end Captured;
+   begin
+      for Region in Boolean loop
+         declare
+            PA : constant PyrLK_Pyramid := Captured (0, 0, Region);
+            PB : constant PyrLK_Pyramid := Captured (2, 1, Region);
+         begin
+            for Repetition in 1 .. 3 loop
+               declare
+                  Points : constant Tracking_Point_Array :=
+                    (if Repetition = 2 then Tracking_Point_Array'(7 => (45.0, 32.0)) else FB_Points);
+                  Seeds : Tracking_Point_Array (20 .. 19 + Points'Length);
+               begin
+                  for I in Points'Range loop
+                     Seeds (I - Points'First + 20) :=
+                       (Points (I).X + (if Repetition = 2 then 1.75 else 2.25), Points (I).Y + 0.75);
+                  end loop;
+                  declare
+                     Tracks : constant Forward_Backward_Track_Array := Track_PyrLK_Forward_Backward
+                       (PA, PB, Points, (Tracking => (Max_Level => 1, others => <>), others => <>), Seeds);
+                     Moved : Tracking_Point_Array (Points'Range);
+                  begin
+                     for I in Points'Range loop
+                        Assert_Good (Tracks (I), Points (I));
+                        Moved (I) := Tracks (I).Forward.Next_Point;
+                     end loop;
+                     declare
+                        Back : constant Forward_Backward_Track_Array := Track_PyrLK_Forward_Backward
+                          (PB, PA, Moved, (Tracking => (Max_Level => 1, others => <>), others => <>), Points);
+                     begin
+                        for I in Back'Range loop Assert_Good (Back (I), Moved (I)); end loop;
+                     end;
+                  end;
+               end;
+            end loop;
+         end;
+      end loop;
+   end Pyramid_FB_Lifetime_Reuse;
+
+   procedure Pyramid_FB_Compatibility (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : constant OpenCV.Core.Mat := Texture (96, 96);
+      B : constant OpenCV.Core.Mat := Texture (95, 96);
+      PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A);
+      PB : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (B);
+      Shallow : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A, (Max_Level => 0, others => <>));
+      Null_Pyramid : PyrLK_Pyramid;
+   begin
+      for Seeded in Boolean loop
+         for Empty in Boolean loop
+            for Mode in 0 .. 8 loop
+               begin
+                  declare
+                     Points : constant Tracking_Point_Array :=
+                       (if Empty then Tracking_Point_Array'(7 .. 6 => <>)
+                        elsif Mode = 7 then [7 => (536_871_040.0, 0.0)] else [7 => (25.0, 25.0)]);
+                     Options : Forward_Backward_Options;
+                  begin
+                     if Mode = 3 then Options.Tracking.Window_Size := (15, 15); end if;
+                     if Mode = 4 then Options.Tracking.Epsilon := 0.0; end if;
+                     if Mode = 5 then Options.Maximum_Round_Trip_Error := -1.0; end if;
+                     if Mode = 6 then Options.Tracking.Max_Level := 31; end if;
+                     declare
+                        function Run (P, Q : PyrLK_Pyramid) return Forward_Backward_Track_Array is
+                        begin
+                           if Seeded then
+                              return Track_PyrLK_Forward_Backward (P, Q, Points, Options,
+                                (if Mode = 8 then Tracking_Point_Array'(20 .. 19 => <>) else Points));
+                           else return Track_PyrLK_Forward_Backward (P, Q, Points, Options); end if;
+                        end Run;
+                        Tracks : constant Forward_Backward_Track_Array :=
+                          (if Mode = 0 then Run (Null_Pyramid, PA)
+                           elsif Mode = 1 then Run (PA, PB)
+                           elsif Mode = 2 then Run (PA, Shallow) else Run (PA, PA));
+                        pragma Unreferenced (Tracks);
+                     begin
+                        Assert ((Empty and then Mode = 7) or else
+                          (Mode = 8 and then (Empty or else not Seeded)), "pyramid FB validation bypassed");
+                     end;
+                  end;
+               exception
+                  when OpenCV.OpenCV_Error => null;
+               end;
+            end loop;
+         end loop;
+      end loop;
+   end Pyramid_FB_Compatibility;
+
+   procedure Pyramid_FB_Truncation_Subsets (T : in out Fixture) is
+      pragma Unreferenced (T);
+      A : constant OpenCV.Core.Mat := Texture (96, 96);
+      PA : constant PyrLK_Pyramid := Build_PyrLK_Pyramid (A, (Max_Level => 30, others => <>));
+      Points : constant Tracking_Point_Array := [7 => (-1000.0, -1000.0), 8 => (25.0, 25.0), 9 => (1000.0, 1000.0)];
+      Tracks : constant Forward_Backward_Track_Array := Track_PyrLK_Forward_Backward
+        (PA, PA, Points, (Tracking => (Max_Level => 30, others => <>), others => <>));
+   begin
+      Assert (Available_Max_Level (PA) < 30, "natural depth truncation not exercised");
+      Assert_Good (Tracks (8), Points (8));
+      Assert (not Tracks (7).Forward.Tracked and then not Tracks (9).Forward.Tracked, "single survivor fixture");
+      Assert_Unavailable (Tracks (7), Points (7)); Assert_Unavailable (Tracks (9), Points (9));
+   end Pyramid_FB_Truncation_Subsets;
+
    function Quality_Structure (Kind : Natural) return OpenCV.Core.Mat is
    begin
       return Result : OpenCV.Core.Mat := OpenCV.Core.Create
@@ -2284,6 +2850,25 @@ package body Video_Tests is
       Result.Add_Test (Caller.Create ("Quality_Pyramid_Validation", Quality_Pyramid_Validation'Access));
       Result.Add_Test (Caller.Create ("pyramid quality metric semantics", Pyramid_Quality_Semantics'Access));
       Result.Add_Test (Caller.Create ("pyramid previous quality backend definedness", Pyramid_Quality_Previous_Unavailable'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Identity", Pyramid_FB_Identity'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Small_Translation", Pyramid_FB_Small_Translation'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Seeded_Translation", Pyramid_FB_Seeded_Translation'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Inconsistent", Pyramid_FB_Inconsistent'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Thresholds", Pyramid_FB_Thresholds'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Zero", Pyramid_FB_Zero'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Forward_Failure", Pyramid_FB_Forward_Failure'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Backward_Failure", Pyramid_FB_Backward_Failure'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Compact_Mapping", Pyramid_FB_Compact_Mapping'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Extreme_Bounds", Pyramid_FB_Extreme_Bounds'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Empty_Counts", Pyramid_FB_Empty_Counts'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Invalid_Threshold", Pyramid_FB_Invalid_Threshold'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Regions", Pyramid_FB_Regions'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Validation", Pyramid_FB_Validation'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Direct_Oracle", Pyramid_FB_Direct_Oracle'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Equivalence", Pyramid_FB_Equivalence'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Lifetime_Reuse", Pyramid_FB_Lifetime_Reuse'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Compatibility", Pyramid_FB_Compatibility'Access));
+      Result.Add_Test (Caller.Create ("Pyramid_FB_Truncation_Subsets", Pyramid_FB_Truncation_Subsets'Access));
       return Result;
    end Suite;
 end Video_Tests;

@@ -4,6 +4,20 @@ This is thick Ada composition of the qualified [native PyrLK contracts](pyrlk-so
 not a single OpenCV API and not a second Lucas-Kanade implementation. Neither
 production C++ nor the five-export C ABI changes in Task 003.
 
+Task 008 extends the identical diagnostic semantics to owned `PyrLK_Pyramid`
+sources, with unseeded-forward and seeded-forward overloads. A private generic
+shares the existing compaction, saved-index mapping and checked distance logic
+between raw images and limited owned pyramids. No additional native export is
+introduced; the Task 007 production ABI remains fourteen exports. Both legs
+dispatch to existing qualified pyramid tracking operations, which pass stored
+derivative-interleaved vectors directly to LK. The same two objects are reversed
+for the seeded backward call; no pyramid is rebuilt. The backward destination
+predictions are original previous-frame coordinates, never forward locations.
+Pyramid geometry, build/track window, requested-depth and tracking-option checks
+remain active for empty arrays; naturally truncated available depth is allowed.
+Sources/Regions/parents can be mutated and finalized after construction. Repeated
+sequential use is supported; concurrent shared use is not promised.
+
 The forward pass uses existing flags 0, or only `OPTFLOW_USE_INITIAL_FLOW` for
 caller predictions. Forward status-success entries alone form the backward
 source array. A parallel original-point array seeds backward destinations with
@@ -11,6 +25,7 @@ P0, while sources are P1 in the next frame. An explicit saved-index array maps
 compact backward entries to the input Ada range. Failed forward entries never
 run backward LK. No-success inputs skip the backward call entirely. Empty arrays
 still validate thresholds and the ordinary image/tracking/seed-count contract.
+For owned sources this includes the pyramid compatibility contract too.
 
 The successful-subset count is <= input length. A Natural compact counter starts
 at zero and increments once per successful source, never exceeding that count.
