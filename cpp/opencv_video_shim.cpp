@@ -23,6 +23,7 @@ struct opencv_video_pyramid_handle {
 
 #ifdef OPENCV_VIDEO_TEST_FAULTS
 void opencv_video_test_fault(int);
+void opencv_video_test_corrupt_flow(float *values, size_t count);
 #endif
 
 namespace {
@@ -540,6 +541,7 @@ extern "C" opencv_video_status opencv_video_calc_farneback_flow(
             return fail(OPENCV_VIDEO_ERROR_OPENCV, "OpenCV returned an unexpected Farneback schema");
 #ifdef OPENCV_VIDEO_TEST_FAULTS
         opencv_video_test_fault(2);
+        opencv_video_test_corrupt_flow(computed.ptr<float>(), size_t(pixels) * 2);
 #endif
         const float *values = computed.ptr<float>();
         const size_t count = size_t(pixels) * 2;

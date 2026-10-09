@@ -24,6 +24,13 @@ void opencv_video_test_fault(int stage) {
     if (fault_kind == 4) throw std::runtime_error("qualification standard exception");
     throw 42;
 }
+int corrupt_mode = 0;  // 1 NaN, 2 +Inf, 3 -Inf written into one private component
+void opencv_video_test_corrupt_flow(float *values, size_t count) {
+    if (corrupt_mode == 0 || count == 0) return;
+    values[count / 2] = corrupt_mode == 1 ? std::numeric_limits<float>::quiet_NaN()
+                      : corrupt_mode == 2 ? std::numeric_limits<float>::infinity()
+                                          : -std::numeric_limits<float>::infinity();
+}
 #endif
 
 namespace {
@@ -889,6 +896,17 @@ void run_farneback() {
                   output(flow.get()).type() == before.type(), "Farneback fault changed published output");
         }
         fault_stage=0;
+        // Corrupt one private component after the native call: validation must reject it
+        // without publishing anything (a NaN/Inf must never reach the caller).
+        for (int mode : {1,2,3}) {
+            corrupt_mode=mode;
+            check(call(previous.get(), next.get(), flow.get()) == OPENCV_VIDEO_ERROR_OPENCV,
+                  "nonfinite Farneback component accepted");
+            check(cv::norm(before, output(flow.get()), cv::NORM_INF) == 0 &&
+                  output(flow.get()).type() == before.type(),
+                  "nonfinite Farneback result was partially published");
+        }
+        corrupt_mode=0;
     }
 #endif
     check(call(previous.get(), next.get(), flow.get()) == OPENCV_VIDEO_OK, "post-fault call failed");
