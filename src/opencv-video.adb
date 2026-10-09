@@ -739,9 +739,9 @@ package body OpenCV.Video is
       end if;
       if Previous_Image.Rows < 16 or else Previous_Image.Columns < 16
         or else Long_Long_Integer (Previous_Image.Rows) * Long_Long_Integer (Previous_Image.Columns)
-          > 2 ** 27
+          > Long_Long_Integer (Interfaces.Integer_32'Last) / 16
       then
-         raise OpenCV.OpenCV_Error with "Farneback image size outside 16x16 .. 2**27 pixels";
+         raise OpenCV.OpenCV_Error with "Farneback image size outside 16x16 .. 134217727 pixels";
       end if;
       if not Is_Finite (Options.Pyramid_Scale) or else Options.Pyramid_Scale < 0.25
         or else Options.Pyramid_Scale > 0.90 or else Options.Levels > 8

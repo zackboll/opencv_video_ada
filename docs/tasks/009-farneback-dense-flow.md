@@ -25,3 +25,5 @@ exports (`opencv_video_calc_farneback_flow`).
    the task.
 
 See [qualification](../task009-qualification.md) for actual results.
+
+Image size limit: 16x16 up to 134,217,727 pixels (`Integer_32'Last / 16`), identical in Ada and the C shim.

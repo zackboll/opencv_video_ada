@@ -112,7 +112,7 @@ This scratch compilation instruments the actual Farnebäck CPU source only.
 `OpenCV.Video.Calculate_Farneback_Flow (Previous, Next, Options)` and export 15,
 `opencv_video_calc_farneback_flow`, call native `cv::calcOpticalFlowFarneback`
 with flags **0** (box refinement, no initial flow, no Gaussian flag). Ada validates
-images (nonempty, 2-D, UInt8 C1, identical geometry, >= 16x16, <= 2^27 pixels;
+images (nonempty, 2-D, UInt8 C1, identical geometry, >= 16x16, <= 134,217,727 pixels (Integer_32'Last / 16, identical in Ada and the C shim);
 Regions accepted) and options (scale .25-.90, levels 1-8, odd window 5-63,
 iterations 1-30, neighborhood 5 or 7, sigma .1-10, finite) before any native call;
 the C shim repeats every check, rejects output aliasing either input header, and

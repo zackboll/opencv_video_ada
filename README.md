@@ -10,7 +10,7 @@ Flow : constant OpenCV.Core.Mat :=
 Returns a new Core-owned Float32 C2 Mat of the image size; channel 0 is dx and
 channel 1 dy with `Previous(y,x) ~ Next(y+dy, x+dx)`. `Farneback_Options` defaults
 are scale .5, 3 levels, window 15, 3 iterations, neighborhood 5, sigma 1.2 (flags
-are always 0). Images are nonempty 2-D UInt8 C1 of equal size >= 16x16; out-of-range
+are always 0). Images are nonempty 2-D UInt8 C1 of equal size, at least 16x16 and at most 134,217,727 pixels (Integer_32'Last / 16); out-of-range
 options or images raise `OpenCV_Error`. Every component is validated finite and
 nothing is returned on failure. The production ABI is now 15 exports and AUnit has
 99 registrations. **Known limitation (KNOWN_UPSTREAM_UB_ACCEPTED):** OpenCV 4.1.0,

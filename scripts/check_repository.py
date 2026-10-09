@@ -51,6 +51,12 @@ def main() -> None:
           "public native ownership leakage")
 
     bridge_not_vendored()
+    body = (ROOT / "src/opencv-video.adb").read_text()
+    check("Long_Long_Integer (Interfaces.Integer_32'Last) / 16" in body
+          and "> 2 ** 27" not in body,
+          "Ada Farneback pixel limit must equal Integer_32'Last / 16")
+    check("pixels > int64_t(std::numeric_limits<int>::max() / 16)" in cpp,
+          "C shim Farneback pixel limit must remain INT_MAX / 16")
     check(not list((ROOT / "src").rglob("opencv.ads")), "do not redeclare Core's root package")
     for path in list((ROOT / "src").rglob("*.ads")) + list((ROOT / "src").rglob("*.adb")):
         check("External_Name" not in path.read_text() or "/internal/" in path.as_posix(),

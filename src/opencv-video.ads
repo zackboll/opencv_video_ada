@@ -245,7 +245,7 @@ package OpenCV.Video is
    end record;
 
    --  Images: nonempty 2-D UInt8 C1 of identical geometry, at least 16 x 16
-   --  and at most 2**27 pixels; Regions are accepted. Returns a new Core-owned
+   --  and at most Integer_32'Last / 16 = 134_217_727 pixels (matching the native shim); Regions are accepted. Returns a new Core-owned
    --  Float32 C2 Mat with the image geometry; channel 0 is dx, channel 1 is
    --  dy, so Previous(y,x) ~ Next(y + dy, x + dx) (a positive-x shift of the
    --  content yields positive dx). Every component is finite or OpenCV_Error is
