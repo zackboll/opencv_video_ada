@@ -95,3 +95,56 @@ on all three versions for identity and both translation directions at sizes
 
 Full allocation-failure, ROI/lifetime, option-extreme and memory-safety review
 was stopped at the blocking finding; none is claimed qualified.
+
+# Task 010 addendum — `OPTFLOW_USE_INITIAL_FLOW` (flags 4)
+
+Reviewed `FarnebackOpticalFlowImpl::calc` in `modules/video/src/optflowgf.cpp` at tags
+4.1.0, 4.6.0, 4.10.0 and 5.0.0 (all four fetched and diffed). `calc` is identical in
+all four; the only differences are universal-intrinsic spellings (4.1.0/4.6.0 vs
+4.10.0/5.0.0) and the placement of the `ptr` expression inside
+`FarnebackUpdateMatrices` (the accepted upstream finding above). Behavior relevant to
+seeded mode:
+
+1. With the flag set, `calc` asserts `_flow0.size() == prev0.size()`, two channels and
+   `CV_32F` depth; otherwise it calls `_flow0.create(size, CV_32FC2)`. The seed
+   therefore must already be an allocated `CV_32FC2` of image size.
+2. `levels` is reduced while `cols*scale` and `rows*scale` stay at least 32; the loop
+   then runs from the deepest accepted level down to level zero.
+3. At the first (coarsest) level `resize(flow0, flow, Size(width,height), 0, 0,
+   INTER_AREA); flow *= scale;` initializes the field in that level's coordinates.
+   Later levels use an `INTER_LINEAR` resize of the previous level and `flow *= 1/scale`.
+4. At level zero `flow = flow0`; with zero reductions the INTER_AREA resize at scale 1
+   rewrites the same storage.
+5. `_flow0` is an `InputOutputArray` and is mutated in place, also on paths that later
+   throw. The Mat (not UMat/OpenCL) path is selected because the binding passes a Mat.
+6. Direct experiments (4.1.0, 4.10.0 and 5.0.0; 4.6.0 only through the full campaign; sizes 16/32/64/128/256 = 0..3 reductions at
+   scale .5, 3 levels) show the supplied storage pointer is reused with zero nonfinite
+   components. The binding still checks pointer identity and finiteness and rejects
+   otherwise.
+
+## Coordinate-conversion domain
+
+`FarnebackUpdateMatrices` computes `fx = x + dx` in `float`, then `cvFloor(fx)`. Images
+are limited to `INT_MAX/16` pixels, so a row or column index is below 2^27, well inside
+`int`. A component up to 2^20 keeps `x + dx` far inside `int` range, also after the
+coarse-level scaling by a factor below one. The 2^20 bound is a **binding policy**, not
+an OpenCV guarantee. Native probes with seeds of 2^20, 2^22 and 1e9 produced finite
+output on 4.1.0, 4.10.0 and 5.0.0 (4.6.0 was not probed separately), so the bound is conservative rather than forced by
+the evidence. It is applied identically in Ada and the C shim, in widened (double)
+arithmetic; values outside it are rejected, never clamped.
+
+## Measured behavior (identical on 4.1.0, 4.10.0, 5.0.0; the 4.6.0 AUnit assertions on the same fixtures pass)
+
+Fixture: deterministic texture translated by (12,7), default options, central-half mean:
+
+| size | unseeded | seed (12.25,6.75) | seed (-20,15) | zero seed |
+|---|---|---|---|---|
+| 128 | (12.00,7.00) | (12.00,7.00) | (-16.9,20.4) | identical to unseeded |
+| 192 | (6.25,6.13) | (12.00,7.00) | (-18.3,16.9) | identical to unseeded |
+
+The 128x128 fixture is not distinguishing (unseeded already succeeds). 192x192 is: the
+unseeded call fails to recover the translation, the near-correct seed does, and a
+different valid seed gives a different wrong answer, so the seed is demonstrably
+consumed. Zero-seed output was bitwise identical to unseeded output in the measured
+cases (tests allow 1e-3 rather than asserting bitwise identity). Poor seeds are not
+corrected; the algorithm refines locally.

@@ -125,4 +125,11 @@ package OpenCV.Video.Internal.C_API is
       Levels, Window_Size, Iterations, Poly_Neighborhood : Interfaces.Integer_32;
       Poly_Sigma                : Interfaces.C.double) return Status
      with Import, Convention => C, External_Name => "opencv_video_calc_farneback_flow";
+   function Calc_Farneback_Flow_Seeded
+     (Previous_Image, Next_Image, Initial_Flow : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Result_Flow                : OpenCV.Core.Module_Interop.Output_Mat_Handle;
+      Pyramid_Scale              : Interfaces.C.double;
+      Levels, Window_Size, Iterations, Poly_Neighborhood : Interfaces.Integer_32;
+      Poly_Sigma                 : Interfaces.C.double) return Status
+     with Import, Convention => C, External_Name => "opencv_video_calc_farneback_flow_seeded";
 end OpenCV.Video.Internal.C_API;
