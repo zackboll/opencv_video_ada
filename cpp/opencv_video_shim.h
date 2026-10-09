@@ -159,6 +159,20 @@ opencv_video_status opencv_video_calc_farneback_flow(
     double pyramid_scale, int32_t levels, int32_t window_size,
     int32_t iterations, int32_t poly_neighborhood, double poly_sigma);
 
+/* Seeded dense Farneback (Task 010): flags exactly OPTFLOW_USE_INITIAL_FLOW (4).
+ * initial_flow is a read-only 2-D Float32 C2 Mat with the image geometry; every
+ * component must be finite with |value| <= 2^20 pixels (binding policy). It is
+ * cloned into private continuous storage before native mutation, the caller's seed
+ * is never modified, and result_flow may alias no input header. Publication is
+ * failure-atomic as for opencv_video_calc_farneback_flow. */
+opencv_video_status opencv_video_calc_farneback_flow_seeded(
+    const opencv_core_mat_handle *previous_image,
+    const opencv_core_mat_handle *next_image,
+    const opencv_core_mat_handle *initial_flow,
+    opencv_core_mat_handle *result_flow,
+    double pyramid_scale, int32_t levels, int32_t window_size,
+    int32_t iterations, int32_t poly_neighborhood, double poly_sigma);
+
 #ifdef __cplusplus
 }
 #endif

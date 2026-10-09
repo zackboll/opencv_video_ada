@@ -714,12 +714,12 @@ package body OpenCV.Video is
          Track_PyrLK (Previous_Pyramid, Next_Pyramid, Points, Options.Tracking, Initial_Next_Points), Options);
    end Track_PyrLK_Forward_Backward;
 
-   function Calculate_Farneback_Flow
+   --  Shared validation and result checks for the unseeded and seeded Farneback
+   --  overloads. Nothing here weakens the Task 009 contract.
+   procedure Validate_Farneback_Inputs
      (Previous_Image : OpenCV.Core.Mat;
       Next_Image     : OpenCV.Core.Mat;
-      Options        : Farneback_Options := (others => <>)) return OpenCV.Core.Mat
-   is
-      Code : C.Status := C.Success;
+      Options        : Farneback_Options) is
    begin
       if Previous_Image.Is_Empty or else Next_Image.Is_Empty then
          raise OpenCV.OpenCV_Error with "Farneback images must be nonempty";
@@ -753,6 +753,37 @@ package body OpenCV.Video is
       then
          raise OpenCV.OpenCV_Error with "Farneback options out of range";
       end if;
+   end Validate_Farneback_Inputs;
+
+   procedure Validate_Farneback_Result
+     (Flow : OpenCV.Core.Mat; Previous_Image : OpenCV.Core.Mat) is
+   begin
+      if Flow.Rows /= Previous_Image.Rows or else Flow.Columns /= Previous_Image.Columns
+        or else Flow.Depth /= OpenCV.Core.Float32 or else Flow.Channels /= 2
+      then
+         raise OpenCV.OpenCV_Error with "Invalid native Farneback output schema";
+      end if;
+      for R in 0 .. Flow.Rows - 1 loop
+         for Col in 0 .. Flow.Columns - 1 loop
+            declare
+               Value : constant Vec2.Vector := Vec2_Access.Get (Flow, R, Col);
+            begin
+               if not Is_Finite (Value (0)) or else not Is_Finite (Value (1)) then
+                  raise OpenCV.OpenCV_Error with "Farneback produced a nonfinite flow component";
+               end if;
+            end;
+         end loop;
+      end loop;
+   end Validate_Farneback_Result;
+
+   function Calculate_Farneback_Flow
+     (Previous_Image : OpenCV.Core.Mat;
+      Next_Image     : OpenCV.Core.Mat;
+      Options        : Farneback_Options := (others => <>)) return OpenCV.Core.Mat
+   is
+      Code : C.Status := C.Success;
+   begin
+      Validate_Farneback_Inputs (Previous_Image, Next_Image, Options);
 
       return Flow : OpenCV.Core.Mat do
          declare
@@ -779,23 +810,82 @@ package body OpenCV.Video is
             Bridge.With_Input_Handle (Previous_Image, Previous_Callback'Access);
          end;
          C.Check (Code, "Video.Calculate_Farneback_Flow");
+         Validate_Farneback_Result (Flow, Previous_Image);
+      end return;
+   end Calculate_Farneback_Flow;
 
-         if Flow.Rows /= Previous_Image.Rows or else Flow.Columns /= Previous_Image.Columns
-           or else Flow.Depth /= OpenCV.Core.Float32 or else Flow.Channels /= 2
-         then
-            raise OpenCV.OpenCV_Error with "Invalid native Farneback output schema";
-         end if;
-         for R in 0 .. Flow.Rows - 1 loop
-            for Col in 0 .. Flow.Columns - 1 loop
-               declare
-                  Value : constant Vec2.Vector := Vec2_Access.Get (Flow, R, Col);
-               begin
-                  if not Is_Finite (Value (0)) or else not Is_Finite (Value (1)) then
-                     raise OpenCV.OpenCV_Error with "Farneback produced a nonfinite flow component";
+   Maximum_Initial_Displacement : constant OpenCV.Float64_Value := 1048576.0;  --  2**20 px
+
+   function Calculate_Farneback_Flow
+     (Previous_Image : OpenCV.Core.Mat;
+      Next_Image     : OpenCV.Core.Mat;
+      Options        : Farneback_Options := (others => <>);
+      Initial_Flow   : OpenCV.Core.Mat) return OpenCV.Core.Mat
+   is
+      Code : C.Status := C.Success;
+   begin
+      Validate_Farneback_Inputs (Previous_Image, Next_Image, Options);
+      if Initial_Flow.Is_Empty then
+         raise OpenCV.OpenCV_Error with "Farneback initial flow must be nonempty";
+      end if;
+      if Initial_Flow.Dimension_Count /= 2 then
+         raise OpenCV.OpenCV_Error with "Farneback initial flow must be 2-D";
+      end if;
+      if Initial_Flow.Depth /= OpenCV.Core.Float32 or else Initial_Flow.Channels /= 2 then
+         raise OpenCV.OpenCV_Error with "Farneback initial flow must be Float32 C2";
+      end if;
+      if Initial_Flow.Rows /= Previous_Image.Rows
+        or else Initial_Flow.Columns /= Previous_Image.Columns
+      then
+         raise OpenCV.OpenCV_Error with "Farneback initial flow geometry differs from images";
+      end if;
+      for R in 0 .. Initial_Flow.Rows - 1 loop
+         for Col in 0 .. Initial_Flow.Columns - 1 loop
+            declare
+               Value : constant Vec2.Vector := Vec2_Access.Get (Initial_Flow, R, Col);
+            begin
+               for Channel in 0 .. 1 loop
+                  if not Is_Finite (Value (Channel))
+                    or else abs (OpenCV.Float64_Value (Value (Channel))) > Maximum_Initial_Displacement
+                  then
+                     raise OpenCV.OpenCV_Error with
+                       "Farneback initial flow component is nonfinite or exceeds 2**20 pixels";
                   end if;
-               end;
-            end loop;
+               end loop;
+            end;
          end loop;
+      end loop;
+
+      return Flow : OpenCV.Core.Mat do
+         declare
+            procedure Previous_Callback (Previous_Handle : Bridge.Input_Mat_Handle) is
+               procedure Next_Callback (Next_Handle : Bridge.Input_Mat_Handle) is
+                  procedure Seed_Callback (Seed_Handle : Bridge.Input_Mat_Handle) is
+                     procedure Flow_Callback (Flow_Handle : Bridge.Output_Mat_Handle) is
+                     begin
+                        Code := C.Calc_Farneback_Flow_Seeded
+                          (Previous_Handle, Next_Handle, Seed_Handle, Flow_Handle,
+                           Interfaces.C.double (Options.Pyramid_Scale),
+                           Interfaces.Integer_32 (Options.Levels),
+                           Interfaces.Integer_32 (Options.Window_Size),
+                           Interfaces.Integer_32 (Options.Iterations),
+                           Interfaces.Integer_32 (Options.Poly_Neighborhood),
+                           Interfaces.C.double (Options.Poly_Sigma));
+                     end Flow_Callback;
+                  begin
+                     Bridge.With_Output_Handle (Flow, Flow_Callback'Access);
+                  end Seed_Callback;
+               begin
+                  Bridge.With_Input_Handle (Initial_Flow, Seed_Callback'Access);
+               end Next_Callback;
+            begin
+               Bridge.With_Input_Handle (Next_Image, Next_Callback'Access);
+            end Previous_Callback;
+         begin
+            Bridge.With_Input_Handle (Previous_Image, Previous_Callback'Access);
+         end;
+         C.Check (Code, "Video.Calculate_Farneback_Flow (seeded)");
+         Validate_Farneback_Result (Flow, Previous_Image);
       end return;
    end Calculate_Farneback_Flow;
 

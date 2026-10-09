@@ -484,24 +484,37 @@ extern "C" opencv_video_status opencv_video_track_pyr_lk_seeded_min_eigenvalues(
                         max_level, maximum_iterations, epsilon, min_eigenvalue_threshold);
 }
 
-extern "C" opencv_video_status opencv_video_calc_farneback_flow(
-    const opencv_core_mat_handle *previous_image,
-    const opencv_core_mat_handle *next_image,
-    opencv_core_mat_handle *flow,
-    double pyramid_scale, int32_t levels, int32_t window_size,
-    int32_t iterations, int32_t poly_neighborhood, double poly_sigma) {
+namespace {
+// Shared by the unseeded (flags 0) and seeded (flags 4) Farneback exports.
+// Binding-policy bound on each initial displacement component (not an OpenCV
+// guarantee): 2^20 px. Images have at most INT_MAX/16 pixels, so a column index
+// is below 2^23 and x + dx stays far below 2^31 for cvFloor in the CPU kernel.
+constexpr double kMaxInitialDisplacement = 1048576.0;
+
+opencv_video_status calc_farneback(const opencv_core_mat_handle *previous_image,
+                                   const opencv_core_mat_handle *next_image,
+                                   const opencv_core_mat_handle *initial_flow, bool seeded,
+                                   opencv_core_mat_handle *flow,
+                                   double pyramid_scale, int32_t levels, int32_t window_size,
+                                   int32_t iterations, int32_t poly_neighborhood,
+                                   double poly_sigma) {
     try {
         clear_error();
         const cv::Mat *previous = nullptr;
         const cv::Mat *next = nullptr;
+        const cv::Mat *seed = nullptr;
         cv::Mat *published = nullptr;
         auto status = resolve_input(previous_image, &previous, "previous image");
         if (status != OPENCV_VIDEO_OK) return status;
         status = resolve_input(next_image, &next, "next image");
         if (status != OPENCV_VIDEO_OK) return status;
+        if (seeded) {
+            status = resolve_input(initial_flow, &seed, "initial flow");
+            if (status != OPENCV_VIDEO_OK) return status;
+        }
         status = resolve_output(flow, &published, "flow");
         if (status != OPENCV_VIDEO_OK) return status;
-        if (published == previous || published == next)
+        if (published == previous || published == next || (seeded && published == seed))
             return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Aliased input/output headers");
         if (previous->empty() || next->empty() || previous->dims != 2 || next->dims != 2 ||
             previous->type() != CV_8UC1 || next->type() != CV_8UC1 ||
@@ -522,9 +535,35 @@ extern "C" opencv_video_status opencv_video_calc_farneback_flow(
             return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
                         "Image exceeds safe native arithmetic bounds");
 
-        // Private sentinel-filled output: unwritten components cannot look valid.
-        const double nan = std::numeric_limits<double>::quiet_NaN();
-        cv::Mat computed(previous->rows, previous->cols, CV_32FC2, cv::Scalar(nan, nan));
+        cv::Mat computed;
+        if (seeded) {
+            if (seed->empty() || seed->dims != 2 || seed->type() != CV_32FC2 ||
+                seed->size() != previous->size())
+                return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                            "Initial flow must be a nonempty 2-D Float32 C2 Mat matching the images");
+            if (seed->step[0] > size_t(std::numeric_limits<int>::max() / 16))
+                return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                            "Initial flow exceeds safe native arithmetic bounds");
+            // Validate every component (widened to double) before any native work.
+            for (int r = 0; r < seed->rows; ++r) {
+                const float *row = seed->ptr<float>(r);
+                for (int i = 0; i < seed->cols * 2; ++i) {
+                    const double v = double(row[i]);
+                    if (!std::isfinite(v) || std::fabs(v) > kMaxInitialDisplacement)
+                        return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                                    "Initial flow component is nonfinite or exceeds 2^20 pixels");
+                }
+            }
+            // Private continuous clone: native may mutate it, never the caller's seed.
+            computed = seed->clone();
+            if (computed.data == seed->data || !computed.isContinuous() ||
+                computed.type() != CV_32FC2 || computed.size() != previous->size())
+                return fail(OPENCV_VIDEO_ERROR_OPENCV, "Initial flow clone is not private/continuous");
+        } else {
+            // Private sentinel-filled output: unwritten components cannot look valid.
+            const double nan = std::numeric_limits<double>::quiet_NaN();
+            computed = cv::Mat(previous->rows, previous->cols, CV_32FC2, cv::Scalar(nan, nan));
+        }
         const auto *storage = computed.data;
 
 #ifdef OPENCV_VIDEO_TEST_FAULTS
@@ -532,7 +571,7 @@ extern "C" opencv_video_status opencv_video_calc_farneback_flow(
 #endif
         cv::calcOpticalFlowFarneback(*previous, *next, computed, pyramid_scale, levels,
                                      window_size, iterations, poly_neighborhood,
-                                     poly_sigma, 0);
+                                     poly_sigma, seeded ? cv::OPTFLOW_USE_INITIAL_FLOW : 0);
         if (computed.data != storage)
             return fail(OPENCV_VIDEO_ERROR_OPENCV, "Farneback replaced output storage");
         if (computed.dims != 2 || computed.type() != CV_32FC2 ||
@@ -559,4 +598,27 @@ extern "C" opencv_video_status opencv_video_calc_farneback_flow(
     } catch (...) {
         return fail(OPENCV_VIDEO_ERROR_UNKNOWN, "Unknown Farneback exception");
     }
+}
+}  // namespace
+
+extern "C" opencv_video_status opencv_video_calc_farneback_flow(
+    const opencv_core_mat_handle *previous_image,
+    const opencv_core_mat_handle *next_image,
+    opencv_core_mat_handle *flow,
+    double pyramid_scale, int32_t levels, int32_t window_size,
+    int32_t iterations, int32_t poly_neighborhood, double poly_sigma) {
+    return calc_farneback(previous_image, next_image, nullptr, false, flow, pyramid_scale,
+                          levels, window_size, iterations, poly_neighborhood, poly_sigma);
+}
+
+extern "C" opencv_video_status opencv_video_calc_farneback_flow_seeded(
+    const opencv_core_mat_handle *previous_image,
+    const opencv_core_mat_handle *next_image,
+    const opencv_core_mat_handle *initial_flow,
+    opencv_core_mat_handle *result_flow,
+    double pyramid_scale, int32_t levels, int32_t window_size,
+    int32_t iterations, int32_t poly_neighborhood, double poly_sigma) {
+    return calc_farneback(previous_image, next_image, initial_flow, true, result_flow,
+                          pyramid_scale, levels, window_size, iterations, poly_neighborhood,
+                          poly_sigma);
 }
