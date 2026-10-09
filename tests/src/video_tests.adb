@@ -1783,6 +1783,391 @@ package body Video_Tests is
               "minimum-size Farneback geometry");
    end Farneback_Minimum_Size_Options;
 
+   --  Task 010 seeded dense Farneback tests.
+   function Seed_Field (Size : Positive; Kind : Natural; DX : OpenCV.Float32_Value := 0.0;
+                        DY : OpenCV.Float32_Value := 0.0) return OpenCV.Core.Mat is
+   begin
+      return Result : OpenCV.Core.Mat := OpenCV.Core.Create
+        (Size, Size, (Depth => OpenCV.Core.Float32, Channels => 2)) do
+         for R in 0 .. Size - 1 loop
+            for C in 0 .. Size - 1 loop
+               OpenCV.Core.Float32_Vec2_Access.Set
+                 (Result, R, C,
+                  (if Kind = 3
+                   then [0 => OpenCV.Float32_Value (3.0 + OpenCV.Float64_Value (R - 48) * 0.015625),
+                         1 => OpenCV.Float32_Value (2.0 - OpenCV.Float64_Value (C - 48) * 0.0078125)]
+                   else [0 => DX, 1 => DY]));
+            end loop;
+         end loop;
+      end return;
+   end Seed_Field;
+
+   function Max_Difference (Left, Right : OpenCV.Core.Mat) return OpenCV.Float64_Value is
+      Result : OpenCV.Float64_Value := 0.0;
+   begin
+      for R in 0 .. Left.Rows - 1 loop
+         for C in 0 .. Left.Columns - 1 loop
+            declare
+               A : constant OpenCV.Core.Float32_Vec2.Vector :=
+                 OpenCV.Core.Float32_Vec2_Access.Get (Left, R, C);
+               B : constant OpenCV.Core.Float32_Vec2.Vector :=
+                 OpenCV.Core.Float32_Vec2_Access.Get (Right, R, C);
+            begin
+               for K in 0 .. 1 loop
+                  Result := OpenCV.Float64_Value'Max
+                    (Result, abs (OpenCV.Float64_Value (A (K)) - OpenCV.Float64_Value (B (K))));
+               end loop;
+            end;
+         end loop;
+      end loop;
+      return Result;
+   end Max_Difference;
+
+   procedure Seeded_Default_And_Options (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous : constant OpenCV.Core.Mat := Texture (192, 192);
+      Next : constant OpenCV.Core.Mat := Shift (Previous, 12, 7);
+      Prediction : constant OpenCV.Core.Mat := Seed_Field (192, 0, 12.25, 6.75);
+      Custom : constant Farneback_Options :=
+        (Pyramid_Scale => 0.6, Levels => 2, Window_Size => 11, Iterations => 2,
+         Poly_Neighborhood => 7, Poly_Sigma => 1.5);
+      Refined : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+        (Previous_Image => Previous, Next_Image => Next, Initial_Flow => Prediction);
+      Custom_Flow : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+        (Previous_Image => Previous, Next_Image => Next, Options => Custom,
+         Initial_Flow => Prediction);
+      Positional : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+        (Previous, Next, (others => <>), Prediction);
+   begin
+      Assert (Refined.Rows = 192 and then Refined.Columns = 192 and then Refined.Dimension_Count = 2
+              and then Refined.Depth = OpenCV.Core.Float32 and then Refined.Channels = 2,
+              "seeded Farneback output schema");
+      Assert (Close_Mean (Central_Mean (Refined, 0), 12.0, 0.25)
+              and then Close_Mean (Central_Mean (Refined, 1), 7.0, 0.25),
+              "seeded default-option flow does not recover translation (12,7)");
+      Assert (Custom_Flow.Rows = 192 and then Custom_Flow.Channels = 2
+              and then Close_Mean (Central_Mean (Custom_Flow, 0), 12.0, 0.5)
+              and then Close_Mean (Central_Mean (Custom_Flow, 1), 7.0, 0.5),
+              "seeded nondefault-option flow differs from translation");
+      Assert (Same_Flow (Refined, Positional), "positional seeded call differs from named call");
+      Assert (Max_Difference (Refined, Custom_Flow) > 0.0, "options had no effect on seeded flow");
+   end Seeded_Default_And_Options;
+
+   procedure Seeded_Consumption_Refinement (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous : constant OpenCV.Core.Mat := Texture (192, 192);
+      Next : constant OpenCV.Core.Mat := Shift (Previous, 12, 7);
+      Near : constant OpenCV.Core.Mat := Seed_Field (192, 0, 12.25, 6.75);
+      Near_Before : constant OpenCV.Core.Mat := Near.Clone;
+      Other : constant OpenCV.Core.Mat := Seed_Field (192, 0, -20.0, 15.0);
+      Plain : constant OpenCV.Core.Mat := Calculate_Farneback_Flow (Previous, Next);
+      Seeded : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+        (Previous, Next, Initial_Flow => Near);
+      Different : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+        (Previous, Next, Initial_Flow => Other);
+      Again : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+        (Previous, Next, Initial_Flow => Near);
+   begin
+      --  Established experimentally on 4.1/4.6/4.10/5.0: the unseeded call converges to
+      --  about (6.2,6.1) on this fixture while the near-correct seed reaches (12,7).
+      Assert (abs (Central_Mean (Plain, 0) - 12.0) > 2.0, "fixture no longer defeats unseeded flow");
+      Assert (Close_Mean (Central_Mean (Seeded, 0), 12.0, 0.25)
+              and then Close_Mean (Central_Mean (Seeded, 1), 7.0, 0.25),
+              "seeded flow not close to translation");
+      Assert (Max_Difference (Seeded, Plain) > 2.0, "seeded and unseeded flow are not distinguishable");
+      Assert (Max_Difference (Seeded, Different) > 2.0
+              and then abs (Central_Mean (Different, 0) - Central_Mean (Seeded, 0)) > 2.0,
+              "different seed did not change the result");
+      Assert (Max_Difference (Seeded, Near) > 0.001, "seeded flow is an unrefined copy of the seed");
+      Assert (Max_Difference (Near, Near_Before) = 0.0, "caller seed was mutated");
+      Assert (Max_Difference (Other, Seed_Field (192, 0, -20.0, 15.0)) = 0.0, "second seed was mutated");
+      Assert (Same_Flow (Seeded, Again), "repeated seeded call is not deterministic");
+   end Seeded_Consumption_Refinement;
+
+   procedure Seeded_Zero_Equivalence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Texture_Image : constant OpenCV.Core.Mat := Texture (128, 128);
+      Flat_Parent : OpenCV.Core.Mat := OpenCV.Core.Create
+        (64, 64, (Depth => OpenCV.Core.UInt8, Channels => 1));
+      Largest : OpenCV.Float64_Value := 0.0;
+   begin
+      Flat_Parent.Set_To ((others => 127.0));
+      for Case_Index in 0 .. 3 loop
+         declare
+            Previous : constant OpenCV.Core.Mat :=
+              (if Case_Index = 3 then Flat_Parent else Texture_Image);
+            Next : constant OpenCV.Core.Mat :=
+              (case Case_Index is
+                  when 0 => Texture_Image.Clone,
+                  when 1 => Shift (Texture_Image, 2, 1),
+                  when 2 => Shift (Texture_Image, 12, 7),
+                  when others => Flat_Parent.Clone);
+            Zero : constant OpenCV.Core.Mat := Seed_Field (Previous.Rows, 0);
+            Plain : constant OpenCV.Core.Mat := Calculate_Farneback_Flow (Previous, Next);
+            Seeded : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+              (Previous, Next, Initial_Flow => Zero);
+         begin
+            Largest := OpenCV.Float64_Value'Max (Largest, Max_Difference (Plain, Seeded));
+         end;
+      end loop;
+      --  Measured identical on the supported natives; tolerance leaves room for
+      --  initialization-path rounding without asserting bitwise identity.
+      Assert (Largest <= 1.0E-3, "zero-seeded flow differs from unseeded flow");
+   end Seeded_Zero_Equivalence;
+
+   procedure Seeded_Nonuniform_Independence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous : constant OpenCV.Core.Mat := Texture (96, 96);
+      Next : constant OpenCV.Core.Mat := Shift (Previous, 3, 2);
+      Field : OpenCV.Core.Mat := Seed_Field (96, 3);
+      Before : constant OpenCV.Core.Mat := Field.Clone;
+      Result : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+        (Previous, Next, Initial_Flow => Field);
+      Saved : constant OpenCV.Core.Mat := Result.Clone;
+   begin
+      Assert (Max_Difference (Field, Before) = 0.0, "nonuniform seed was mutated");
+      Assert (Max_Difference (Result, Field) > 0.01, "result is a shallow copy of the seed");
+      Assert (Close_Mean (Central_Mean (Result, 0), 3.0, 0.5)
+              and then Close_Mean (Central_Mean (Result, 1), 2.0, 0.5),
+              "nonuniform seeded flow not near the translation");
+      Field.Set_To ((others => 55.0));
+      Assert (Same_Flow (Result, Saved), "result aliases the initial-flow allocation");
+   end Seeded_Nonuniform_Independence;
+
+   procedure Seeded_Signs_And_Identical (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Base : constant OpenCV.Core.Mat := Texture (128, 128);
+      Shifted : constant OpenCV.Core.Mat := Shift (Base, 2, 1);
+      Positive_Flow : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+        (Base, Shifted, Initial_Flow => Seed_Field (128, 0, 2.0, 1.0));
+      Negative_Flow : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+        (Shifted, Base, Initial_Flow => Seed_Field (128, 0, -2.0, -1.0));
+      Identical : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+        (Base, Base, Initial_Flow => Seed_Field (128, 0, 0.5, -0.5));
+      Swapped : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+        (Base, Shifted, Initial_Flow => Seed_Field (128, 0, 1.0, 2.0));
+   begin
+      Assert (Close_Mean (Central_Mean (Positive_Flow, 0), 2.0)
+              and then Close_Mean (Central_Mean (Positive_Flow, 1), 1.0),
+              "positive seeded motion differs");
+      Assert (Close_Mean (Central_Mean (Negative_Flow, 0), -2.0)
+              and then Close_Mean (Central_Mean (Negative_Flow, 1), -1.0),
+              "negative seeded motion differs");
+      Assert (Close_Mean (Central_Mean (Identical, 0), 0.0, 0.3)
+              and then Close_Mean (Central_Mean (Identical, 1), 0.0, 0.3),
+              "identical-image seeded flow is not near zero");
+      Assert (Swapped.Rows = 128 and then Swapped.Channels = 2
+              and then Close_Mean (Central_Mean (Swapped, 0), 2.0, 0.3)
+              and then Close_Mean (Central_Mean (Swapped, 1), 1.0, 0.3),
+              "channel-ordered refinement of an imperfect seed differs");
+   end Seeded_Signs_And_Identical;
+
+   procedure Seeded_Regions_Lifetime (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous_Clone : constant OpenCV.Core.Mat := Texture (64, 64);
+      Next_Clone : constant OpenCV.Core.Mat := Shift (Previous_Clone, 2, 1);
+      Seed_Clone : constant OpenCV.Core.Mat := Seed_Field (64, 3);
+      Expected : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+        (Previous_Clone, Next_Clone, Initial_Flow => Seed_Clone);
+   begin
+      for Combination in 1 .. 7 loop
+         declare
+            Use_Previous : constant Boolean := Combination mod 2 = 1;
+            Use_Next : constant Boolean := (Combination / 2) mod 2 = 1;
+            Use_Seed : constant Boolean := Combination >= 4;
+            Result : OpenCV.Core.Mat;
+         begin
+            declare
+               Previous_Parent : OpenCV.Core.Mat := Texture (96, 96);
+               Next_Parent : OpenCV.Core.Mat := Shift (Previous_Parent, 2, 1);
+               Seed_Parent : OpenCV.Core.Mat := Seed_Field (96, 0, 9.0, 9.0);
+            begin
+               --  Place identical content inside Regions of larger parents.
+               for R in 0 .. 63 loop
+                  for C in 0 .. 63 loop
+                     OpenCV.Core.UInt8_Access.Set (Previous_Parent, R + 8, C + 8,
+                       OpenCV.Core.UInt8_Access.Get (Previous_Clone, R, C));
+                     OpenCV.Core.UInt8_Access.Set (Next_Parent, R + 8, C + 8,
+                       OpenCV.Core.UInt8_Access.Get (Next_Clone, R, C));
+                     OpenCV.Core.Float32_Vec2_Access.Set (Seed_Parent, R + 8, C + 8,
+                       OpenCV.Core.Float32_Vec2_Access.Get (Seed_Clone, R, C));
+                  end loop;
+               end loop;
+               declare
+                  Previous_Region : constant OpenCV.Core.Mat := Previous_Parent.Region ((8, 8, 64, 64));
+                  Next_Region : constant OpenCV.Core.Mat := Next_Parent.Region ((8, 8, 64, 64));
+                  Seed_Region : constant OpenCV.Core.Mat := Seed_Parent.Region ((8, 8, 64, 64));
+                  Seed_Saved : constant OpenCV.Core.Mat := Seed_Region.Clone;
+               begin
+                  Assert (not Seed_Region.Is_Continuous, "seed Region should be noncontiguous");
+                  Result := Calculate_Farneback_Flow
+                    ((if Use_Previous then Previous_Region else Previous_Clone),
+                     (if Use_Next then Next_Region else Next_Clone),
+                     Initial_Flow => (if Use_Seed then Seed_Region else Seed_Clone));
+                  Assert (Max_Difference (Seed_Region, Seed_Saved) = 0.0, "Region seed was mutated");
+                  Assert (Max_Difference (Seed_Parent.Region ((0, 0, 8, 8)),
+                                          Seed_Field (8, 0, 9.0, 9.0)) = 0.0,
+                          "seed parent outside the Region changed");
+               end;
+               --  Mutate sources before the parents are finalized.
+               Previous_Parent.Set_To ((others => 3.0));
+               Next_Parent.Set_To ((others => 4.0));
+               Seed_Parent.Set_To ((others => 5.0));
+            end;
+            --  Parents and Regions are finalized; the result must still be valid and identical.
+            Assert (Result.Rows = 64 and then Result.Columns = 64 and then Same_Flow (Result, Expected),
+                    "Region-sourced seeded flow differs from compact inputs");
+         end;
+      end loop;
+   end Seeded_Regions_Lifetime;
+
+   procedure Seeded_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Good : constant OpenCV.Core.Mat := Texture (32, 32);
+      Seed : constant OpenCV.Core.Mat := Seed_Field (32, 0, 1.0, 1.0);
+      Seed_Before : constant OpenCV.Core.Mat := Seed.Clone;
+      Empty : OpenCV.Core.Mat;
+      Rejected : Natural := 0;
+      Limit : constant OpenCV.Float32_Value := 1048576.0;
+      function From_Bits is new Ada.Unchecked_Conversion
+        (Interfaces.Unsigned_32, OpenCV.Float32_Value);
+
+      procedure Reject (Previous, Next, Initial : OpenCV.Core.Mat;
+                        Options : Farneback_Options := (others => <>)) is
+      begin
+         declare
+            Flow : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+              (Previous, Next, Options, Initial);
+            pragma Unreferenced (Flow);
+         begin
+            Assert (False, "invalid seeded Farneback request accepted");
+         end;
+      exception
+         when OpenCV.OpenCV_Error => Rejected := Rejected + 1;
+      end Reject;
+
+      procedure Reject_Value (Value : OpenCV.Float32_Value; Channel : Natural) is
+         Bad : OpenCV.Core.Mat := Seed.Clone;
+         Components : OpenCV.Core.Float32_Vec2.Vector := OpenCV.Core.Float32_Vec2_Access.Get (Bad, 5, 7);
+      begin
+         Components (Channel) := Value;
+         OpenCV.Core.Float32_Vec2_Access.Set (Bad, 5, 7, Components);
+         Reject (Good, Good, Bad);
+      end Reject_Value;
+   begin
+      Reject (Good, Good, Empty);
+      Reject (Empty, Good, Seed);
+      Reject (Good, Empty, Seed);
+      Reject (Good, Good, Seed_Field (31, 0));
+      Reject (Good, Good, OpenCV.Core.Create (32, 33, (Depth => OpenCV.Core.Float32, Channels => 2)));
+      Reject (Good, Good, OpenCV.Core.Create (32, 32, (Depth => OpenCV.Core.Float32, Channels => 1)));
+      Reject (Good, Good, OpenCV.Core.Create (32, 32, (Depth => OpenCV.Core.Float32, Channels => 3)));
+      Reject (Good, Good, OpenCV.Core.Create (32, 32, (Depth => OpenCV.Core.Float64, Channels => 2)));
+      Reject (Good, Good, OpenCV.Core.Create (32, 32, (Depth => OpenCV.Core.UInt8, Channels => 2)));
+      Reject (Texture (15, 15), Texture (15, 15), Seed_Field (15, 0));
+      Reject (Good, Texture (32, 33), Seed);
+      Reject (Good, Good, Seed, (Levels => 9, others => <>));
+      Reject (Good, Good, Seed, (Window_Size => 6, others => <>));
+      Reject (Good, Good, Seed, (Poly_Sigma => 10.5, others => <>));
+      Reject (Good, Good, Seed, (Pyramid_Scale => 0.95, others => <>));
+      Assert (Rejected = 15, "not every structural seeded request was rejected");
+      for Channel in 0 .. 1 loop
+         Reject_Value (Limit * 2.0, Channel);
+         Reject_Value (-Limit * 2.0, Channel);
+         Reject_Value (OpenCV.Float32_Value'Last, Channel);
+         Reject_Value (OpenCV.Float32_Value'First, Channel);
+         Reject_Value (Limit + 1.0, Channel);
+         begin
+            Reject_Value (From_Bits (16#7FC0_0000#), Channel);
+         exception
+            when Constraint_Error => Rejected := Rejected + 1;
+         end;
+         begin
+            Reject_Value (From_Bits (16#7F80_0000#), Channel);
+         exception
+            when Constraint_Error => Rejected := Rejected + 1;
+         end;
+         begin
+            Reject_Value (From_Bits (16#FF80_0000#), Channel);
+         exception
+            when Constraint_Error => Rejected := Rejected + 1;
+         end;
+      end loop;
+      Assert (Rejected = 15 + 2 * 8, "not every unsafe seed component was rejected");
+      Assert (Max_Difference (Seed, Seed_Before) = 0.0, "rejected call modified the seed");
+      declare
+         Boundary_Positive : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+           (Good, Good, Initial_Flow => Seed_Field (32, 0, Limit, -Limit));
+         Boundary_Negative : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+           (Good, Good, Initial_Flow => Seed_Field (32, 0, -Limit, Limit));
+      begin
+         Assert (Boundary_Positive.Rows = 32 and then Boundary_Negative.Rows = 32,
+                 "seed exactly at the 2**20 bound was rejected");
+      end;
+   end Seeded_Validation;
+
+   procedure Seeded_Direct_Oracle (T : in out Fixture) is
+      pragma Unreferenced (T);
+      package Integers is new Ada.Text_IO.Integer_IO (Integer);
+      package Floats is new Ada.Text_IO.Float_IO (OpenCV.Float64_Value);
+      File : Ada.Text_IO.File_Type;
+      Largest : OpenCV.Float64_Value := 0.0;
+   begin
+      Ada.Text_IO.Open (File, Ada.Text_IO.In_File,
+        Ada.Environment_Variables.Value
+          ("VIDEO_FARNEBACK_SEEDED_ORACLE", "../obj/oracle/farneback-seeded.txt"));
+      for Mode in 0 .. 3 loop
+         declare
+            Size : constant Positive := (if Mode < 2 then 192 else 96);
+            Native_Mode, Rows, Columns : Integer;
+            Previous : constant OpenCV.Core.Mat := Texture (Size, Size);
+            Next : constant OpenCV.Core.Mat :=
+              (if Mode < 2 then Shift (Previous, 12, 7)
+               elsif Mode = 2 then Shift (Previous, 2, 1) else Shift (Previous, 3, 2));
+            Seed : constant OpenCV.Core.Mat :=
+              (case Mode is
+                  when 0 => Seed_Field (Size, 0, 12.25, 6.75),
+                  when 1 => Seed_Field (Size, 0, -20.0, 15.0),
+                  when 2 => Seed_Field (Size, 0),
+                  when others => Seed_Field (Size, 3));
+            Options : constant Farneback_Options :=
+              (if Mode = 3 then (Pyramid_Scale => 0.6, Levels => 2, Window_Size => 11,
+                                 Iterations => 2, Poly_Neighborhood => 7, Poly_Sigma => 1.5)
+               else (others => <>));
+            Flow : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+              (Previous, Next, Options, Seed);
+            Edge_Seen : Boolean := False;
+         begin
+            Integers.Get (File, Native_Mode);
+            Integers.Get (File, Rows);
+            Integers.Get (File, Columns);
+            Assert (Native_Mode = Mode and then Rows = Flow.Rows and then Columns = Flow.Columns,
+                    "seeded Farneback oracle header differs");
+            for R in 0 .. Rows - 1 loop
+               for C in 0 .. Columns - 1 loop
+                  declare
+                     X, Y : OpenCV.Float64_Value;
+                     Actual : constant OpenCV.Core.Float32_Vec2.Vector :=
+                       OpenCV.Core.Float32_Vec2_Access.Get (Flow, R, C);
+                  begin
+                     Floats.Get (File, X);
+                     Floats.Get (File, Y);
+                     Edge_Seen := Edge_Seen or else R = 0 or else C = 0
+                       or else R = Rows - 1 or else C = Columns - 1;
+                     Largest := OpenCV.Float64_Value'Max
+                       (Largest, OpenCV.Float64_Value'Max
+                          (abs (OpenCV.Float64_Value (Actual (0)) - X),
+                           abs (OpenCV.Float64_Value (Actual (1)) - Y)));
+                  end;
+               end loop;
+            end loop;
+            Assert (Edge_Seen, "seeded oracle comparison skipped the edges");
+         end;
+      end loop;
+      Ada.Text_IO.Close (File);
+      Assert (Largest <= 1.0E-5, "binding differs from independent seeded native Farneback call");
+   end Seeded_Direct_Oracle;
+
    function Quality_Structure (Kind : Natural) return OpenCV.Core.Mat is
    begin
       return Result : OpenCV.Core.Mat := OpenCV.Core.Create
@@ -3106,6 +3491,14 @@ package body Video_Tests is
       Result.Add_Test (Caller.Create ("Farneback_Validation", Farneback_Validation'Access));
       Result.Add_Test (Caller.Create ("Farneback_Direct_Oracle", Farneback_Direct_Oracle'Access));
       Result.Add_Test (Caller.Create ("Farneback_Minimum_Size_Options", Farneback_Minimum_Size_Options'Access));
+      Result.Add_Test (Caller.Create ("Seeded_Default_And_Options", Seeded_Default_And_Options'Access));
+      Result.Add_Test (Caller.Create ("Seeded_Consumption_Refinement", Seeded_Consumption_Refinement'Access));
+      Result.Add_Test (Caller.Create ("Seeded_Zero_Equivalence", Seeded_Zero_Equivalence'Access));
+      Result.Add_Test (Caller.Create ("Seeded_Nonuniform_Independence", Seeded_Nonuniform_Independence'Access));
+      Result.Add_Test (Caller.Create ("Seeded_Signs_And_Identical", Seeded_Signs_And_Identical'Access));
+      Result.Add_Test (Caller.Create ("Seeded_Regions_Lifetime", Seeded_Regions_Lifetime'Access));
+      Result.Add_Test (Caller.Create ("Seeded_Validation", Seeded_Validation'Access));
+      Result.Add_Test (Caller.Create ("Seeded_Direct_Oracle", Seeded_Direct_Oracle'Access));
       return Result;
    end Suite;
 end Video_Tests;

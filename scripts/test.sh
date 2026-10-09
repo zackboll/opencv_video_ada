@@ -8,6 +8,7 @@ alr -n exec -- sh scripts/run_forward_backward_oracle.sh
 VIDEO_FORWARD_BACKWARD_ORACLE="$root/obj/oracle/forward-backward.txt" \
 VIDEO_TRACKABILITY_ORACLE="$root/obj/oracle/trackability.txt" \
 VIDEO_FARNEBACK_ORACLE="$root/obj/oracle/farneback.txt" \
+VIDEO_FARNEBACK_SEEDED_ORACLE="$root/obj/oracle/farneback-seeded.txt" \
     alr -n -C tests exec -- sh ../scripts/run_native.sh bin/run_tests
 case "$(uname -s)" in
     Linux|Darwin) alr -n exec -- sh scripts/run_sanitizers.sh native ;;
