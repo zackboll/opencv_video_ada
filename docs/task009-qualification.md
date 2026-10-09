@@ -172,9 +172,16 @@ ASan/UBSan campaigns neither exhibit nor mask this diagnostic and are *not* a cl
 that the older native code is sanitizer-clean. No finding other than this one was
 observed; no invalid memory access, leak, or binding-introduced UB was found.
 
+### Hosted CI on implementation head `a9e6525`
+
+- [PR cross-platform run 37876655721](https://github.com/zackboll/opencv_video_ada/actions/runs/37876655721): completed SUCCESS; repository-checks, linux, macos and linux-sanitizers all SUCCESS.
+- [Manual pinned compatibility run 37876679348](https://github.com/zackboll/opencv_video_ada/actions/runs/37876679348): completed SUCCESS on 4.1.0, 4.10.0 and 5.0.0. 4.6.0 is qualified locally (Debian 12 container) and is not part of the pinned hosted matrix.
+- Windows remains post-merge-only and is not claimed for this PR.
+
+This documentation-only follow-up commit changes no source; CI results above are for `a9e6525`.
+
 ### Not claimed
 
-No claim that Farneback is exhaustively safe on any version. Clean-clone, hosted
-PR CI and final-head pinned compatibility results are recorded in the PR, not here.
+No claim that Farneback is exhaustively safe on any version. Windows results are not claimed.
 No merge, tag, release, amend, published-history rebase, force-push or auto-merge
 occurred.
