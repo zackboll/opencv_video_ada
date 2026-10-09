@@ -6,6 +6,8 @@ with Ada.Text_IO;
 with Ada.Unchecked_Conversion;
 with Interfaces;
 with OpenCV.Core;
+with OpenCV.Core.Float32_Vec2;
+with OpenCV.Core.Float32_Vec2_Access;
 with OpenCV.Core.UInt8_Access;
 with OpenCV.Video;
 
@@ -1553,6 +1555,234 @@ package body Video_Tests is
       Assert_Unavailable (Tracks (7), Points (7)); Assert_Unavailable (Tracks (9), Points (9));
    end Pyramid_FB_Truncation_Subsets;
 
+   --  Task 009 dense Farneback tests.
+   function Central_Mean (Flow : OpenCV.Core.Mat; Channel : Natural) return OpenCV.Float64_Value is
+      Rows : constant Natural := Flow.Rows;
+      Columns : constant Natural := Flow.Columns;
+      Sum : OpenCV.Float64_Value := 0.0;
+      Count : Natural := 0;
+   begin
+      for R in Rows / 4 .. 3 * Rows / 4 - 1 loop
+         for C in Columns / 4 .. 3 * Columns / 4 - 1 loop
+            Sum := Sum + OpenCV.Float64_Value
+              (OpenCV.Core.Float32_Vec2_Access.Get (Flow, R, C) (Channel));
+            Count := Count + 1;
+         end loop;
+      end loop;
+      return Sum / OpenCV.Float64_Value (Count);
+   end Central_Mean;
+
+   function Same_Flow (Left, Right : OpenCV.Core.Mat) return Boolean is
+      use type OpenCV.Core.Float32_Vec2.Vector;
+   begin
+      if Left.Rows /= Right.Rows or else Left.Columns /= Right.Columns then
+         return False;
+      end if;
+      for R in 0 .. Left.Rows - 1 loop
+         for C in 0 .. Left.Columns - 1 loop
+            if OpenCV.Core.Float32_Vec2_Access.Get (Left, R, C)
+              /= OpenCV.Core.Float32_Vec2_Access.Get (Right, R, C)
+            then
+               return False;
+            end if;
+         end loop;
+      end loop;
+      return True;
+   end Same_Flow;
+
+   function Close_Mean (Actual, Expected : OpenCV.Float64_Value;
+                        Tolerance : OpenCV.Float64_Value := 0.15) return Boolean is
+     (abs (Actual - Expected) <= Tolerance);
+
+   use type OpenCV.Core.Depth_Type;
+   use type OpenCV.Core.Channel_Count;
+
+   procedure Farneback_Identity (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (96, 96);
+      Flow : constant OpenCV.Core.Mat := Calculate_Farneback_Flow (Image, Image);
+   begin
+      Assert (Close_Mean (Central_Mean (Flow, 0), 0.0, 0.01)
+              and then Close_Mean (Central_Mean (Flow, 1), 0.0, 0.01),
+              "Farneback identity flow is not near zero");
+   end Farneback_Identity;
+
+   procedure Farneback_Translation_Directions (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Base : constant OpenCV.Core.Mat := Texture (128, 128);
+      Shifted : constant OpenCV.Core.Mat := Shift (Base, 2, 1);
+      Positive_Flow : constant OpenCV.Core.Mat := Calculate_Farneback_Flow (Base, Shifted);
+      Negative_Flow : constant OpenCV.Core.Mat := Calculate_Farneback_Flow (Shifted, Base);
+   begin
+      Assert (Close_Mean (Central_Mean (Positive_Flow, 0), 2.0)
+              and then Close_Mean (Central_Mean (Positive_Flow, 1), 1.0),
+              "positive translation direction/magnitude differs");
+      Assert (Close_Mean (Central_Mean (Negative_Flow, 0), -2.0)
+              and then Close_Mean (Central_Mean (Negative_Flow, 1), -1.0),
+              "negative translation direction/magnitude differs");
+   end Farneback_Translation_Directions;
+
+   procedure Farneback_Schema_Ownership (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous : OpenCV.Core.Mat := Texture (64, 80);
+      Next : constant OpenCV.Core.Mat := Shift (Previous, 1, 1);
+      Flow : constant OpenCV.Core.Mat := Calculate_Farneback_Flow (Previous, Next);
+      Before : constant OpenCV.Core.Mat := Flow.Clone;
+   begin
+      Assert (Flow.Rows = 64 and then Flow.Columns = 80 and then Flow.Dimension_Count = 2
+              and then Flow.Depth = OpenCV.Core.Float32 and then Flow.Channels = 2,
+              "Farneback output schema differs");
+      Previous.Set_To ((others => 9.0));
+      Assert (Same_Flow (Flow, Before), "returned flow aliases caller input");
+      Assert (Same_Flow (Flow, Calculate_Farneback_Flow (Texture (64, 80), Next)),
+              "Farneback is not repeatable");
+   end Farneback_Schema_Ownership;
+
+   procedure Farneback_Regions (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Previous_Parent : constant OpenCV.Core.Mat := Texture (96, 96);
+      Next_Parent : constant OpenCV.Core.Mat := Shift (Previous_Parent, 2, 1);
+      Previous : constant OpenCV.Core.Mat := Previous_Parent.Region ((8, 8, 64, 64));
+      Next : constant OpenCV.Core.Mat := Next_Parent.Region ((8, 8, 64, 64));
+      Compact : constant OpenCV.Core.Mat := Calculate_Farneback_Flow (Previous.Clone, Next.Clone);
+      Strided : constant OpenCV.Core.Mat := Calculate_Farneback_Flow (Previous, Next);
+   begin
+      Assert (not Previous.Is_Continuous, "fixture Region should be noncontiguous");
+      Assert (Strided.Rows = 64 and then Strided.Columns = 64, "Region flow geometry");
+      Assert (Same_Flow (Compact, Strided), "strided Region flow differs from compact copy");
+   end Farneback_Regions;
+
+   procedure Farneback_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Good : constant OpenCV.Core.Mat := Texture (32, 32);
+      Float_Image : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (32, 32, (Depth => OpenCV.Core.Float32, Channels => 1));
+      Color : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (32, 32, (Depth => OpenCV.Core.UInt8, Channels => 3));
+      Empty : OpenCV.Core.Mat;
+      Rejected : Natural := 0;
+
+      procedure Reject (Previous, Next : OpenCV.Core.Mat;
+                        Options : Farneback_Options := (others => <>)) is
+      begin
+         declare
+            Flow : constant OpenCV.Core.Mat := Calculate_Farneback_Flow (Previous, Next, Options);
+            pragma Unreferenced (Flow);
+         begin
+            Assert (False, "invalid Farneback request accepted");
+         end;
+      exception
+         when OpenCV.OpenCV_Error => Rejected := Rejected + 1;
+      end Reject;
+
+      function With_Scale (V : OpenCV.Float64_Value) return Farneback_Options is
+        (Pyramid_Scale => V, others => <>);
+      function From_Bits is new Ada.Unchecked_Conversion
+        (Interfaces.Unsigned_64, OpenCV.Float64_Value);
+      type Bit_Array is array (Positive range <>) of Interfaces.Unsigned_64;
+   begin
+      Reject (Empty, Good);
+      Reject (Good, Empty);
+      Reject (Float_Image, Float_Image);
+      Reject (Color, Color);
+      Reject (Good, Texture (32, 33));
+      Reject (Texture (15, 40), Texture (15, 40));
+      Reject (Texture (40, 15), Texture (40, 15));
+      Reject (Good, Good, With_Scale (0.24));
+      Reject (Good, Good, With_Scale (0.91));
+      Reject (Good, Good, (Levels => 9, others => <>));
+      Reject (Good, Good, (Window_Size => 4, others => <>));
+      Reject (Good, Good, (Window_Size => 6, others => <>));
+      Reject (Good, Good, (Window_Size => 65, others => <>));
+      Reject (Good, Good, (Iterations => 31, others => <>));
+      Reject (Good, Good, (Poly_Neighborhood => 6, others => <>));
+      Reject (Good, Good, (Poly_Sigma => 0.05, others => <>));
+      Reject (Good, Good, (Poly_Sigma => 10.5, others => <>));
+      --  GNAT validity checks may reject IEEE special values before they can be
+      --  stored in a public Ada record (Constraint_Error); either outcome is a
+      --  rejection. Native-boundary tests cover non-finite values at the C level.
+      for Bits of Bit_Array'(1 => 16#7FF0_0000_0000_0000#, 2 => 16#7FF8_0000_0000_0000#,
+                             3 => 16#FFF0_0000_0000_0000#)
+      loop
+         begin
+            Reject (Good, Good, With_Scale (From_Bits (Bits)));
+            Reject (Good, Good, (Poly_Sigma => From_Bits (Bits), others => <>));
+         exception
+            when Constraint_Error => Rejected := Rejected + 2;
+         end;
+      end loop;
+      Assert (Rejected = 17 + 6, "not every invalid Farneback request was rejected");
+      declare
+         Boundary : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+           (Good, Good, (Pyramid_Scale => 0.25, Levels => 8, Window_Size => 63,
+                         Iterations => 30, Poly_Neighborhood => 7, Poly_Sigma => 10.0));
+         Minimum : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+           (Good, Good, (Pyramid_Scale => 0.9, Levels => 1, Window_Size => 5,
+                         Iterations => 1, Poly_Neighborhood => 5, Poly_Sigma => 0.1));
+      begin
+         Assert (Boundary.Rows = 32 and then Minimum.Rows = 32, "option boundary values rejected");
+      end;
+   end Farneback_Validation;
+
+   procedure Farneback_Direct_Oracle (T : in out Fixture) is
+      pragma Unreferenced (T);
+      package Integers is new Ada.Text_IO.Integer_IO (Integer);
+      package Floats is new Ada.Text_IO.Float_IO (OpenCV.Float64_Value);
+      File : Ada.Text_IO.File_Type;
+      Previous : constant OpenCV.Core.Mat := Texture (96, 96);
+      Largest : OpenCV.Float64_Value := 0.0;
+   begin
+      Ada.Text_IO.Open (File, Ada.Text_IO.In_File,
+        Ada.Environment_Variables.Value ("VIDEO_FARNEBACK_ORACLE", "../obj/oracle/farneback.txt"));
+      for Mode in 0 .. 2 loop
+         declare
+            Native_Mode, Rows, Columns : Integer;
+            Next : constant OpenCV.Core.Mat :=
+              (if Mode = 0 then Previous.Clone
+               elsif Mode = 1 then Shift (Previous, 2, 1) else Shift (Previous, 3, 2));
+            Options : constant Farneback_Options :=
+              (if Mode = 2 then (Pyramid_Scale => 0.6, Levels => 2, Window_Size => 11,
+                                 Iterations => 2, Poly_Neighborhood => 7, Poly_Sigma => 1.5)
+               else (others => <>));
+            Flow : constant OpenCV.Core.Mat := Calculate_Farneback_Flow (Previous, Next, Options);
+         begin
+            Integers.Get (File, Native_Mode);
+            Integers.Get (File, Rows);
+            Integers.Get (File, Columns);
+            Assert (Native_Mode = Mode and then Rows = Flow.Rows and then Columns = Flow.Columns,
+                    "Farneback oracle header differs");
+            for R in 0 .. Rows - 1 loop
+               for C in 0 .. Columns - 1 loop
+                  declare
+                     X, Y : OpenCV.Float64_Value;
+                     Actual : constant OpenCV.Core.Float32_Vec2.Vector :=
+                       OpenCV.Core.Float32_Vec2_Access.Get (Flow, R, C);
+                  begin
+                     Floats.Get (File, X);
+                     Floats.Get (File, Y);
+                     Largest := OpenCV.Float64_Value'Max
+                       (Largest, OpenCV.Float64_Value'Max
+                          (abs (OpenCV.Float64_Value (Actual (0)) - X),
+                           abs (OpenCV.Float64_Value (Actual (1)) - Y)));
+                  end;
+               end loop;
+            end loop;
+         end;
+      end loop;
+      Ada.Text_IO.Close (File);
+      Assert (Largest <= 1.0E-5, "binding differs from independent native Farneback call");
+   end Farneback_Direct_Oracle;
+
+   procedure Farneback_Minimum_Size_Options (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Image : constant OpenCV.Core.Mat := Texture (16, 16);
+      Flow : constant OpenCV.Core.Mat := Calculate_Farneback_Flow
+        (Image, Shift (Image, 1, 0), (Levels => 8, Window_Size => 63, others => <>));
+   begin
+      Assert (Flow.Rows = 16 and then Flow.Columns = 16 and then Flow.Channels = 2,
+              "minimum-size Farneback geometry");
+   end Farneback_Minimum_Size_Options;
+
    function Quality_Structure (Kind : Natural) return OpenCV.Core.Mat is
    begin
       return Result : OpenCV.Core.Mat := OpenCV.Core.Create
@@ -2869,6 +3099,13 @@ package body Video_Tests is
       Result.Add_Test (Caller.Create ("Pyramid_FB_Lifetime_Reuse", Pyramid_FB_Lifetime_Reuse'Access));
       Result.Add_Test (Caller.Create ("Pyramid_FB_Compatibility", Pyramid_FB_Compatibility'Access));
       Result.Add_Test (Caller.Create ("Pyramid_FB_Truncation_Subsets", Pyramid_FB_Truncation_Subsets'Access));
+      Result.Add_Test (Caller.Create ("Farneback_Identity", Farneback_Identity'Access));
+      Result.Add_Test (Caller.Create ("Farneback_Translation_Directions", Farneback_Translation_Directions'Access));
+      Result.Add_Test (Caller.Create ("Farneback_Schema_Ownership", Farneback_Schema_Ownership'Access));
+      Result.Add_Test (Caller.Create ("Farneback_Regions", Farneback_Regions'Access));
+      Result.Add_Test (Caller.Create ("Farneback_Validation", Farneback_Validation'Access));
+      Result.Add_Test (Caller.Create ("Farneback_Direct_Oracle", Farneback_Direct_Oracle'Access));
+      Result.Add_Test (Caller.Create ("Farneback_Minimum_Size_Options", Farneback_Minimum_Size_Options'Access));
       return Result;
    end Suite;
 end Video_Tests;

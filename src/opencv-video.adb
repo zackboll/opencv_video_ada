@@ -714,6 +714,91 @@ package body OpenCV.Video is
          Track_PyrLK (Previous_Pyramid, Next_Pyramid, Points, Options.Tracking, Initial_Next_Points), Options);
    end Track_PyrLK_Forward_Backward;
 
+   function Calculate_Farneback_Flow
+     (Previous_Image : OpenCV.Core.Mat;
+      Next_Image     : OpenCV.Core.Mat;
+      Options        : Farneback_Options := (others => <>)) return OpenCV.Core.Mat
+   is
+      Code : C.Status := C.Success;
+   begin
+      if Previous_Image.Is_Empty or else Next_Image.Is_Empty then
+         raise OpenCV.OpenCV_Error with "Farneback images must be nonempty";
+      end if;
+      if Previous_Image.Dimension_Count /= 2 or else Next_Image.Dimension_Count /= 2 then
+         raise OpenCV.OpenCV_Error with "Farneback accepts only 2-D images";
+      end if;
+      if Previous_Image.Depth /= OpenCV.Core.UInt8 or else Next_Image.Depth /= OpenCV.Core.UInt8
+        or else Previous_Image.Channels /= 1 or else Next_Image.Channels /= 1
+      then
+         raise OpenCV.OpenCV_Error with "Farneback images must be UInt8 C1";
+      end if;
+      if Previous_Image.Rows /= Next_Image.Rows
+        or else Previous_Image.Columns /= Next_Image.Columns
+      then
+         raise OpenCV.OpenCV_Error with "Farneback image geometry differs";
+      end if;
+      if Previous_Image.Rows < 16 or else Previous_Image.Columns < 16
+        or else Long_Long_Integer (Previous_Image.Rows) * Long_Long_Integer (Previous_Image.Columns)
+          > Long_Long_Integer (Interfaces.Integer_32'Last) / 16
+      then
+         raise OpenCV.OpenCV_Error with "Farneback image size outside 16x16 .. 134217727 pixels";
+      end if;
+      if not Is_Finite (Options.Pyramid_Scale) or else Options.Pyramid_Scale < 0.25
+        or else Options.Pyramid_Scale > 0.90 or else Options.Levels > 8
+        or else Options.Window_Size not in 5 .. 63 or else Options.Window_Size mod 2 = 0
+        or else Options.Iterations > 30
+        or else (Options.Poly_Neighborhood /= 5 and then Options.Poly_Neighborhood /= 7)
+        or else not Is_Finite (Options.Poly_Sigma) or else Options.Poly_Sigma < 0.1
+        or else Options.Poly_Sigma > 10.0
+      then
+         raise OpenCV.OpenCV_Error with "Farneback options out of range";
+      end if;
+
+      return Flow : OpenCV.Core.Mat do
+         declare
+            procedure Previous_Callback (Previous_Handle : Bridge.Input_Mat_Handle) is
+               procedure Next_Callback (Next_Handle : Bridge.Input_Mat_Handle) is
+                  procedure Flow_Callback (Flow_Handle : Bridge.Output_Mat_Handle) is
+                  begin
+                     Code := C.Calc_Farneback_Flow
+                       (Previous_Handle, Next_Handle, Flow_Handle,
+                        Interfaces.C.double (Options.Pyramid_Scale),
+                        Interfaces.Integer_32 (Options.Levels),
+                        Interfaces.Integer_32 (Options.Window_Size),
+                        Interfaces.Integer_32 (Options.Iterations),
+                        Interfaces.Integer_32 (Options.Poly_Neighborhood),
+                        Interfaces.C.double (Options.Poly_Sigma));
+                  end Flow_Callback;
+               begin
+                  Bridge.With_Output_Handle (Flow, Flow_Callback'Access);
+               end Next_Callback;
+            begin
+               Bridge.With_Input_Handle (Next_Image, Next_Callback'Access);
+            end Previous_Callback;
+         begin
+            Bridge.With_Input_Handle (Previous_Image, Previous_Callback'Access);
+         end;
+         C.Check (Code, "Video.Calculate_Farneback_Flow");
+
+         if Flow.Rows /= Previous_Image.Rows or else Flow.Columns /= Previous_Image.Columns
+           or else Flow.Depth /= OpenCV.Core.Float32 or else Flow.Channels /= 2
+         then
+            raise OpenCV.OpenCV_Error with "Invalid native Farneback output schema";
+         end if;
+         for R in 0 .. Flow.Rows - 1 loop
+            for Col in 0 .. Flow.Columns - 1 loop
+               declare
+                  Value : constant Vec2.Vector := Vec2_Access.Get (Flow, R, Col);
+               begin
+                  if not Is_Finite (Value (0)) or else not Is_Finite (Value (1)) then
+                     raise OpenCV.OpenCV_Error with "Farneback produced a nonfinite flow component";
+                  end if;
+               end;
+            end loop;
+         end loop;
+      end return;
+   end Calculate_Farneback_Flow;
+
    function Successful_Count (Tracks : Point_Track_Array) return Natural is
       Count : Natural := 0;
    begin

@@ -118,4 +118,11 @@ package OpenCV.Video.Internal.C_API is
       Width, Height, Level, Iterations : Interfaces.Integer_32;
       Epsilon, Threshold : Interfaces.C.double) return Status
      with Import, Convention => C, External_Name => "opencv_video_track_pyr_lk_pyramids_seeded_min_eigenvalues";
+   function Calc_Farneback_Flow
+     (Previous_Image, Next_Image : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Flow                      : OpenCV.Core.Module_Interop.Output_Mat_Handle;
+      Pyramid_Scale             : Interfaces.C.double;
+      Levels, Window_Size, Iterations, Poly_Neighborhood : Interfaces.Integer_32;
+      Poly_Sigma                : Interfaces.C.double) return Status
+     with Import, Convention => C, External_Name => "opencv_video_calc_farneback_flow";
 end OpenCV.Video.Internal.C_API;

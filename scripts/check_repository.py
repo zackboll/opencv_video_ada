@@ -38,7 +38,7 @@ def main() -> None:
     cpp = (ROOT / "cpp/opencv_video_shim.cpp").read_text()
     declared = set(re.findall(r"\b(opencv_video_\w+)\s*\(", header))
     imported = set(re.findall(r'External_Name\s*=>\s*"(opencv_video_\w+)"', ada))
-    check(len(declared) == 14, "production ABI inventory must be fourteen")
+    check(len(declared) == 15, "production ABI inventory must be fifteen")
     check(declared == imported, f"C/Ada import mismatch: {declared ^ imported}")
     check(all(re.search(r"\b" + re.escape(name) + r"\s*\(", cpp) for name in declared),
           "missing C++ export")
@@ -51,6 +51,12 @@ def main() -> None:
           "public native ownership leakage")
 
     bridge_not_vendored()
+    body = (ROOT / "src/opencv-video.adb").read_text()
+    check("Long_Long_Integer (Interfaces.Integer_32'Last) / 16" in body
+          and "> 2 ** 27" not in body,
+          "Ada Farneback pixel limit must equal Integer_32'Last / 16")
+    check("pixels > int64_t(std::numeric_limits<int>::max() / 16)" in cpp,
+          "C shim Farneback pixel limit must remain INT_MAX / 16")
     check(not list((ROOT / "src").rglob("opencv.ads")), "do not redeclare Core's root package")
     for path in list((ROOT / "src").rglob("*.ads")) + list((ROOT / "src").rglob("*.adb")):
         check("External_Name" not in path.read_text() or "/internal/" in path.as_posix(),
@@ -58,7 +64,7 @@ def main() -> None:
 
     tests = (ROOT / "tests/src/video_tests.adb").read_text()
     registrations = re.findall(r"Result\.Add_Test\s*\(Caller\.Create", tests)
-    check(len(registrations) == 92, "update documented AUnit inventory when changing tests")
+    check(len(registrations) == 99, "update documented AUnit inventory when changing tests")
 
     configure = (ROOT / "scripts/configure_opencv.sh").read_text()
     check("opencv2/video/tracking.hpp" in configure and "libopencv_video" in configure,
@@ -77,7 +83,7 @@ def main() -> None:
           "compatibility matrix must remain manual-only")
 
     print(f"PASS: manifests, Core pin {CORE_PIN[:12]}, {len(declared)} ABI declarations/imports, "
-          f"92 AUnit registrations, Core ownership, video backend, CI topology")
+          f"99 AUnit registrations, Core ownership, video backend, CI topology")
 
 
 if __name__ == "__main__":

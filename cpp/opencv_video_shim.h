@@ -149,6 +149,16 @@ opencv_video_status opencv_video_track_pyr_lk_seeded_min_eigenvalues(
     double epsilon,
     double min_eigenvalue_threshold);
 
+/* Dense Farneback flow (Task 009): flags exactly zero, Float32 C2 full-resolution
+ * output. The flow is computed into a private NaN-sentinel Mat, validated finite,
+ * and published to *flow only on success (failure leaves *flow unchanged). */
+opencv_video_status opencv_video_calc_farneback_flow(
+    const opencv_core_mat_handle *previous_image,
+    const opencv_core_mat_handle *next_image,
+    opencv_core_mat_handle *flow,
+    double pyramid_scale, int32_t levels, int32_t window_size,
+    int32_t iterations, int32_t poly_neighborhood, double poly_sigma);
+
 #ifdef __cplusplus
 }
 #endif

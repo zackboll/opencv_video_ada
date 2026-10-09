@@ -24,6 +24,13 @@ void opencv_video_test_fault(int stage) {
     if (fault_kind == 4) throw std::runtime_error("qualification standard exception");
     throw 42;
 }
+int corrupt_mode = 0;  // 1 NaN, 2 +Inf, 3 -Inf written into one private component
+void opencv_video_test_corrupt_flow(float *values, size_t count) {
+    if (corrupt_mode == 0 || count == 0) return;
+    values[count / 2] = corrupt_mode == 1 ? std::numeric_limits<float>::quiet_NaN()
+                      : corrupt_mode == 2 ? std::numeric_limits<float>::infinity()
+                                          : -std::numeric_limits<float>::infinity();
+}
 #endif
 
 namespace {
@@ -791,6 +798,120 @@ void run_seeded_pyramids(bool quality = false, bool seeded = true) {
     std::cout << "PASS: pyramid actual shim flags " << (quality ? (seeded ? 12 : 8) : 4)
               << " oracle, ownership, reuse, schema, aliases, atomicity, faults\n";
 }
+void run_farneback() {
+    auto previous = matrix(96,96,OPENCV_CORE_DEPTH_UINT8,1);
+    auto next = matrix(96,96,OPENCV_CORE_DEPTH_UINT8,1);
+    auto flow = matrix(1,1,OPENCV_CORE_DEPTH_FLOAT32,1);
+    fill_texture(output(previous.get()));
+    shift(output(previous.get()), output(next.get()), 2, 1);
+    auto call = [&](const opencv_core_mat_handle *a, const opencv_core_mat_handle *b,
+                    opencv_core_mat_handle *out, double scale = 0.5, int levels = 3,
+                    int window = 15, int iterations = 3, int poly = 5, double sigma = 1.2) {
+        return opencv_video_calc_farneback_flow(a, b, out, scale, levels, window, iterations, poly, sigma);
+    };
+    check(call(previous.get(), next.get(), flow.get()) == OPENCV_VIDEO_OK, "Farneback raw boundary failed");
+    const cv::Mat &published = output(flow.get());
+    check(published.type() == CV_32FC2 && published.rows == 96 && published.cols == 96 &&
+          published.isContinuous(), "Farneback output schema");
+    cv::Mat oracle;
+    cv::calcOpticalFlowFarneback(output(previous.get()), output(next.get()), oracle,
+                                 0.5, 3, 15, 3, 5, 1.2, 0);
+    check(cv::norm(oracle, published, cv::NORM_INF) < 1e-6, "shim differs from independent Farneback call");
+
+    const cv::Mat saved = published.clone();
+    const auto unchanged = [&](const char *message) {
+        check(output(flow.get()).size() == saved.size() && output(flow.get()).type() == saved.type() &&
+              cv::norm(saved, output(flow.get()), cv::NORM_INF) == 0, message);
+    };
+    check(call(nullptr, next.get(), flow.get()) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null previous");
+    check(call(previous.get(), nullptr, flow.get()) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null next");
+    check(call(previous.get(), next.get(), nullptr) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null output");
+    const auto invalid = [&](opencv_video_status code, const char *message) {
+        check(code == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, message);
+        unchanged(message);
+    };
+    invalid(call(nullptr, next.get(), flow.get()), "null previous accepted");
+    invalid(call(previous.get(), nullptr, flow.get()), "null next accepted");
+    check(call(previous.get(), next.get(), nullptr) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null output accepted");
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    invalid(call(previous.get(), next.get(), flow.get(), 0.2), "scale low accepted");
+    invalid(call(previous.get(), next.get(), flow.get(), 0.95), "scale high accepted");
+    invalid(call(previous.get(), next.get(), flow.get(), nan), "scale NaN accepted");
+    invalid(call(previous.get(), next.get(), flow.get(), 0.5, 0), "levels zero accepted");
+    invalid(call(previous.get(), next.get(), flow.get(), 0.5, 9), "levels high accepted");
+    invalid(call(previous.get(), next.get(), flow.get(), 0.5, 3, 4), "window low accepted");
+    invalid(call(previous.get(), next.get(), flow.get(), 0.5, 3, 16), "even window accepted");
+    invalid(call(previous.get(), next.get(), flow.get(), 0.5, 3, 65), "window high accepted");
+    invalid(call(previous.get(), next.get(), flow.get(), 0.5, 3, 15, 0), "iterations zero accepted");
+    invalid(call(previous.get(), next.get(), flow.get(), 0.5, 3, 15, 31), "iterations high accepted");
+    invalid(call(previous.get(), next.get(), flow.get(), 0.5, 3, 15, 3, 6), "neighborhood accepted");
+    invalid(call(previous.get(), next.get(), flow.get(), 0.5, 3, 15, 3, 5, 0.0), "sigma low accepted");
+    invalid(call(previous.get(), next.get(), flow.get(), 0.5, 3, 15, 3, 5, inf), "sigma infinite accepted");
+    invalid(call(previous.get(), next.get(), flow.get(), 0.5, 3, 15, 3, 5, nan), "sigma NaN accepted");
+
+    // Wrong image schemas and geometry.
+    auto floating = matrix(96,96,OPENCV_CORE_DEPTH_FLOAT32,1);
+    auto color = matrix(96,96,OPENCV_CORE_DEPTH_UINT8,3);
+    auto wrong_size = matrix(95,96,OPENCV_CORE_DEPTH_UINT8,1);
+    auto tiny = matrix(15,96,OPENCV_CORE_DEPTH_UINT8,1);
+    auto tiny_other = matrix(15,96,OPENCV_CORE_DEPTH_UINT8,1);
+    auto empty = matrix(1,1,OPENCV_CORE_DEPTH_UINT8,1);
+    output(empty.get()).release();
+    invalid(call(floating.get(), floating.get(), flow.get()), "Float32 image accepted");
+    invalid(call(color.get(), color.get(), flow.get()), "three-channel image accepted");
+    invalid(call(previous.get(), wrong_size.get(), flow.get()), "geometry mismatch accepted");
+    invalid(call(tiny.get(), tiny_other.get(), flow.get()), "image below 16 rows accepted");
+    invalid(call(empty.get(), empty.get(), flow.get()), "empty image accepted");
+
+    // Output aliases input headers: rejected before native work.
+    check(call(previous.get(), next.get(), previous.get()) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+          "output/previous alias accepted");
+    check(call(previous.get(), next.get(), next.get()) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+          "output/next alias accepted");
+
+    // Same image for both inputs is safe and replaces the old (wrong-content) flow.
+    check(call(previous.get(), previous.get(), flow.get()) == OPENCV_VIDEO_OK, "identity call failed");
+    check(cv::norm(output(flow.get()), cv::NORM_INF) < 0.5, "identity flow not near zero");
+    check(call(previous.get(), next.get(), flow.get()) == OPENCV_VIDEO_OK, "restore translation flow");
+    const cv::Mat restored = output(flow.get()).clone();
+    check(cv::norm(restored, saved, cv::NORM_INF) == 0, "repeatable result differs");
+
+    // Output storage is a fresh private allocation: a previously shared buffer is untouched.
+    const cv::Mat shared = output(flow.get());
+    const auto *shared_data = shared.data;
+    check(call(previous.get(), previous.get(), flow.get()) == OPENCV_VIDEO_OK &&
+          output(flow.get()).data != shared_data && cv::norm(saved, shared, cv::NORM_INF) == 0,
+          "native result overwrote shared published storage");
+    check(call(previous.get(), next.get(), flow.get()) == OPENCV_VIDEO_OK, "restore after sharing");
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    {
+        const cv::Mat before = output(flow.get()).clone();
+        for (int stage : {1,2}) for (int kind : {1,2,3,4}) {
+            fault_stage=stage; fault_kind=kind;
+            check(call(previous.get(), next.get(), flow.get()) != OPENCV_VIDEO_OK,
+                  "Farneback exception escaped/accepted");
+            check(cv::norm(before, output(flow.get()), cv::NORM_INF) == 0 &&
+                  output(flow.get()).type() == before.type(), "Farneback fault changed published output");
+        }
+        fault_stage=0;
+        // Corrupt one private component after the native call: validation must reject it
+        // without publishing anything (a NaN/Inf must never reach the caller).
+        for (int mode : {1,2,3}) {
+            corrupt_mode=mode;
+            check(call(previous.get(), next.get(), flow.get()) == OPENCV_VIDEO_ERROR_OPENCV,
+                  "nonfinite Farneback component accepted");
+            check(cv::norm(before, output(flow.get()), cv::NORM_INF) == 0 &&
+                  output(flow.get()).type() == before.type(),
+                  "nonfinite Farneback result was partially published");
+        }
+        corrupt_mode=0;
+    }
+#endif
+    check(call(previous.get(), next.get(), flow.get()) == OPENCV_VIDEO_OK, "post-fault call failed");
+    std::cout << "PASS: Farneback actual shim flags 0 oracle, schema, validation, aliases, private storage, atomicity, faults\n";
+}
 }  // namespace
 
 int main() {
@@ -805,6 +926,7 @@ int main() {
         run_quality(true);
         run_seeded_pyramids(true);
         run_seeded_pyramids(true,false);
+        run_farneback();
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "FAIL: " << error.what() << '\n';

@@ -5,6 +5,7 @@
 #include <iostream>
 #include <fstream>
 #include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <limits>
 
@@ -157,6 +158,28 @@ static void forward_backward(std::ostream &output, int mode, bool pyramids = fal
     }
 }
 
+
+// Task 009: independent dense Farneback oracle. Mode 0 identity, 1 translation (2,1)
+// with defaults, 2 translation (3,2) with non-default options.
+static void farneback(std::ostream &out) {
+    const cv::Mat previous = texture(96);
+    for (int mode = 0; mode < 3; ++mode) {
+        const cv::Mat next = mode == 0 ? previous.clone()
+                           : mode == 1 ? translated(previous, 2, 1) : translated(previous, 3, 2);
+        cv::Mat flow(96, 96, CV_32FC2, cv::Scalar(0, 0));
+        if (mode == 2) cv::calcOpticalFlowFarneback(previous, next, flow, 0.6, 2, 11, 2, 7, 1.5, 0);
+        else cv::calcOpticalFlowFarneback(previous, next, flow, 0.5, 3, 15, 3, 5, 1.2, 0);
+        if (flow.type() != CV_32FC2 || flow.rows != 96 || flow.cols != 96)
+            throw std::runtime_error("unexpected Farneback oracle schema");
+        out << mode << ' ' << flow.rows << ' ' << flow.cols << '\n';
+        for (int r = 0; r < flow.rows; ++r)
+            for (int c = 0; c < flow.cols; ++c) {
+                const cv::Vec2f v = flow.at<cv::Vec2f>(r, c);
+                out << v[0] << ' ' << v[1] << '\n';
+            }
+    }
+}
+
 int main(int argc, char **argv) {
     try {
         for (int n : {32,64,96,256}) for (int requested : {0,3,30}) {
@@ -266,21 +289,30 @@ int main(int argc, char **argv) {
             for (int mode = 0; mode < 4; ++mode) forward_backward(pyramid_file, mode, true);
         } else for (int mode = 0; mode < 4; ++mode) forward_backward(std::cout, mode, true);
         std::ofstream quality_file;
-        if (argc == 3) {
+        if (argc >= 3) {
             quality_file.open(argv[2]);
             if (!quality_file) throw std::runtime_error("cannot create quality oracle results");
         }
-        auto &quality_output = argc == 3 ? static_cast<std::ostream &>(quality_file) : std::cout;
+        auto &quality_output = argc >= 3 ? static_cast<std::ostream &>(quality_file) : std::cout;
         quality_output << std::setprecision(17);
         trackability(quality_output);
-        if (argc == 3) {
+        if (argc >= 3) {
             std::ofstream pyramid_file(std::string(argv[2])+".pyramids");
             if (!pyramid_file) throw std::runtime_error("cannot create pyramid oracle");
             pyramid_file << std::setprecision(17);
             trackability(pyramid_file,true);
         } else trackability(std::cout,true);
+        if (argc >= 4) {
+            std::ofstream farneback_file(argv[3]);
+            if (!farneback_file) throw std::runtime_error("cannot create Farneback oracle results");
+            farneback_file << std::setprecision(9);
+            farneback(farneback_file);
+        } else {
+            std::ostringstream discarded;
+            farneback(discarded);  // still exercises the native call under sanitizers
+        }
         std::cout << "PASS: independent OpenCV " << CV_VERSION
-                  << " oracle (8 unseeded + 4 seeded + 20 raw forward/backward + 20 pyramid forward/backward + 27 raw quality + 27 pyramid quality entries)\n";
+                  << " oracle (8 unseeded + 4 seeded + 20 raw forward/backward + 20 pyramid forward/backward + 27 raw quality + 27 pyramid quality entries + 3 Farneback dense flows)\n";
         return 0;
     } catch (const std::exception &e) {
         std::cerr << "FAIL: " << e.what() << '\n';

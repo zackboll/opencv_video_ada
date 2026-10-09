@@ -231,6 +231,32 @@ package OpenCV.Video is
       Options             : Forward_Backward_Options := (others => <>);
       Initial_Next_Points : Tracking_Point_Array)
       return Forward_Backward_Track_Array;
+   --  Dense Farneback optical flow (cv::calcOpticalFlowFarneback, flags 0).
+   --  Ranges (outside raises OpenCV_Error, never clamps): Pyramid_Scale
+   --  0.25 .. 0.90; Levels 1 .. 8; Window_Size odd 5 .. 63; Iterations 1 .. 30;
+   --  Poly_Neighborhood 5 or 7; Poly_Sigma finite 0.1 .. 10.
+   type Farneback_Options is record
+      Pyramid_Scale     : OpenCV.Float64_Value := 0.5;
+      Levels            : Positive := 3;
+      Window_Size       : Positive := 15;
+      Iterations        : Positive := 3;
+      Poly_Neighborhood : Positive := 5;
+      Poly_Sigma        : OpenCV.Float64_Value := 1.2;
+   end record;
+
+   --  Images: nonempty 2-D UInt8 C1 of identical geometry, at least 16 x 16
+   --  and at most Integer_32'Last / 16 = 134_217_727 pixels (matching the native shim); Regions are accepted. Returns a new Core-owned
+   --  Float32 C2 Mat with the image geometry; channel 0 is dx, channel 1 is
+   --  dy, so Previous(y,x) ~ Next(y + dy, x + dx) (a positive-x shift of the
+   --  content yields positive dx). Every component is finite or OpenCV_Error is
+   --  raised. Inputs are unchanged. KNOWN_UPSTREAM_UB_ACCEPTED: OpenCV 4.x CPU
+   --  FarnebackUpdateMatrices forms an out-of-range pointer before its bounds
+   --  check (docs/farneback-source-contract.md); not suitable as-is for
+   --  safety-sensitive deployments.
+   function Calculate_Farneback_Flow
+     (Previous_Image : OpenCV.Core.Mat;
+      Next_Image     : OpenCV.Core.Mat;
+      Options        : Farneback_Options := (others => <>)) return OpenCV.Core.Mat;
 private
    type PyrLK_Pyramid is new Ada.Finalization.Limited_Controlled with record
       Handle : System.Address := System.Null_Address;
