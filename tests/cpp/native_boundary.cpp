@@ -912,6 +912,240 @@ void run_farneback() {
     check(call(previous.get(), next.get(), flow.get()) == OPENCV_VIDEO_OK, "post-fault call failed");
     std::cout << "PASS: Farneback actual shim flags 0 oracle, schema, validation, aliases, private storage, atomicity, faults\n";
 }
+void run_farneback_seeded() {
+    constexpr int n = 96;
+    auto previous = matrix(n,n,OPENCV_CORE_DEPTH_UINT8,1);
+    auto next = matrix(n,n,OPENCV_CORE_DEPTH_UINT8,1);
+    auto seed = matrix(n,n,OPENCV_CORE_DEPTH_FLOAT32,2);
+    auto flow = matrix(1,1,OPENCV_CORE_DEPTH_FLOAT32,1);
+    fill_texture(output(previous.get()));
+    shift(output(previous.get()), output(next.get()), 12, 7);
+    output(seed.get()).setTo(cv::Scalar(12.25, 6.75));
+    const cv::Mat seed_saved = output(seed.get()).clone();
+    auto call = [&](const opencv_core_mat_handle *a, const opencv_core_mat_handle *b,
+                    const opencv_core_mat_handle *s, opencv_core_mat_handle *out,
+                    double scale = 0.5, int levels = 3, int window = 15, int iterations = 3,
+                    int poly = 5, double sigma = 1.2) {
+        return opencv_video_calc_farneback_flow_seeded(a, b, s, out, scale, levels, window,
+                                                       iterations, poly, sigma);
+    };
+    const auto seed_unchanged = [&](const char *message) {
+        check(output(seed.get()).type() == seed_saved.type() && output(seed.get()).size() == seed_saved.size() &&
+              cv::norm(seed_saved, output(seed.get()), cv::NORM_INF) == 0, message);
+    };
+    check(call(previous.get(), next.get(), seed.get(), flow.get()) == OPENCV_VIDEO_OK,
+          "seeded Farneback raw boundary failed");
+    const cv::Mat &published = output(flow.get());
+    check(published.type() == CV_32FC2 && published.rows == n && published.cols == n &&
+          published.isContinuous(), "seeded Farneback output schema");
+    check(published.data != output(seed.get()).data, "seeded result shares the seed allocation");
+    seed_unchanged("successful seeded call mutated the seed");
+    cv::Mat oracle = seed_saved.clone();  // independent flag-4 call on a private clone
+    cv::calcOpticalFlowFarneback(output(previous.get()), output(next.get()), oracle,
+                                 0.5, 3, 15, 3, 5, 1.2, cv::OPTFLOW_USE_INITIAL_FLOW);
+    check(cv::norm(oracle, published, cv::NORM_INF) < 1e-6, "shim differs from independent seeded call");
+    cv::Mat plain;
+    cv::calcOpticalFlowFarneback(output(previous.get()), output(next.get()), plain, 0.5, 3, 15, 3, 5, 1.2, 0);
+    check(cv::norm(plain, published, cv::NORM_INF) > 0.5, "seeded shim result equals the unseeded flow");
+    check(cv::norm(published, seed_saved, cv::NORM_INF) > 0.001, "seeded shim result is an unrefined seed copy");
+    {
+        // Different valid seed gives a different result, matching its own direct oracle.
+        auto other = matrix(n,n,OPENCV_CORE_DEPTH_FLOAT32,2);
+        output(other.get()).setTo(cv::Scalar(-20.0, 15.0));
+        auto out = matrix(1,1,OPENCV_CORE_DEPTH_FLOAT32,1);
+        check(call(previous.get(), next.get(), other.get(), out.get()) == OPENCV_VIDEO_OK, "other seed rejected");
+        cv::Mat expected(n, n, CV_32FC2, cv::Scalar(-20.0, 15.0));
+        cv::calcOpticalFlowFarneback(output(previous.get()), output(next.get()), expected,
+                                     0.5, 3, 15, 3, 5, 1.2, cv::OPTFLOW_USE_INITIAL_FLOW);
+        check(cv::norm(expected, output(out.get()), cv::NORM_INF) < 1e-6, "other seed differs from oracle");
+        check(cv::norm(output(out.get()), published, cv::NORM_INF) > 0.5, "seed was not consumed");
+        // Zero seed is accepted and equals the unseeded result on this fixture.
+        output(other.get()).setTo(cv::Scalar(0, 0));
+        check(call(previous.get(), next.get(), other.get(), out.get()) == OPENCV_VIDEO_OK, "zero seed rejected");
+        check(cv::norm(plain, output(out.get()), cv::NORM_INF) < 1e-3, "zero seed differs from unseeded flow");
+        // Component order: swapped seed must not behave like the original.
+        output(other.get()).setTo(cv::Scalar(6.75, 12.25));
+        check(call(previous.get(), next.get(), other.get(), out.get()) == OPENCV_VIDEO_OK, "swapped seed rejected");
+        cv::Mat swapped(n, n, CV_32FC2, cv::Scalar(6.75, 12.25));
+        cv::calcOpticalFlowFarneback(output(previous.get()), output(next.get()), swapped,
+                                     0.5, 3, 15, 3, 5, 1.2, cv::OPTFLOW_USE_INITIAL_FLOW);
+        check(cv::norm(swapped, output(out.get()), cv::NORM_INF) < 1e-6, "swapped seed differs from oracle");
+    }
+
+    const cv::Mat saved = published.clone();
+    const auto unchanged = [&](const char *message) {
+        check(output(flow.get()).size() == saved.size() && output(flow.get()).type() == saved.type() &&
+              cv::norm(saved, output(flow.get()), cv::NORM_INF) == 0, message);
+        seed_unchanged(message);
+    };
+    const auto invalid = [&](opencv_video_status code, const char *message) {
+        check(code == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, message);
+        unchanged(message);
+    };
+    invalid(call(nullptr, next.get(), seed.get(), flow.get()), "null previous accepted");
+    invalid(call(previous.get(), nullptr, seed.get(), flow.get()), "null next accepted");
+    invalid(call(previous.get(), next.get(), nullptr, flow.get()), "null seed accepted");
+    check(call(previous.get(), next.get(), seed.get(), nullptr) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+          "null output accepted");
+    unchanged("null output changed state");
+
+    // Wrong seed schema / geometry.
+    auto wrong_type = matrix(n,n,OPENCV_CORE_DEPTH_FLOAT64,2);
+    auto wrong_channels = matrix(n,n,OPENCV_CORE_DEPTH_FLOAT32,1);
+    auto three_channels = matrix(n,n,OPENCV_CORE_DEPTH_FLOAT32,3);
+    auto uint8_seed = matrix(n,n,OPENCV_CORE_DEPTH_UINT8,2);
+    auto wrong_rows = matrix(n-1,n,OPENCV_CORE_DEPTH_FLOAT32,2);
+    auto wrong_cols = matrix(n,n+1,OPENCV_CORE_DEPTH_FLOAT32,2);
+    auto empty = matrix(1,1,OPENCV_CORE_DEPTH_FLOAT32,2);
+    output(empty.get()).release();
+    invalid(call(previous.get(), next.get(), wrong_type.get(), flow.get()), "Float64 seed accepted");
+    invalid(call(previous.get(), next.get(), wrong_channels.get(), flow.get()), "one-channel seed accepted");
+    invalid(call(previous.get(), next.get(), three_channels.get(), flow.get()), "three-channel seed accepted");
+    invalid(call(previous.get(), next.get(), uint8_seed.get(), flow.get()), "UInt8 seed accepted");
+    invalid(call(previous.get(), next.get(), wrong_rows.get(), flow.get()), "wrong-rows seed accepted");
+    invalid(call(previous.get(), next.get(), wrong_cols.get(), flow.get()), "wrong-columns seed accepted");
+    invalid(call(previous.get(), next.get(), empty.get(), flow.get()), "empty seed accepted");
+
+    // Invalid seed values: nonfinite, beyond 2^20 (never clamped), at either channel.
+    const float nanf = std::numeric_limits<float>::quiet_NaN();
+    const float inff = std::numeric_limits<float>::infinity();
+    auto bad = matrix(n,n,OPENCV_CORE_DEPTH_FLOAT32,2);
+    for (int channel = 0; channel < 2; ++channel)
+        for (float value : {nanf, inff, -inff, 1048577.f, -1048577.f, std::numeric_limits<float>::max()}) {
+            output(bad.get()).setTo(cv::Scalar(1, 1));
+            output(bad.get()).at<cv::Vec2f>(n - 1, n - 1)[channel] = value;  // last pixel: full scan
+            invalid(call(previous.get(), next.get(), bad.get(), flow.get()), "unsafe seed value accepted");
+        }
+    output(bad.get()).setTo(cv::Scalar(1048576.0, -1048576.0));
+    check(call(previous.get(), next.get(), bad.get(), flow.get()) == OPENCV_VIDEO_OK, "2^20 boundary seed rejected");
+    check(call(previous.get(), next.get(), seed.get(), flow.get()) == OPENCV_VIDEO_OK, "restore seeded flow");
+    check(cv::norm(output(flow.get()), saved, cv::NORM_INF) == 0, "restored seeded flow differs");
+
+    // Invalid options and image geometry.
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    invalid(call(previous.get(), next.get(), seed.get(), flow.get(), 0.2), "scale low accepted");
+    invalid(call(previous.get(), next.get(), seed.get(), flow.get(), 0.95), "scale high accepted");
+    invalid(call(previous.get(), next.get(), seed.get(), flow.get(), nan), "scale NaN accepted");
+    invalid(call(previous.get(), next.get(), seed.get(), flow.get(), 0.5, 0), "levels zero accepted");
+    invalid(call(previous.get(), next.get(), seed.get(), flow.get(), 0.5, 9), "levels high accepted");
+    invalid(call(previous.get(), next.get(), seed.get(), flow.get(), 0.5, 3, 16), "even window accepted");
+    invalid(call(previous.get(), next.get(), seed.get(), flow.get(), 0.5, 3, 15, 31), "iterations high accepted");
+    invalid(call(previous.get(), next.get(), seed.get(), flow.get(), 0.5, 3, 15, 3, 6), "poly 6 accepted");
+    invalid(call(previous.get(), next.get(), seed.get(), flow.get(), 0.5, 3, 15, 3, 5, nan), "sigma NaN accepted");
+    auto other_size = matrix(n,n+1,OPENCV_CORE_DEPTH_UINT8,1);
+    invalid(call(previous.get(), other_size.get(), seed.get(), flow.get()), "image geometry mismatch accepted");
+    auto color = matrix(n,n,OPENCV_CORE_DEPTH_UINT8,3);
+    invalid(call(color.get(), color.get(), seed.get(), flow.get()), "color image accepted");
+    auto tiny = matrix(15,15,OPENCV_CORE_DEPTH_UINT8,1);
+    auto tiny_seed = matrix(15,15,OPENCV_CORE_DEPTH_FLOAT32,2);
+    invalid(call(tiny.get(), tiny.get(), tiny_seed.get(), flow.get()), "tiny image accepted");
+    auto seed_for_other = matrix(n,n+1,OPENCV_CORE_DEPTH_FLOAT32,2);
+    invalid(call(other_size.get(), other_size.get(), seed.get(), flow.get()), "seed/image geometry mismatch accepted");
+    (void)seed_for_other;
+
+    // Output header aliases any input header: rejected before native work, seed untouched.
+    invalid(call(previous.get(), next.get(), seed.get(), previous.get()), "output/previous alias accepted");
+    invalid(call(previous.get(), next.get(), seed.get(), next.get()), "output/next alias accepted");
+    check(call(previous.get(), next.get(), seed.get(), seed.get()) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+          "output/seed alias accepted");
+    seed_unchanged("alias rejection changed the seed");
+    check(output(previous.get()).type() == CV_8UC1 && output(next.get()).type() == CV_8UC1,
+          "alias rejection changed an image header");
+
+    // Distinct headers sharing the seed's storage: allowed; seed storage is never the output.
+    {
+        auto sharing = matrix(1,1,OPENCV_CORE_DEPTH_FLOAT32,1);
+        output(sharing.get()) = output(seed.get());  // shallow header copy, same data
+        check(output(sharing.get()).data == output(seed.get()).data, "sharing fixture is not shared");
+        const auto *shared_data = output(seed.get()).data;
+        check(call(previous.get(), next.get(), seed.get(), sharing.get()) == OPENCV_VIDEO_OK,
+              "distinct-header shared-storage call failed");
+        check(output(sharing.get()).data != shared_data && output(seed.get()).data == shared_data,
+              "result replaced or reused the seed allocation");
+        seed_unchanged("shared-storage call mutated the seed");
+        check(cv::norm(output(sharing.get()), saved, cv::NORM_INF) < 1e-6, "shared-storage result differs");
+    }
+
+    // Seed given as a genuine non-contiguous Region; native clone must not leak stride.
+    {
+        auto parent = matrix(n + 20, n + 20, OPENCV_CORE_DEPTH_FLOAT32, 2);
+        output(parent.get()).setTo(cv::Scalar(-7, -7));
+        cv::Mat region = output(parent.get())(cv::Rect(10, 10, n, n));
+        output(seed.get()).copyTo(region);
+        auto roi = matrix(1,1,OPENCV_CORE_DEPTH_FLOAT32,1);
+        output(roi.get()) = region;
+        check(!output(roi.get()).isContinuous(), "seed Region fixture is contiguous");
+        const cv::Mat parent_saved = output(parent.get()).clone();
+        auto out = matrix(1,1,OPENCV_CORE_DEPTH_FLOAT32,1);
+        check(call(previous.get(), next.get(), roi.get(), out.get()) == OPENCV_VIDEO_OK, "Region seed failed");
+        check(output(out.get()).isContinuous() && cv::norm(output(out.get()), saved, cv::NORM_INF) < 1e-6,
+              "Region seed result differs from compact seed");
+        check(cv::norm(parent_saved, output(parent.get()), cv::NORM_INF) == 0, "Region seed parent mutated");
+        check(output(out.get()).data < output(parent.get()).data ||
+              output(out.get()).data >= output(parent.get()).data + output(parent.get()).total() * 8,
+              "result lies inside the seed parent");
+    }
+
+    // Existing nonempty destination: success replaces, failure preserves.
+    {
+        auto destination = matrix(7,5,OPENCV_CORE_DEPTH_UINT8,3);
+        output(destination.get()).setTo(cv::Scalar(9,9,9));
+        const cv::Mat before = output(destination.get()).clone();
+        check(call(previous.get(), next.get(), wrong_type.get(), destination.get()) ==
+              OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "bad seed with prior destination accepted");
+        check(output(destination.get()).size() == before.size() && output(destination.get()).type() == before.type() &&
+              cv::norm(before, output(destination.get()), cv::NORM_INF) == 0, "failed call changed prior destination");
+        check(call(previous.get(), next.get(), seed.get(), destination.get()) == OPENCV_VIDEO_OK,
+              "successful replacement failed");
+        check(output(destination.get()).type() == CV_32FC2 && output(destination.get()).rows == n &&
+              cv::norm(output(destination.get()), saved, cv::NORM_INF) < 1e-6, "destination not replaced");
+    }
+
+    // Same image for both inputs with a seed; repeated calls are deterministic.
+    check(call(previous.get(), previous.get(), seed.get(), flow.get()) == OPENCV_VIDEO_OK, "identical-image seeded call failed");
+    for (int repetition = 0; repetition < 3; ++repetition) {
+        check(call(previous.get(), next.get(), seed.get(), flow.get()) == OPENCV_VIDEO_OK, "repeat failed");
+        check(cv::norm(output(flow.get()), saved, cv::NORM_INF) == 0, "repeat differs");
+    }
+    seed_unchanged("repeated calls mutated the seed");
+
+    // Private storage proof: a previously shared result buffer stays untouched.
+    {
+        const cv::Mat shared = output(flow.get());
+        const auto *shared_data = shared.data;
+        check(call(previous.get(), previous.get(), seed.get(), flow.get()) == OPENCV_VIDEO_OK &&
+              output(flow.get()).data != shared_data && cv::norm(saved, shared, cv::NORM_INF) == 0,
+              "native result overwrote shared published storage");
+        check(call(previous.get(), next.get(), seed.get(), flow.get()) == OPENCV_VIDEO_OK, "restore after sharing");
+    }
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    {
+        const cv::Mat before = output(flow.get()).clone();
+        for (int stage : {1,2}) for (int kind : {1,2,3,4}) {
+            fault_stage=stage; fault_kind=kind;
+            check(call(previous.get(), next.get(), seed.get(), flow.get()) != OPENCV_VIDEO_OK,
+                  "seeded Farneback exception escaped/accepted");
+            check(cv::norm(before, output(flow.get()), cv::NORM_INF) == 0 &&
+                  output(flow.get()).type() == before.type(), "seeded Farneback fault changed published output");
+            seed_unchanged("seeded Farneback fault mutated the seed");
+        }
+        fault_stage=0;
+        for (int mode : {1,2,3}) {
+            corrupt_mode=mode;
+            check(call(previous.get(), next.get(), seed.get(), flow.get()) == OPENCV_VIDEO_ERROR_OPENCV,
+                  "nonfinite seeded Farneback component accepted");
+            check(cv::norm(before, output(flow.get()), cv::NORM_INF) == 0 &&
+                  output(flow.get()).type() == before.type(),
+                  "nonfinite seeded Farneback result was partially published");
+            seed_unchanged("post-native corruption reached the caller's seed");
+        }
+        corrupt_mode=0;
+    }
+#endif
+    check(call(previous.get(), next.get(), seed.get(), flow.get()) == OPENCV_VIDEO_OK, "post-fault seeded call failed");
+    std::cout << "PASS: seeded Farneback actual shim flags 4 oracle, seed validation, aliases, Region seed, private clone, atomicity, faults\n";
+}
 }  // namespace
 
 int main() {
@@ -927,6 +1161,7 @@ int main() {
         run_seeded_pyramids(true);
         run_seeded_pyramids(true,false);
         run_farneback();
+        run_farneback_seeded();
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "FAIL: " << error.what() << '\n';

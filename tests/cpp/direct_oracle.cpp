@@ -180,6 +180,64 @@ static void farneback(std::ostream &out) {
     }
 }
 
+
+// Task 010: independent seeded dense Farneback oracle (flags 4). Never uses the shim or
+// Core bridge. Modes: 0 near seed, 1 different seed, 2 zero seed, 3 nonuniform seed.
+static cv::Mat farneback_seed(int mode, int n) {
+    cv::Mat seed(n, n, CV_32FC2, cv::Scalar(0, 0));
+    for (int r = 0; r < n; ++r)
+        for (int c = 0; c < n; ++c) {
+            cv::Vec2f &v = seed.at<cv::Vec2f>(r, c);
+            if (mode == 0) v = cv::Vec2f(12.25f, 6.75f);
+            else if (mode == 1) v = cv::Vec2f(-20.f, 15.f);
+            else if (mode == 3)
+                v = cv::Vec2f(float(3.0 + (r - 48) * 0.015625), float(2.0 - (c - 48) * 0.0078125));
+        }
+    return seed;
+}
+
+static void farneback_seeded(std::ostream &out) {
+    for (int mode = 0; mode < 4; ++mode) {
+        const int n = mode < 2 ? 192 : 96;
+        const cv::Mat previous = texture(n);
+        const cv::Mat next = mode < 2 ? translated(previous, 12, 7)
+                           : mode == 2 ? translated(previous, 2, 1) : translated(previous, 3, 2);
+        const cv::Mat original = farneback_seed(mode, n);
+        cv::Mat flow = original.clone();  // private native storage; original stays untouched
+        const auto *storage = flow.data;
+        if (mode == 3) cv::calcOpticalFlowFarneback(previous, next, flow, 0.6, 2, 11, 2, 7, 1.5,
+                                                    cv::OPTFLOW_USE_INITIAL_FLOW);
+        else cv::calcOpticalFlowFarneback(previous, next, flow, 0.5, 3, 15, 3, 5, 1.2,
+                                          cv::OPTFLOW_USE_INITIAL_FLOW);
+        if (flow.data != storage || flow.type() != CV_32FC2 || flow.rows != n || flow.cols != n)
+            throw std::runtime_error("unexpected seeded Farneback oracle schema/storage");
+        if (cv::norm(original, farneback_seed(mode, n), cv::NORM_INF) != 0)
+            throw std::runtime_error("seeded oracle mutated the original seed");
+        for (int r = 0; r < n; ++r)
+            for (int c = 0; c < n; ++c) {
+                const cv::Vec2f v = flow.at<cv::Vec2f>(r, c);
+                if (!std::isfinite(v[0]) || !std::isfinite(v[1]))
+                    throw std::runtime_error("seeded oracle produced nonfinite flow");
+            }
+        if (mode == 0) {  // flag 4 must be consumed: the unseeded call is measurably worse
+            cv::Mat plain;
+            cv::calcOpticalFlowFarneback(previous, next, plain, 0.5, 3, 15, 3, 5, 1.2, 0);
+            const cv::Rect centre(n / 4, n / 4, n / 2, n / 2);
+            const cv::Scalar s = cv::mean(flow(centre)), u = cv::mean(plain(centre));
+            if (std::abs(s[0] - 12) > 0.25 || std::abs(s[1] - 7) > 0.25 || std::abs(u[0] - 12) < 2.0)
+                throw std::runtime_error("seeded flag-4 is not distinguishable from unseeded");
+            if (cv::norm(flow, original, cv::NORM_INF) < 0.01)
+                throw std::runtime_error("seeded oracle returned the seed unrefined");
+        }
+        out << mode << ' ' << flow.rows << ' ' << flow.cols << '\n';
+        for (int r = 0; r < flow.rows; ++r)
+            for (int c = 0; c < flow.cols; ++c) {
+                const cv::Vec2f v = flow.at<cv::Vec2f>(r, c);
+                out << v[0] << ' ' << v[1] << '\n';
+            }
+    }
+}
+
 int main(int argc, char **argv) {
     try {
         for (int n : {32,64,96,256}) for (int requested : {0,3,30}) {
@@ -311,8 +369,17 @@ int main(int argc, char **argv) {
             std::ostringstream discarded;
             farneback(discarded);  // still exercises the native call under sanitizers
         }
+        if (argc >= 5) {
+            std::ofstream seeded_file(argv[4]);
+            if (!seeded_file) throw std::runtime_error("cannot create seeded Farneback oracle results");
+            seeded_file << std::setprecision(9);
+            farneback_seeded(seeded_file);
+        } else {
+            std::ostringstream discarded;
+            farneback_seeded(discarded);
+        }
         std::cout << "PASS: independent OpenCV " << CV_VERSION
-                  << " oracle (8 unseeded + 4 seeded + 20 raw forward/backward + 20 pyramid forward/backward + 27 raw quality + 27 pyramid quality entries + 3 Farneback dense flows)\n";
+                  << " oracle (8 unseeded + 4 seeded + 20 raw forward/backward + 20 pyramid forward/backward + 27 raw quality + 27 pyramid quality entries + 3 Farneback dense flows + 4 seeded Farneback flows)\n";
         return 0;
     } catch (const std::exception &e) {
         std::cerr << "FAIL: " << e.what() << '\n';

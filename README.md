@@ -1,5 +1,32 @@
 # OpenCV Video for Ada
 
+### Caller-seeded dense Farnebäck flow (Task 010)
+
+```ada
+Initial : constant OpenCV.Core.Mat := Previous_Motion_Estimate;
+
+Refined : constant OpenCV.Core.Mat :=
+  OpenCV.Video.Calculate_Farneback_Flow
+    (Previous_Image => Previous,
+     Next_Image     => Current,
+     Initial_Flow   => Initial);
+```
+
+`Previous_Motion_Estimate` is assumed to be a valid `Float32` C2 Core Mat with the
+image geometry. `Initial_Flow` is a displacement *prediction* in pixels (channel 0
+dx, channel 1 dy, signed); native Farnebäck (`OPTFLOW_USE_INITIAL_FLOW`, flags 4)
+refines it. A prediction does not guarantee physically correct motion, and no
+per-pixel confidence is returned. The seed must be nonempty, 2-D, `Float32` with two
+channels and exactly the image rows/columns (Regions are accepted); every component
+must be finite with absolute value at most 2**20 pixels (a binding policy, never
+clamped). The caller keeps ownership of the seed: the binding copies it into private
+storage before native mutation, never modifies it, and returns a distinct Core-owned
+Mat. The complete `Farneback_Options` record applies (`Options` precedes
+`Initial_Flow`). The accepted legacy OpenCV limitation (KNOWN_UPSTREAM_UB_ACCEPTED,
+below) remains applicable. This is not a navigation filter or state estimator. The
+production ABI is now 16 exports and AUnit has 107 registrations. See
+[qualification](docs/task010-qualification.md).
+
 ### Dense Farnebäck flow (Task 009)
 
 ```ada
@@ -418,7 +445,7 @@ manual-only.
 The first slice does not bind:
 
 - forward/backward prebuilt-pyramid composition;
-- DIS dense optical flow and Farneback options beyond the Task 009 subset (Gaussian, initial flow, UMat);
+- DIS dense optical flow and Farneback options beyond the Task 009/010 subset (Gaussian, UMat);
 - ECC registration;
 - KalmanFilter;
 - CamShift / meanShift;

@@ -257,6 +257,21 @@ package OpenCV.Video is
      (Previous_Image : OpenCV.Core.Mat;
       Next_Image     : OpenCV.Core.Mat;
       Options        : Farneback_Options := (others => <>)) return OpenCV.Core.Mat;
+
+   --  Seeded dense Farneback (native OPTFLOW_USE_INITIAL_FLOW, flags 4). Same
+   --  image/option contract as above. Initial_Flow is a displacement prediction in
+   --  pixels (channel 0 dx, channel 1 dy; signed): nonempty 2-D Float32 C2 with the
+   --  exact image rows/columns (Regions accepted), every component finite with
+   --  absolute value <= 2**20 (binding policy; never clamped). It is copied into
+   --  private storage before native mutation and is never modified. Returns a new,
+   --  distinct Core-owned Float32 C2 Mat. Options precedes the required seed so
+   --  positional aggregates stay compatible. Not a confidence or navigation filter;
+   --  the KNOWN_UPSTREAM_UB_ACCEPTED limitation above applies unchanged.
+   function Calculate_Farneback_Flow
+     (Previous_Image : OpenCV.Core.Mat;
+      Next_Image     : OpenCV.Core.Mat;
+      Options        : Farneback_Options := (others => <>);
+      Initial_Flow   : OpenCV.Core.Mat) return OpenCV.Core.Mat;
 private
    type PyrLK_Pyramid is new Ada.Finalization.Limited_Controlled with record
       Handle : System.Address := System.Null_Address;

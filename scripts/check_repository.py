@@ -38,7 +38,7 @@ def main() -> None:
     cpp = (ROOT / "cpp/opencv_video_shim.cpp").read_text()
     declared = set(re.findall(r"\b(opencv_video_\w+)\s*\(", header))
     imported = set(re.findall(r'External_Name\s*=>\s*"(opencv_video_\w+)"', ada))
-    check(len(declared) == 15, "production ABI inventory must be fifteen")
+    check(len(declared) == 16, "production ABI inventory must be sixteen")
     check(declared == imported, f"C/Ada import mismatch: {declared ^ imported}")
     check(all(re.search(r"\b" + re.escape(name) + r"\s*\(", cpp) for name in declared),
           "missing C++ export")
@@ -64,7 +64,7 @@ def main() -> None:
 
     tests = (ROOT / "tests/src/video_tests.adb").read_text()
     registrations = re.findall(r"Result\.Add_Test\s*\(Caller\.Create", tests)
-    check(len(registrations) == 99, "update documented AUnit inventory when changing tests")
+    check(len(registrations) == 107, "update documented AUnit inventory when changing tests")
 
     configure = (ROOT / "scripts/configure_opencv.sh").read_text()
     check("opencv2/video/tracking.hpp" in configure and "libopencv_video" in configure,
@@ -83,7 +83,7 @@ def main() -> None:
           "compatibility matrix must remain manual-only")
 
     print(f"PASS: manifests, Core pin {CORE_PIN[:12]}, {len(declared)} ABI declarations/imports, "
-          f"99 AUnit registrations, Core ownership, video backend, CI topology")
+          f"107 AUnit registrations, Core ownership, video backend, CI topology")
 
 
 if __name__ == "__main__":
