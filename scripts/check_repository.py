@@ -79,6 +79,17 @@ def main() -> None:
           "cross-platform workflow topology changed")
     check("pull_request:" not in windows and "workflow_dispatch:" not in windows,
           "Windows must remain post-merge-only")
+    pacman_lines = re.findall(r"pacman\s+(-\S+)((?:[^\n\\]|\\\n)*)", windows)
+    check(pacman_lines, "Windows workflow must invoke pacman")
+    for flags, rest in pacman_lines:
+        check(re.fullmatch(r"-Syu+", flags) is not None,
+              "Windows pacman must use a full upgrade (-Syu), never partial -Sy")
+        for forbidden in ("--nodeps", "--overwrite", "-dd", "--ignore", "--force"):
+            check(forbidden not in rest and forbidden not in flags,
+                  f"Windows pacman must not use {forbidden}")
+    check(re.search(r"pacman\s+-Sy\s", windows) is None
+          and re.search(r"pacman\s+-Sy\b(?!u)", windows) is None,
+          "Windows workflow regressed to partial-upgrade pacman -Sy")
     check("workflow_dispatch:" in compat and "pull_request:" not in compat,
           "compatibility matrix must remain manual-only")
 
