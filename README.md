@@ -1,5 +1,34 @@
 # OpenCV Video for Ada
 
+### ECC translation alignment (Task 011)
+
+```ada
+Alignment : constant ECC_Translation_Result :=
+  OpenCV.Video.Estimate_ECC_Translation
+    (Template_Image => Previous_Image,
+     Moving_Image   => Current_Image);
+```
+
+Native `cv::findTransformECC` with `MOTION_TRANSLATION`, a privately initialized
+identity warp, `COUNT | EPS` termination (`ECC_Translation_Options`: 1 .. 100
+iterations, default 50; epsilon `1.0E-8 .. 0.1`, default 0.0001), no mask and a fixed
+Gaussian size of 5. `Displacement` maps template coordinates into the moving image
+(`moving = template + Displacement`, X right, Y down); it is not the inverse warp, and
+OpenCV applies it with `WARP_INVERSE_MAP` to bring the moving image into the template
+frame. `Correlation` is the value native ECC returns, computed before its final update,
+so it need not score the returned displacement exactly; it is not a confidence and is
+never clamped or thresholded. Images are nonempty 2-D UInt8 C1 of equal size, 32 ..
+16,384 per side and at most 2**24 pixels (Regions are accepted; ECC needs on the order
+of 1 GB of temporaries at the largest size). Native nonconvergence raises
+`OpenCV_Error`; a successful call does not prove correct registration (ECC has a small
+convergence basin and can finish at a wrong optimum). Inputs are never modified. This
+is not a navigation solution. No masks, seeded transforms or other motion models yet.
+The Task 010 Windows MSYS2 installer now uses `pacman -Syu`; its real effect is
+confirmed only by the post-merge Windows run. The accepted Farnebäck upstream UB
+limitation does not apply to, or extend to, ECC. The production ABI is 17 exports.
+See the [source contract](docs/ecc-source-contract.md) and
+[qualification](docs/task011-qualification.md).
+
 ### Caller-seeded dense Farnebäck flow (Task 010)
 
 ```ada
