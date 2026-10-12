@@ -46,6 +46,16 @@ void opencv_video_test_corrupt_ecc(float *warp, double *correlation) {
         case 8: warp[4] = -warp[4]; warp[3] = -warp[3]; break;
         case 9: warp[0] = nan; break;
         case 10: warp[3] += 1e-3f; break;
+        // 11/12 replace the warp with a VALID rigid transform beyond the quarter turn
+        // (+120 and -150 degrees, translation (3,-4)); real native fits never reach it.
+        case 11: case 12: {
+            const double t = (ecc_corrupt_mode == 11 ? 120.0 : -150.0) * 3.14159265358979323846 / 180.0;
+            warp[0] = warp[4] = float(std::cos(t));
+            warp[3] = float(std::sin(t));
+            warp[1] = -warp[3];
+            warp[2] = 3.0f; warp[5] = -4.0f;
+            break;
+        }
         default: break;
     }
 }
@@ -1622,6 +1632,18 @@ void run_ecc_euclidean() {
             ecc_corrupt_mode = 0;
             check(code == OPENCV_VIDEO_ERROR_OPENCV, "Euclidean corrupted native output accepted");
             euc_unchanged(r, "Euclidean corrupted native output was partially published");
+        }
+        // Valid rigid warps beyond a quarter turn are published with the atan2 angle and sign
+        // (an asin decode would return pi - theta here).
+        for (int mode : {11, 12}) {
+            ecc_corrupt_mode = mode;
+            opencv_video_ecc_euclidean_result r = kEucSentinel;
+            const auto code = euc_call(base.get(), moving.get(), &r);
+            ecc_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_OK, "Euclidean valid large-angle warp rejected");
+            const double expected = (mode == 11 ? 120.0 : -150.0) * kPi / 180.0;
+            check(std::fabs(r.rotation_radians - expected) < 1e-6, "Euclidean large angle decoded wrongly");
+            check(r.displacement_x == 3.0f && r.displacement_y == -4.0f, "Euclidean large-angle translation");
         }
     }
 #endif
