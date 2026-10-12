@@ -43,4 +43,11 @@ env -u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u LIBRARY_PATH \
     tests/cpp/ecc_oracle.cpp $("$pkg_config" --libs "$package") -o obj/oracle/ecc-oracle
 rm -f obj/oracle/ecc-translation.txt
 sh scripts/run_native.sh obj/oracle/ecc-oracle obj/oracle/ecc-translation.txt
+# Independent ECC Euclidean oracle (Task 012): own source, binary and output file.
+env -u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u LIBRARY_PATH \
+    -u GCC_EXEC_PREFIX -u COMPILER_PATH \
+    "$compiler" "$@" -std=c++17 -Wall -Wextra -Wpedantic -Werror $cflags -Itests/cpp \
+    tests/cpp/ecc_euclidean_oracle.cpp $("$pkg_config" --libs "$package") -o obj/oracle/ecc-euclidean-oracle
+rm -f obj/oracle/ecc-euclidean.txt
+sh scripts/run_native.sh obj/oracle/ecc-euclidean-oracle obj/oracle/ecc-euclidean.txt
 sh scripts/run_native.sh obj/oracle/direct-oracle obj/oracle/forward-backward.txt obj/oracle/trackability.txt obj/oracle/farneback.txt obj/oracle/farneback-seeded.txt
