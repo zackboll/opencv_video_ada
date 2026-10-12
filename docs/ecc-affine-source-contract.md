@@ -75,3 +75,27 @@ published. Constant images give NaN norms; the `rho` NaN test turns that into `S
 the correlation scores the previous matrix, not the returned one. Exhausting the iteration count
 is **not** an error: the loop ends and `rho` is returned. `StsNoConv` arises only from the two
 guards above.
+
+## Determinant, reflection and conditioning (measured)
+
+From `tests/cpp/ecc_affine_probe.cpp` and the 32-fixture `ecc_affine_oracle.cpp` on 4.1.0, 4.6.0
+(via the 4.6.0 oracle file), 4.10.0 and 5.0.0 (27 fixtures succeed and 5 raise on every version;
+the raising ones are `reflect-x`, `shear-0.2`, `strong-1.2-0.8`, `constant`, `noise-vs-noise`):
+
+* Genuine small fits return determinants from **0.9598** (0.98 isotropic scale) to about 1.04
+  (1.02 isotropic scale); none was singular or negative.
+* The one wrong-but-finite success, `noise-vs-texture`, returned correlation 0.084-0.093,
+  `M00` about 1.20-1.21, `M02` about -10.1 to -10.4 and determinant 1.30-1.32.
+* A reflection (`det = -1`) and the strong/shear deformations fall outside the
+  identity-initialized basin: native ECC raises `StsNoConv` (`lambda_d <= 0`). A reflection is
+  therefore not obtainable from identity initialization, although the binding would not reject
+  one if native ECC returned it.
+
+Policy: the binding checks warp storage identity, a contiguous 2x3 `CV_32FC1` layout, six finite
+coefficients and a finite correlation. It does **not** require `det > 0`, `det = 1`,
+orthogonality or a conditioning bound: an affine matrix legitimately carries scale, shear and
+reflection, and no demonstrated unsafe arithmetic path was found that a determinant test would
+prevent. A caller that resamples with the matrix must itself handle a singular result; the
+binding does not resample. No ECC undefined behavior was identified by source review, and no
+ECC-specific sanitizer waiver exists (the accepted Farneback upstream finding does not extend
+to ECC).
