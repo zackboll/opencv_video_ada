@@ -46,6 +46,23 @@ inline cv::Mat rigid_texture(int rows, int cols, double degrees, double tx, doub
     return m;
 }
 
+// Task 014 affine fixture. The native affine warp W = [A | t] maps template coordinates to
+// moving coordinates:  moving = A * template + t,  A = [[a b][c d]].
+// moving(p) = signal(A^-1 (p - t)), evaluated analytically (no image resampling) with an
+// explicit 2x2 inverse so Ada can reproduce it. A must be invertible.
+inline cv::Mat affine_texture(int rows, int cols, double a, double b, double c, double d,
+                              double tx, double ty) {
+    const double det = a * d - b * c;
+    const double ia = d / det, ib = -b / det, ic = -c / det, id = a / det;
+    cv::Mat m(rows, cols, CV_8UC1);
+    for (int r = 0; r < rows; ++r)
+        for (int col = 0; col < cols; ++col) {
+            const double u = col - tx, v = r - ty;
+            m.at<uint8_t>(r, col) = cv::saturate_cast<uint8_t>(signal(ia * u + ib * v, ic * u + id * v));
+        }
+    return m;
+}
+
 inline cv::Mat photometric(const cv::Mat &m, double alpha, double beta) {
     cv::Mat out;
     m.convertTo(out, CV_8UC1, alpha, beta);
