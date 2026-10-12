@@ -1112,4 +1112,70 @@ package body OpenCV.Video is
             M12 => OpenCV.Float32_Value (Native.M12)),
          Correlation => OpenCV.Float64_Value (Native.Correlation));
    end Estimate_ECC_Affine;
+   function Estimate_ECC_Affine
+     (Template_Image    : OpenCV.Core.Mat;
+      Moving_Image      : OpenCV.Core.Mat;
+      Options           : ECC_Affine_Options := (others => <>);
+      Initial_Transform : ECC_Affine_Result)
+      return ECC_Affine_Result
+   is
+      Maximum_Linear      : constant OpenCV.Float32_Value := 4.0;
+      Maximum_Translation : constant OpenCV.Float32_Value := 2.0 ** 20;
+      Seed   : ECC_Affine_Warp renames Initial_Transform.Warp;
+      Native : aliased C.ECC_Affine_Result;
+      Code   : C.Status := C.Success;
+   begin
+      Validate_ECC_Arguments (Template_Image, Moving_Image, Options);
+      --  Initial_Transform.Correlation is deliberately never read.
+      if not (Is_Finite (Seed.M00) and then Is_Finite (Seed.M01)
+              and then Is_Finite (Seed.M10) and then Is_Finite (Seed.M11)
+              and then Is_Finite (Seed.M02) and then Is_Finite (Seed.M12))
+      then
+         raise OpenCV.OpenCV_Error with "ECC affine seed coefficients must be finite";
+      end if;
+      if abs Seed.M00 > Maximum_Linear or else abs Seed.M01 > Maximum_Linear
+        or else abs Seed.M10 > Maximum_Linear or else abs Seed.M11 > Maximum_Linear
+      then
+         raise OpenCV.OpenCV_Error with
+           "ECC affine seed linear coefficients must have absolute value <= 4.0";
+      end if;
+      if abs Seed.M02 > Maximum_Translation or else abs Seed.M12 > Maximum_Translation then
+         raise OpenCV.OpenCV_Error with
+           "ECC affine seed translations must have absolute value <= 2**20";
+      end if;
+
+      declare
+         procedure Template_Callback (Template_Handle : Bridge.Input_Mat_Handle) is
+            procedure Moving_Callback (Moving_Handle : Bridge.Input_Mat_Handle) is
+            begin
+               Code := C.Estimate_ECC_Affine_Seeded
+                 (Template_Handle, Moving_Handle,
+                  Interfaces.Integer_32 (Options.Maximum_Iterations),
+                  Interfaces.C.double (Options.Epsilon),
+                  Interfaces.C.C_float (Seed.M00),
+                  Interfaces.C.C_float (Seed.M01),
+                  Interfaces.C.C_float (Seed.M02),
+                  Interfaces.C.C_float (Seed.M10),
+                  Interfaces.C.C_float (Seed.M11),
+                  Interfaces.C.C_float (Seed.M12),
+                  Native'Access);
+            end Moving_Callback;
+         begin
+            Bridge.With_Input_Handle (Moving_Image, Moving_Callback'Access);
+         end Template_Callback;
+      begin
+         Bridge.With_Input_Handle (Template_Image, Template_Callback'Access);
+      end;
+      C.Check (Code, "Video.Estimate_ECC_Affine");
+
+      return
+        (Warp        =>
+           (M00 => OpenCV.Float32_Value (Native.M00),
+            M01 => OpenCV.Float32_Value (Native.M01),
+            M02 => OpenCV.Float32_Value (Native.M02),
+            M10 => OpenCV.Float32_Value (Native.M10),
+            M11 => OpenCV.Float32_Value (Native.M11),
+            M12 => OpenCV.Float32_Value (Native.M12)),
+         Correlation => OpenCV.Float64_Value (Native.Correlation));
+   end Estimate_ECC_Affine;
 end OpenCV.Video;
