@@ -63,3 +63,11 @@ UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 "obj/sanitizers/video-oracle$su
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
     "obj/sanitizers/ecc-oracle$suffix" "obj/sanitizers/ecc-translation$suffix.txt"
+
+# Independent ECC Euclidean oracle under the same sanitizers (fixtures only).
+"$compiler" "$@" -std=c++17 -Wall -Wextra -Wpedantic -Werror \
+    $flags -Itests/cpp $opencv_cflags tests/cpp/ecc_euclidean_oracle.cpp \
+    $(pkg-config --libs "$package") -o "obj/sanitizers/ecc-euclidean-oracle$suffix"
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+    "obj/sanitizers/ecc-euclidean-oracle$suffix" "obj/sanitizers/ecc-euclidean$suffix.txt"

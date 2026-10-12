@@ -41,6 +41,28 @@ package body ECC_Fixtures is
       end return;
    end Texture;
 
+   function Rigid_Texture
+     (Rows, Columns : Positive; Degrees, TX, TY : Long_Float) return OpenCV.Core.Mat
+   is
+      Theta : constant Long_Float := Degrees * 3.14159265358979323846 / 180.0;
+      C     : constant Long_Float := Math.Cos (Theta);
+      S     : constant Long_Float := Math.Sin (Theta);
+   begin
+      return Result : OpenCV.Core.Mat := Blank (Rows, Columns) do
+         for R in 0 .. Rows - 1 loop
+            for Col in 0 .. Columns - 1 loop
+               declare
+                  U : constant Long_Float := Long_Float (Col) - TX;
+                  V : constant Long_Float := Long_Float (R) - TY;
+               begin
+                  OpenCV.Core.UInt8_Access.Set
+                    (Result, R, Col, Saturate (Signal (C * U + S * V, -S * U + C * V)));
+               end;
+            end loop;
+         end loop;
+      end return;
+   end Rigid_Texture;
+
    function Affine (Source : OpenCV.Core.Mat; Num, Den, Beta : Integer) return OpenCV.Core.Mat is
    begin
       return Result : OpenCV.Core.Mat := Blank (Source.Rows, Source.Columns) do

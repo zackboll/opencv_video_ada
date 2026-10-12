@@ -3,6 +3,7 @@ with AUnit.Test_Caller;
 with AUnit.Test_Fixtures;
 with Ada.Environment_Variables;
 with Ada.Exceptions;
+with Ada.Numerics.Long_Elementary_Functions;
 with Ada.Text_IO;
 with Ada.Unchecked_Conversion;
 with ECC_Fixtures;
@@ -3944,6 +3945,606 @@ package body Video_Tests is
       end loop;
    end ECC_Aspect_Ratios;
 
+   ---------------------------------------------------------------------
+   --  Task 012: ECC Euclidean (translation + rotation)
+   ---------------------------------------------------------------------
+   package LM renames Ada.Numerics.Long_Elementary_Functions;
+
+   Euc_Angle_Tolerance       : constant Long_Float := 0.005;
+   Euc_Translation_Tolerance : constant Long_Float := 0.1;
+   Degrees_To_Radians        : constant Long_Float := 3.14159265358979323846 / 180.0;
+
+   function LF (Value : OpenCV.Float32_Value) return Long_Float is (Long_Float (Value));
+
+   function Euc_Pair (Degrees, TX, TY : Long_Float) return ECC_Pair is
+     (Template => EF.Texture (128, 128),
+      Moving   => EF.Rigid_Texture (128, 128, Degrees, TX, TY));
+
+   function Euc_Near
+     (R : ECC_Euclidean_Result; Degrees, TX, TY : Long_Float) return Boolean is
+     (abs (Long_Float (R.Rotation_Radians) - Degrees * Degrees_To_Radians) < Euc_Angle_Tolerance
+      and then abs (LF (R.Displacement.X) - TX) < Euc_Translation_Tolerance
+      and then abs (LF (R.Displacement.Y) - TY) < Euc_Translation_Tolerance);
+
+   --  Applies the returned matrix: template coordinates to moving coordinates.
+   procedure Euc_Map
+     (R : ECC_Euclidean_Result; X, Y : Long_Float; MX, MY : out Long_Float)
+   is
+      Theta : constant Long_Float := Long_Float (R.Rotation_Radians);
+   begin
+      MX := LM.Cos (Theta) * X - LM.Sin (Theta) * Y + LF (R.Displacement.X);
+      MY := LM.Sin (Theta) * X + LM.Cos (Theta) * Y + LF (R.Displacement.Y);
+   end Euc_Map;
+
+   function Sample (Image : OpenCV.Core.Mat; X, Y : Long_Float) return Long_Float is
+      X0 : constant Integer := Integer (Long_Float'Floor (X));
+      Y0 : constant Integer := Integer (Long_Float'Floor (Y));
+      FX : constant Long_Float := X - Long_Float (X0);
+      FY : constant Long_Float := Y - Long_Float (Y0);
+      function P (RX, RY : Integer) return Long_Float is
+        (Long_Float (OpenCV.Core.UInt8_Access.Get (Image, RY, RX)));
+   begin
+      return (1.0 - FY) * ((1.0 - FX) * P (X0, Y0) + FX * P (X0 + 1, Y0))
+        + FY * ((1.0 - FX) * P (X0, Y0 + 1) + FX * P (X0 + 1, Y0 + 1));
+   end Sample;
+
+   --  Mean absolute difference over an interior window. Aligned = True resamples the
+   --  moving image at W * p, which is what WARP_INVERSE_MAP does with the returned matrix.
+   function Euc_Residual
+     (Pair : ECC_Pair; R : ECC_Euclidean_Result; Aligned : Boolean) return Long_Float
+   is
+      Margin : constant := 24;
+      Sum    : Long_Float := 0.0;
+      Count  : Natural := 0;
+      MX, MY : Long_Float;
+   begin
+      for Y in Margin .. 127 - Margin loop
+         for X in Margin .. 127 - Margin loop
+            if Aligned then
+               Euc_Map (R, Long_Float (X), Long_Float (Y), MX, MY);
+            else
+               MX := Long_Float (X);
+               MY := Long_Float (Y);
+            end if;
+            Sum := Sum + abs (Sample (Pair.Moving, MX, MY)
+                              - Long_Float (OpenCV.Core.UInt8_Access.Get (Pair.Template, Y, X)));
+            Count := Count + 1;
+         end loop;
+      end loop;
+      return Sum / Long_Float (Count);
+   end Euc_Residual;
+
+   procedure Euc_Expect_Error
+     (Template, Moving : OpenCV.Core.Mat;
+      Options : ECC_Euclidean_Options := (others => <>);
+      Message : String)
+   is
+      Unused : ECC_Euclidean_Result;
+   begin
+      Unused := Estimate_ECC_Euclidean (Template, Moving, Options);
+      Assert (False, Message & ": request accepted");
+   exception
+      when OpenCV.OpenCV_Error => null;
+   end Euc_Expect_Error;
+
+   --  A shim-originated rejection carries the "Video.Estimate_ECC_Euclidean" prefix.
+   procedure Euc_Expect_Preflight_Error (Template, Moving : OpenCV.Core.Mat; Message : String) is
+      Unused : ECC_Euclidean_Result;
+   begin
+      Unused := Estimate_ECC_Euclidean (Template, Moving);
+      Assert (False, Message & ": request accepted");
+   exception
+      when Error : OpenCV.OpenCV_Error =>
+         declare
+            Text   : constant String := Ada.Exceptions.Exception_Message (Error);
+            Marker : constant String := "Video.Estimate_ECC_Euclidean";
+         begin
+            Assert (Text'Length < Marker'Length
+                    or else Text (Text'First .. Text'First + Marker'Length - 1) /= Marker,
+                    Message & ": rejected by the native layer, not the Ada preflight");
+         end;
+   end Euc_Expect_Preflight_Error;
+
+   procedure ECC_Euclidean_Defaults (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Options     : constant ECC_Euclidean_Options := (others => <>);
+      Translation : constant ECC_Translation_Options := Options;
+      Zero        : constant ECC_Euclidean_Result := (others => <>);
+   begin
+      Assert (Options.Maximum_Iterations = 50 and then Options.Epsilon = 0.0001
+              and then Translation = Options, "ECC Euclidean options reuse the translation defaults");
+      Assert (Zero.Displacement = (X => 0.0, Y => 0.0) and then Zero.Rotation_Radians = 0.0
+              and then Zero.Correlation = 0.0, "ECC Euclidean default result");
+   end ECC_Euclidean_Defaults;
+
+   procedure ECC_Euclidean_Identity_And_Translation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Base      : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+      Before    : constant Long_Long_Integer := EF.Checksum (Base);
+      Identity  : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean (Base, Base);
+      Pair      : constant ECC_Pair := Euc_Pair (0.0, 2.0, 1.0);
+      Shifted   : constant ECC_Euclidean_Result :=
+        Estimate_ECC_Euclidean (Pair.Template, Pair.Moving);
+      Reference : constant ECC_Translation_Result :=
+        Estimate_ECC_Translation (Pair.Template, Pair.Moving);
+   begin
+      Assert (abs (Identity.Rotation_Radians) < 1.0E-6 and then abs (Identity.Displacement.X) < 1.0E-5
+              and then abs (Identity.Displacement.Y) < 1.0E-5
+              and then abs (Identity.Correlation - 1.0) < 1.0E-6, "ECC Euclidean identity");
+      Assert (Euc_Near (Shifted, 0.0, 2.0, 1.0), "ECC Euclidean translation without rotation");
+      Assert (abs (Shifted.Rotation_Radians) < 0.002, "ECC Euclidean translation introduced rotation");
+      --  The retained translation-only API is unchanged and agrees on a pure shift.
+      Assert (ECC_Near (Reference, 2, 1), "translation-only regression");
+      Assert (abs (LF (Reference.Displacement.X) - LF (Shifted.Displacement.X)) < 0.05
+              and then abs (LF (Reference.Displacement.Y) - LF (Shifted.Displacement.Y)) < 0.05,
+              "Euclidean and translation models disagree on a pure shift");
+      Assert (EF.Checksum (Base) = Before, "ECC Euclidean modified an input");
+   end ECC_Euclidean_Identity_And_Translation;
+
+   procedure ECC_Euclidean_Signed_Rotations (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Template : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+      Angles   : constant array (1 .. 4) of Long_Float := [1.0, -1.0, 3.0, -3.0];
+   begin
+      for Degrees of Angles loop
+         declare
+            Moving   : constant OpenCV.Core.Mat := EF.Rigid_Texture (128, 128, Degrees, 0.0, 0.0);
+            Forward  : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean (Template, Moving);
+            Backward : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean (Moving, Template);
+         begin
+            Assert (Euc_Near (Forward, Degrees, 0.0, 0.0), "ECC signed rotation");
+            --  Radians, not degrees: 3 degrees is about 0.0524, never 3.0.
+            Assert (abs (Long_Float (Forward.Rotation_Radians)) < 0.06, "ECC angle is not in radians");
+            Assert ((Forward.Rotation_Radians > 0.0) = (Degrees > 0.0), "ECC rotation sign");
+            Assert (abs (Long_Float (Backward.Rotation_Radians) + Degrees * Degrees_To_Radians)
+                    < Euc_Angle_Tolerance, "ECC reversed roles are not negated");
+            Assert (Forward.Correlation > 0.98 and then Forward.Correlation <= 1.000001,
+                    "ECC rotation correlation range");
+         end;
+      end loop;
+   end ECC_Euclidean_Signed_Rotations;
+
+   procedure ECC_Euclidean_Rotation_Translation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      type Case_Record is record Degrees, TX, TY : Long_Float; end record;
+      Cases : constant array (1 .. 4) of Case_Record :=
+        [(3.0, 2.0, 1.0), (3.0, -2.0, -1.0), (-3.0, 2.0, -1.0), (-3.0, -2.0, 1.0)];
+   begin
+      for Item of Cases loop
+         declare
+            Pair : constant ECC_Pair := Euc_Pair (Item.Degrees, Item.TX, Item.TY);
+            R    : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean (Pair.Template, Pair.Moving);
+            Swapped_Axes : constant Boolean :=
+              abs (LF (R.Displacement.X) - Item.TY) < Euc_Translation_Tolerance
+              and then abs (LF (R.Displacement.Y) - Item.TX) < Euc_Translation_Tolerance;
+         begin
+            Assert (Euc_Near (R, Item.Degrees, Item.TX, Item.TY), "ECC rotation plus translation");
+            Assert (not Swapped_Axes, "ECC translation axes swapped");
+         end;
+      end loop;
+      declare
+         Pair   : constant ECC_Pair := Euc_Pair (3.0, 2.0, 1.0);
+         Dimmer : constant OpenCV.Core.Mat := EF.Affine (Pair.Moving, 4, 5, 20);
+         Result : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean (Pair.Template, Dimmer);
+      begin
+         Assert (Euc_Near (Result, 3.0, 2.0, 1.0), "ECC Euclidean photometric variation");
+      end;
+   end ECC_Euclidean_Rotation_Translation;
+
+   procedure ECC_Euclidean_Centered_Rotation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Theta : constant Long_Float := 3.0 * Degrees_To_Radians;
+      CX    : constant Long_Float := 63.5;
+      CY    : constant Long_Float := 63.5;
+      DX    : constant Long_Float := 1.5;
+      DY    : constant Long_Float := -1.0;
+      TX    : constant Long_Float := CX - (LM.Cos (Theta) * CX - LM.Sin (Theta) * CY) + DX;
+      TY    : constant Long_Float := CY - (LM.Sin (Theta) * CX + LM.Cos (Theta) * CY) + DY;
+      Pair  : constant ECC_Pair := Euc_Pair (3.0, TX, TY);
+      R     : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean (Pair.Template, Pair.Moving);
+      MX, MY : Long_Float;
+   begin
+      --  The returned translation belongs to the origin-rotation matrix, not to the centre.
+      Assert (Euc_Near (R, 3.0, TX, TY), "ECC centred rotation matrix translation");
+      Assert (abs (LF (R.Displacement.X) - DX) > 1.0 and then abs (LF (R.Displacement.Y) - DY) > 1.0,
+              "ECC Displacement was interpreted as the centre displacement");
+      --  Independently transformed points: the centre moves by (DX, DY); an off-centre
+      --  point lands where the analytic matrix sends it.
+      Euc_Map (R, CX, CY, MX, MY);
+      Assert (abs (MX - (CX + DX)) < 0.15 and then abs (MY - (CY + DY)) < 0.15,
+              "ECC centre point mapping");
+      Euc_Map (R, 10.0, 100.0, MX, MY);
+      Assert (abs (MX - (LM.Cos (Theta) * 10.0 - LM.Sin (Theta) * 100.0 + TX)) < 0.15
+              and then abs (MY - (LM.Sin (Theta) * 10.0 + LM.Cos (Theta) * 100.0 + TY)) < 0.15,
+              "ECC off-centre point mapping");
+   end ECC_Euclidean_Centered_Rotation;
+
+   procedure ECC_Euclidean_Inverse_Warp (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pair    : constant ECC_Pair := Euc_Pair (3.0, 2.0, 1.0);
+      R       : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean (Pair.Template, Pair.Moving);
+      Wrong   : constant ECC_Euclidean_Result :=
+        (Displacement     => (X => -R.Displacement.X, Y => -R.Displacement.Y),
+         Rotation_Radians => -R.Rotation_Radians,
+         Correlation      => R.Correlation);
+      Before  : constant Long_Float := Euc_Residual (Pair, R, Aligned => False);
+      After   : constant Long_Float := Euc_Residual (Pair, R, Aligned => True);
+      Negated : constant Long_Float := Euc_Residual (Pair, Wrong, Aligned => True);
+   begin
+      Assert (Before > 10.0, "ECC fixture is not misaligned before alignment");
+      Assert (After < 2.0 and then After < Before / 8.0, "ECC inverse-map residual did not improve");
+      Assert (Negated > 4.0 * After and then Negated > 5.0,
+              "ECC negated matrix aligned as well as the returned matrix");
+   end ECC_Euclidean_Inverse_Warp;
+
+   procedure ECC_Euclidean_Options_Sensitivity (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pair : constant ECC_Pair := Euc_Pair (3.0, 2.0, 1.0);
+      Default_1 : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean (Pair.Template, Pair.Moving);
+      Default_2 : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean (Pair.Template, Pair.Moving);
+      One : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean
+        (Pair.Template, Pair.Moving, (Maximum_Iterations => 1, Epsilon => 0.0001));
+      Two : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean
+        (Pair.Template, Pair.Moving, (Maximum_Iterations => 2, Epsilon => 0.0001));
+      Tight : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean
+        (Pair.Template, Pair.Moving, (Maximum_Iterations => 50, Epsilon => 1.0E-8));
+      Loose : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean
+        (Pair.Template, Pair.Moving, (Maximum_Iterations => 50, Epsilon => 0.1));
+   begin
+      Assert (Default_1 = Default_2, "ECC Euclidean repeated calls differ");
+      Assert (One /= Default_1 and then One.Correlation < Default_1.Correlation - 0.1,
+              "ECC Euclidean iteration option ignored");
+      Assert (Euc_Near (Two, 3.0, 2.0, 1.0) and then Euc_Near (Tight, 3.0, 2.0, 1.0)
+              and then Euc_Near (Loose, 3.0, 2.0, 1.0), "ECC Euclidean nondefault options lost accuracy");
+      Assert (Tight /= Loose, "ECC Euclidean epsilon option ignored");
+   end ECC_Euclidean_Options_Sensitivity;
+
+   procedure ECC_Euclidean_Regions_Lifetime (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Window : constant OpenCV.Rect := (16, 16, 128, 128);
+      Saved, Contiguous : ECC_Euclidean_Result;
+      Before_A, Before_B : Long_Long_Integer;
+   begin
+      declare
+         Parent_A : constant OpenCV.Core.Mat := EF.Texture (160, 160);
+         Parent_B : constant OpenCV.Core.Mat := EF.Rigid_Texture (160, 160, 3.0, 2.0, 1.0);
+         Region_A : constant OpenCV.Core.Mat := Parent_A.Region (Window);
+         Region_B : constant OpenCV.Core.Mat := Parent_B.Region (Window);
+      begin
+         Before_A := EF.Checksum (Parent_A);
+         Before_B := EF.Checksum (Parent_B);
+         Assert (not Region_A.Is_Continuous and then not Region_B.Is_Continuous,
+                 "ECC Euclidean fixture Regions are contiguous");
+         Saved := Estimate_ECC_Euclidean (Region_A, Region_B);
+         Contiguous := Estimate_ECC_Euclidean (Region_A.Clone, Region_B.Clone);
+         Assert (Saved = Contiguous, "ECC Euclidean Region differs from the contiguous clone");
+         Assert (EF.Checksum (Parent_A) = Before_A and then EF.Checksum (Parent_B) = Before_B,
+                 "ECC Euclidean modified a Region parent");
+      end;
+      --  Parents and Regions are finalized; the result is a plain value.
+      Assert (abs (Long_Float (Saved.Rotation_Radians) - 3.0 * Degrees_To_Radians) < Euc_Angle_Tolerance
+              and then Saved.Correlation > 0.98, "ECC Euclidean result after finalization");
+   end ECC_Euclidean_Regions_Lifetime;
+
+   procedure ECC_Euclidean_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Good : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+      Empty : OpenCV.Core.Mat;
+      Float_Image : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (128, 128, (Depth => OpenCV.Core.Float32, Channels => 1));
+      Color : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (128, 128, (Depth => OpenCV.Core.UInt8, Channels => 3));
+      function From_Bits is new Ada.Unchecked_Conversion (Interfaces.Unsigned_64, OpenCV.Float64_Value);
+      Bad_Epsilons : constant array (Positive range <>) of OpenCV.Float64_Value :=
+        [0.0, -1.0E-4, 9.0E-9, 0.1000001, 1.0,
+         From_Bits (16#7FF0_0000_0000_0000#), From_Bits (16#FFF0_0000_0000_0000#),
+         From_Bits (16#7FF8_0000_0000_0000#)];
+   begin
+      Euc_Expect_Error (Empty, Good, Message => "empty template");
+      Euc_Expect_Error (Good, Empty, Message => "empty moving");
+      Euc_Expect_Preflight_Error (Float_Image, Float_Image, "Float32 images");
+      Euc_Expect_Preflight_Error (Color, Color, "three-channel images");
+      Euc_Expect_Preflight_Error (Good, EF.Texture (128, 129), "different columns");
+      Euc_Expect_Preflight_Error (EF.Texture (129, 128), Good, "different rows");
+      Euc_Expect_Error (Good, Float_Image, Message => "Float32 moving");
+      Euc_Expect_Error (EF.Texture (31, 128), EF.Texture (31, 128), Message => "31 rows");
+      Euc_Expect_Error (EF.Texture (128, 31), EF.Texture (128, 31), Message => "31 columns");
+      declare
+         Wide : constant OpenCV.Core.Mat := OpenCV.Core.Create
+           (32, 16_385, (Depth => OpenCV.Core.UInt8, Channels => 1));
+         Area : constant OpenCV.Core.Mat := OpenCV.Core.Create
+           (4_097, 4_096, (Depth => OpenCV.Core.UInt8, Channels => 1));
+      begin
+         --  Rejected before native work: no ECC temporaries are allocated.
+         Euc_Expect_Preflight_Error (Wide, Wide, "16385 columns");
+         Euc_Expect_Preflight_Error (Area, Area, "4097 x 4096 pixels");
+      end;
+      Euc_Expect_Error (Good, Good, (Maximum_Iterations => 101, Epsilon => 0.0001),
+                        Message => "101 iterations");
+      Euc_Expect_Error (Good, Good, (Maximum_Iterations => Positive'Last, Epsilon => 0.0001),
+                        Message => "Positive'Last iterations");
+      for Epsilon of Bad_Epsilons loop
+         Euc_Expect_Error (Good, Good, (Maximum_Iterations => 50, Epsilon => Epsilon),
+                           Message => "invalid epsilon");
+      end loop;
+      declare
+         Pair : constant ECC_Pair := Euc_Pair (3.0, 2.0, 1.0);
+         Lower : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean
+           (Pair.Template, Pair.Moving, (Maximum_Iterations => 1, Epsilon => 1.0E-8));
+         Upper : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean
+           (Pair.Template, Pair.Moving, (Maximum_Iterations => 100, Epsilon => 0.1));
+      begin
+         Assert (Lower /= Estimate_ECC_Euclidean (Pair.Template, Pair.Moving), "lower option bound clamped");
+         Assert (Euc_Near (Upper, 3.0, 2.0, 1.0), "ECC Euclidean upper option bounds");
+      end;
+   end ECC_Euclidean_Validation;
+
+   procedure ECC_Euclidean_Degenerate_And_Limits (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Flat    : constant OpenCV.Core.Mat := EF.Constant_Image (128, 128, 128);
+      Texture_Image : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+      Outside : constant OpenCV.Core.Mat := EF.Rigid_Texture (128, 128, 25.0, 0.0, 0.0);
+      Noise   : constant OpenCV.Core.Mat := EF.Noise (128, 128, 7);
+   begin
+      Euc_Expect_Error (Flat, Flat, Message => "constant images");
+      Euc_Expect_Error (Flat, Texture_Image, Message => "constant template");
+      Euc_Expect_Error (Texture_Image, Flat, Message => "constant moving");
+      Euc_Expect_Error (EF.Noise (128, 128, 3), EF.Noise (128, 128, 9), Message => "uncorrelated noise");
+      --  25 degrees lies outside the reliable basin: native ECC throws and no identity is
+      --  fabricated. (10 and 15 degrees are version-dependent, so they are not asserted.)
+      Euc_Expect_Error (Texture_Image, Outside, Message => "rotation outside the convergence basin");
+      --  Finite is not correct: independent noise against a texture may be accepted with a
+      --  low correlation and a wrong transform, or rejected; either outcome is repeatable.
+      begin
+         declare
+            R : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean (Texture_Image, Noise);
+         begin
+            Assert (R.Correlation < 0.2, "ECC noise vs texture correlation");
+            Assert (R = Estimate_ECC_Euclidean (Texture_Image, Noise), "ECC noise result not repeatable");
+         end;
+      exception
+         when OpenCV.OpenCV_Error => null;
+      end;
+   end ECC_Euclidean_Degenerate_And_Limits;
+
+   --  One Euclidean oracle line: same-build direct OpenCV outcome for a named fixture.
+   type Euc_Warp is array (0 .. 5) of Long_Float;
+   type Euc_Oracle_Entry is record
+      Name         : String (1 .. 24) := [others => ' '];
+      Length       : Natural := 0;
+      Iterations   : Positive := 1;
+      Epsilon      : Long_Float := 0.0;
+      Converged    : Boolean := False;
+      W            : Euc_Warp := [others => 0.0];
+      TX, TY, Theta, Rho : Long_Float := 0.0;
+      Template_Sum, Moving_Sum : Long_Long_Integer := 0;
+   end record;
+
+   package Euc_Floats is new Ada.Text_IO.Float_IO (Long_Float);
+
+   type Euc_Oracle_Table is array (1 .. 64) of Euc_Oracle_Entry;
+
+   --  Strict parser: a missing, truncated, stale-versioned or malformed file raises.
+   procedure Load_Euc_Oracle
+     (Table : out Euc_Oracle_Table; Count : out Natural;
+      Version : out String; Version_Length : out Natural)
+   is
+      File : Ada.Text_IO.File_Type;
+      Path : constant String :=
+        Ada.Environment_Variables.Value
+          ("VIDEO_ECC_EUCLIDEAN_ORACLE", "../obj/oracle/ecc-euclidean.txt");
+
+      function Word return String is
+         Result : String (1 .. 64);
+         Last   : Natural := 0;
+         Ch     : Character;
+         Eol    : Boolean;
+      begin
+         loop
+            Ada.Text_IO.Look_Ahead (File, Ch, Eol);
+            exit when Eol or else Ch /= ' ';
+            Ada.Text_IO.Get (File, Ch);
+         end loop;
+         loop
+            Ada.Text_IO.Look_Ahead (File, Ch, Eol);
+            exit when Eol or else Ch = ' ';
+            Ada.Text_IO.Get (File, Ch);
+            Last := Last + 1;
+            Result (Last) := Ch;
+         end loop;
+         return Result (1 .. Last);
+      end Word;
+
+      procedure Get_Float (Value : out Long_Float) is
+      begin
+         Euc_Floats.Get (File, Value);
+      end Get_Float;
+   begin
+      Count := 0;
+      Version := [others => ' '];
+      Version_Length := 0;
+      Table := [others => <>];
+      Ada.Text_IO.Open (File, Ada.Text_IO.In_File, Path);
+      Assert (Word = "ecc-euclidean-oracle", "Euclidean oracle magic");
+      Assert (Word = "1", "Euclidean oracle format version");
+      Ada.Text_IO.Skip_Line (File);
+      Assert (Word = "version", "Euclidean oracle version line");
+      declare
+         V : constant String := Word;
+      begin
+         Assert (V'Length <= Version'Length, "Euclidean oracle version too long");
+         Version (Version'First .. Version'First + V'Length - 1) := V;
+         Version_Length := V'Length;
+      end;
+      Ada.Text_IO.Skip_Line (File);
+      loop
+         declare
+            Tag : constant String := Word;
+         begin
+            if Tag = "end" then
+               declare
+                  Declared : Integer;
+               begin
+                  ECC_Integers.Get (File, Declared);
+                  Assert (Declared = Count, "Euclidean oracle truncated or inconsistent");
+               end;
+               exit;
+            end if;
+            Assert (Tag = "fixture" and then Count < Table'Last, "Euclidean oracle fixture line");
+            Count := Count + 1;
+            declare
+               E    : Euc_Oracle_Entry renames Table (Count);
+               Name : constant String := Word;
+            begin
+               Assert (Name'Length <= E.Name'Length, "Euclidean oracle name too long");
+               E.Name (1 .. Name'Length) := Name;
+               E.Length := Name'Length;
+               ECC_Integers.Get (File, E.Iterations);
+               Get_Float (E.Epsilon);
+               declare
+                  Outcome : constant String := Word;
+               begin
+                  Assert (Outcome = "OK" or else Outcome = "EXC", "Euclidean oracle outcome");
+                  E.Converged := Outcome = "OK";
+               end;
+               for I in E.W'Range loop
+                  Get_Float (E.W (I));
+               end loop;
+               Get_Float (E.TX);
+               Get_Float (E.TY);
+               Get_Float (E.Theta);
+               Get_Float (E.Rho);
+               ECC_Longs.Get (File, E.Template_Sum);
+               ECC_Longs.Get (File, E.Moving_Sum);
+            end;
+            Ada.Text_IO.Skip_Line (File);
+         end;
+      end loop;
+      Ada.Text_IO.Close (File);
+   exception
+      when others =>
+         if Ada.Text_IO.Is_Open (File) then
+            Ada.Text_IO.Close (File);
+         end if;
+         raise;
+   end Load_Euc_Oracle;
+
+   --  Rebuilds the Euclidean oracle's fixtures by name (independently of the C++ code).
+   function Euc_Build (Name : String) return ECC_Pair is
+      Window : constant OpenCV.Rect := (16, 16, 128, 128);
+      Theta3 : constant Long_Float := 3.0 * Degrees_To_Radians;
+      Centre_TX : constant Long_Float :=
+        63.5 - (LM.Cos (Theta3) * 63.5 - LM.Sin (Theta3) * 63.5) + 1.5;
+      Centre_TY : constant Long_Float :=
+        63.5 - (LM.Sin (Theta3) * 63.5 + LM.Cos (Theta3) * 63.5) - 1.0;
+      function Tex return OpenCV.Core.Mat is (EF.Texture (128, 128));
+      function Rigid (D, X, Y : Long_Float) return OpenCV.Core.Mat is
+        (EF.Rigid_Texture (128, 128, D, X, Y));
+      function P (D, X, Y : Long_Float) return ECC_Pair is (Tex, Rigid (D, X, Y));
+   begin
+      if Name = "identity" then return (Tex, Tex);
+      elsif Name = "translation-2-1" then return P (0.0, 2.0, 1.0);
+      elsif Name = "rot+1" then return P (1.0, 0.0, 0.0);
+      elsif Name = "rot-1" then return P (-1.0, 0.0, 0.0);
+      elsif Name = "rot+3" then return P (3.0, 0.0, 0.0);
+      elsif Name = "rot-3" then return P (-3.0, 0.0, 0.0);
+      elsif Name = "rot+3-t+2+1" then return P (3.0, 2.0, 1.0);
+      elsif Name = "rot+3-t-2-1" then return P (3.0, -2.0, -1.0);
+      elsif Name = "rot-3-t+2-1" then return P (-3.0, 2.0, -1.0);
+      elsif Name = "centred-rot+3" then return P (3.0, Centre_TX, Centre_TY);
+      elsif Name = "reversed-rot+3" then return (Rigid (3.0, 2.0, 1.0), Tex);
+      elsif Name = "photometric" then return (Tex, EF.Affine (Rigid (3.0, 2.0, 1.0), 4, 5, 20));
+      elsif Name = "constant" then
+         return (EF.Constant_Image (128, 128, 128), EF.Constant_Image (128, 128, 128));
+      elsif Name = "noise-vs-texture" then return (Tex, EF.Noise (128, 128, 7));
+      elsif Name = "noise-vs-noise" then return (EF.Noise (128, 128, 3), EF.Noise (128, 128, 9));
+      elsif Name = "rot+10-limit" then return P (10.0, 0.0, 0.0);
+      elsif Name = "rot+15-limit" then return P (15.0, 0.0, 0.0);
+      elsif Name = "rot+25-outside" then return P (25.0, 0.0, 0.0);
+      elsif Name = "it1" or else Name = "it2" or else Name = "it100-e8" or else Name = "e0.1"
+        or else Name = "e1e-8" then return P (3.0, 2.0, 1.0);
+      elsif Name = "region-both" then
+         return (EF.Texture (160, 160).Region (Window),
+                 EF.Rigid_Texture (160, 160, 3.0, 2.0, 1.0).Region (Window));
+      end if;
+      Assert (False, "unknown Euclidean oracle fixture " & Name);
+      return (Tex, Tex);
+   end Euc_Build;
+
+   Expected_Euc_Oracle_Fixtures : constant := 24;
+
+   --  Absolute angle difference modulo 2 Pi, so +-Pi boundary values compare equal.
+   function Angle_Difference (A, B : Long_Float) return Long_Float is
+      Pi     : constant Long_Float := 3.14159265358979323846;
+      D      : Long_Float := A - B;
+   begin
+      while D > Pi loop D := D - 2.0 * Pi; end loop;
+      while D < -Pi loop D := D + 2.0 * Pi; end loop;
+      return abs D;
+   end Angle_Difference;
+
+   procedure ECC_Euclidean_Direct_Oracle (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Table : Euc_Oracle_Table;
+      Count, Version_Length : Natural;
+      Version : String (1 .. 32);
+      Succeeded, Raised : Natural := 0;
+   begin
+      Load_Euc_Oracle (Table, Count, Version, Version_Length);
+      Assert (Version_Length > 0, "Euclidean oracle records no native version");
+      Assert (Count = Expected_Euc_Oracle_Fixtures, "Euclidean oracle fixture count is stale");
+      for Index in 1 .. Count loop
+         declare
+            E    : Euc_Oracle_Entry renames Table (Index);
+            Name : constant String := E.Name (1 .. E.Length);
+            Pair : constant ECC_Pair := Euc_Build (Name);
+            Options : constant ECC_Euclidean_Options :=
+              (Maximum_Iterations => E.Iterations, Epsilon => OpenCV.Float64_Value (E.Epsilon));
+         begin
+            Assert (EF.Checksum (Pair.Template) = E.Template_Sum
+                    and then EF.Checksum (Pair.Moving) = E.Moving_Sum,
+                    "Euclidean oracle fixture " & Name & " differs from the Ada fixture (stale oracle)");
+            if E.Converged then
+               declare
+                  R : constant ECC_Euclidean_Result :=
+                    Estimate_ECC_Euclidean (Pair.Template, Pair.Moving, Options);
+                  Theta : constant Long_Float := Long_Float (R.Rotation_Radians);
+                  C : constant Long_Float := LM.Cos (Theta);
+                  S : constant Long_Float := LM.Sin (Theta);
+               begin
+                  Succeeded := Succeeded + 1;
+                  --  Reconstruct the full 2 x 3 matrix from the returned value.
+                  Assert (abs (C - E.W (0)) < 1.0E-6 and then abs (-S - E.W (1)) < 1.0E-6
+                          and then abs (S - E.W (3)) < 1.0E-6 and then abs (C - E.W (4)) < 1.0E-6
+                          and then abs (LF (R.Displacement.X) - E.W (2)) < 1.0E-5
+                          and then abs (LF (R.Displacement.Y) - E.W (5)) < 1.0E-5,
+                          "Euclidean matrix reconstruction differs from the native warp for " & Name);
+                  Assert (Angle_Difference (Theta, E.Theta) < 1.0E-6,
+                          "Euclidean signed angle differs from native for " & Name);
+                  Assert (abs (LF (R.Displacement.X) - E.TX) < 1.0E-5
+                          and then abs (LF (R.Displacement.Y) - E.TY) < 1.0E-5
+                          and then abs (Long_Float (R.Correlation) - E.Rho) < 1.0E-6,
+                          "Euclidean translation/correlation differs from native for " & Name);
+               end;
+            else
+               begin
+                  declare
+                     R : constant ECC_Euclidean_Result :=
+                       Estimate_ECC_Euclidean (Pair.Template, Pair.Moving, Options);
+                     pragma Unreferenced (R);
+                  begin
+                     Assert (False, "Euclidean binding succeeded where native raised: " & Name);
+                  end;
+               exception
+                  when OpenCV.OpenCV_Error => Raised := Raised + 1;
+               end;
+            end if;
+         end;
+      end loop;
+      Assert (Succeeded > 0 and then Raised > 0, "Euclidean oracle did not cover both outcomes");
+      Assert (Succeeded + Raised = Count, "Euclidean oracle outcome accounting");
+   end ECC_Euclidean_Direct_Oracle;
+
    function Suite return AUnit.Test_Suites.Access_Test_Suite is
       Result : constant AUnit.Test_Suites.Access_Test_Suite := AUnit.Test_Suites.New_Suite;
    begin
@@ -4065,6 +4666,17 @@ package body Video_Tests is
       Result.Add_Test (Caller.Create ("ECC_Direct_Oracle", ECC_Direct_Oracle'Access));
       Result.Add_Test (Caller.Create ("ECC_Degenerate_And_Nonconvergence", ECC_Degenerate_And_Nonconvergence'Access));
       Result.Add_Test (Caller.Create ("ECC_Aspect_Ratios", ECC_Aspect_Ratios'Access));
+      Result.Add_Test (Caller.Create ("ECC_Euclidean_Defaults", ECC_Euclidean_Defaults'Access));
+      Result.Add_Test (Caller.Create ("ECC_Euclidean_Identity_And_Translation", ECC_Euclidean_Identity_And_Translation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Euclidean_Signed_Rotations", ECC_Euclidean_Signed_Rotations'Access));
+      Result.Add_Test (Caller.Create ("ECC_Euclidean_Rotation_Translation", ECC_Euclidean_Rotation_Translation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Euclidean_Centered_Rotation", ECC_Euclidean_Centered_Rotation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Euclidean_Inverse_Warp", ECC_Euclidean_Inverse_Warp'Access));
+      Result.Add_Test (Caller.Create ("ECC_Euclidean_Options_Sensitivity", ECC_Euclidean_Options_Sensitivity'Access));
+      Result.Add_Test (Caller.Create ("ECC_Euclidean_Regions_Lifetime", ECC_Euclidean_Regions_Lifetime'Access));
+      Result.Add_Test (Caller.Create ("ECC_Euclidean_Validation", ECC_Euclidean_Validation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Euclidean_Degenerate_And_Limits", ECC_Euclidean_Degenerate_And_Limits'Access));
+      Result.Add_Test (Caller.Create ("ECC_Euclidean_Direct_Oracle", ECC_Euclidean_Direct_Oracle'Access));
       return Result;
    end Suite;
 end Video_Tests;

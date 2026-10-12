@@ -30,6 +30,22 @@ inline cv::Mat texture(int rows, int cols, int dx = 0, int dy = 0) {
     return m;
 }
 
+// Task 012 rigid fixture. The native Euclidean warp W maps template coordinates to
+// moving coordinates:  moving = R(theta) * template + (tx, ty),  theta = degrees*pi/180.
+// moving(p) = signal(W^-1 p), W^-1 p = R(-theta) * (p - t), evaluated analytically (no
+// image resampling), so Ada can reproduce it exactly. theta = 0 reduces to texture().
+inline cv::Mat rigid_texture(int rows, int cols, double degrees, double tx, double ty) {
+    const double theta = degrees * 3.14159265358979323846 / 180.0;
+    const double c = std::cos(theta), s = std::sin(theta);
+    cv::Mat m(rows, cols, CV_8UC1);
+    for (int r = 0; r < rows; ++r)
+        for (int col = 0; col < cols; ++col) {
+            const double u = col - tx, v = r - ty;
+            m.at<uint8_t>(r, col) = cv::saturate_cast<uint8_t>(signal(c * u + s * v, -s * u + c * v));
+        }
+    return m;
+}
+
 inline cv::Mat photometric(const cv::Mat &m, double alpha, double beta) {
     cv::Mat out;
     m.convertTo(out, CV_8UC1, alpha, beta);

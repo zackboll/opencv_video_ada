@@ -3,6 +3,7 @@
 #include "opencv_core_module_bridge.hpp"
 
 #include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
 #include <opencv2/video/tracking.hpp>
 #include "synthetic_fixture.hpp"
 #include "ecc_fixture.hpp"
@@ -39,6 +40,25 @@ void opencv_video_test_corrupt_ecc(float *warp, double *correlation) {
         case 4: *correlation = -std::numeric_limits<double>::infinity(); break;
         case 5: warp[0] = 1.5f; break;
         case 6: warp[1] = 0.25f; break;
+        // Euclidean-only modes. 7 scales the whole linear part (a=d, b=-c still hold),
+        // 8 reflects (negative determinant), 9 NaN rotation entry, 10 asymmetric b/c.
+        case 7: warp[0] *= 1.01f; warp[1] *= 1.01f; warp[3] *= 1.01f; warp[4] *= 1.01f; break;
+        case 8: warp[4] = -warp[4]; warp[3] = -warp[3]; break;
+        case 9: warp[0] = nan; break;
+        case 10: warp[3] += 1e-3f; break;
+        // 13: a = d violated by 3e-6 only. Unit length, orthogonality and determinant all
+        // stay within their 1e-5 bounds, so ONLY the strict symmetry check can reject it.
+        case 13: warp[4] += 3e-6f; break;
+        // 11/12 replace the warp with a VALID rigid transform beyond the quarter turn
+        // (+120 and -150 degrees, translation (3,-4)); real native fits never reach it.
+        case 11: case 12: {
+            const double t = (ecc_corrupt_mode == 11 ? 120.0 : -150.0) * 3.14159265358979323846 / 180.0;
+            warp[0] = warp[4] = float(std::cos(t));
+            warp[3] = float(std::sin(t));
+            warp[1] = -warp[3];
+            warp[2] = 3.0f; warp[5] = -4.0f;
+            break;
+        }
         default: break;
     }
 }
@@ -1382,6 +1402,262 @@ void run_ecc() {
 }  // namespace
 
 
+// ECC Euclidean (Task 012): actual shim versus a direct cv::findTransformECC call.
+namespace {
+const opencv_video_ecc_euclidean_result kEucSentinel = {123.5f, -456.25f, 789.125, -321.5};
+const double kPi = 3.14159265358979323846;
+
+static_assert(sizeof(opencv_video_ecc_euclidean_result) == 24 &&
+              alignof(opencv_video_ecc_euclidean_result) == 8 &&
+              offsetof(opencv_video_ecc_euclidean_result, displacement_x) == 0 &&
+              offsetof(opencv_video_ecc_euclidean_result, displacement_y) == 4 &&
+              offsetof(opencv_video_ecc_euclidean_result, rotation_radians) == 8 &&
+              offsetof(opencv_video_ecc_euclidean_result, correlation) == 16,
+              "ECC Euclidean result layout");
+
+cv::Mat euc_warp(double theta, double tx, double ty) {
+    cv::Mat w(2, 3, CV_64F);
+    w.at<double>(0, 0) = std::cos(theta); w.at<double>(0, 1) = -std::sin(theta);
+    w.at<double>(0, 2) = tx;
+    w.at<double>(1, 0) = std::sin(theta); w.at<double>(1, 1) = std::cos(theta);
+    w.at<double>(1, 2) = ty;
+    return w;
+}
+
+cv::Mat euc_moving(const cv::Mat &tmpl, double theta, double tx, double ty) {
+    cv::Mat out;
+    cv::warpAffine(tmpl, out, euc_warp(theta, tx, ty), tmpl.size(), cv::INTER_LINEAR,
+                   cv::BORDER_REFLECT_101);
+    return out;
+}
+
+opencv_video_status euc_call(const opencv_core_mat_handle *a, const opencv_core_mat_handle *b,
+                             opencv_video_ecc_euclidean_result *r, int iterations = 50,
+                             double epsilon = 1e-4) {
+    return opencv_video_estimate_ecc_euclidean(a, b, iterations, epsilon, r);
+}
+
+void euc_unchanged(const opencv_video_ecc_euclidean_result &r, const char *message) {
+    check(std::memcmp(&r, &kEucSentinel, sizeof r) == 0, message);
+}
+
+struct EucDirect { double rho; float w[6]; double theta; };
+
+EucDirect euc_direct(const cv::Mat &a, const cv::Mat &b, int iterations = 50, double eps = 1e-4) {
+    cv::Mat warp = cv::Mat::eye(2, 3, CV_32F);
+    EucDirect d;
+    d.rho = cv::findTransformECC(a, b, warp, cv::MOTION_EUCLIDEAN,
+        cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, iterations, eps),
+        cv::noArray(), 5);
+    for (int i = 0; i < 6; ++i) d.w[i] = warp.ptr<float>()[i];
+    d.theta = std::atan2(double(d.w[3]), double(d.w[0]));
+    return d;
+}
+
+void euc_matches_direct(const opencv_video_ecc_euclidean_result &r, const EucDirect &d,
+                        const char *message) {
+    check(r.displacement_x == d.w[2] && r.displacement_y == d.w[5] &&
+          r.rotation_radians == d.theta && r.correlation == d.rho, message);
+}
+
+void run_ecc_euclidean() {
+    const int n = 128;
+    const double d2r = kPi / 180.0;
+    const cv::Mat base_image = ecc_fixture::texture(n, n);
+    auto base = ecc_handle(base_image);
+
+    // Identity and signed rotations with translation, versus the direct native call.
+    struct Case { double deg, tx, ty; } cases[] = {
+        {0, 0, 0}, {0, 2, 1}, {1, 0, 0}, {-1, 0, 0}, {3, 0, 0}, {-3, 0, 0},
+        {3, 2, 1}, {3, -2, -1}, {-3, 2, -1}};
+    for (const auto &c : cases) {
+        const double t = c.deg * d2r;
+        const cv::Mat moving_image = euc_moving(base_image, t, c.tx, c.ty);
+        auto moving = ecc_handle(moving_image);
+        opencv_video_ecc_euclidean_result r = kEucSentinel;
+        check(euc_call(base.get(), moving.get(), &r) == OPENCV_VIDEO_OK, "Euclidean valid call failed");
+        euc_matches_direct(r, euc_direct(base_image, moving_image),
+                           "Euclidean shim differs from direct native call");
+        check(std::fabs(r.rotation_radians - t) < 0.005, "Euclidean angle sign/magnitude");
+        check(std::fabs(r.displacement_x - c.tx) < 0.1 && std::fabs(r.displacement_y - c.ty) < 0.1,
+              "Euclidean translation sign/axis");
+        check(r.correlation > 0.98 && r.correlation <= 1.0 + 1e-6, "Euclidean correlation");
+        // Repeatable.
+        opencv_video_ecc_euclidean_result again = kEucSentinel;
+        check(euc_call(base.get(), moving.get(), &again) == OPENCV_VIDEO_OK &&
+              std::memcmp(&r, &again, sizeof r) == 0, "Euclidean call is not repeatable");
+        // Reversed roles negate the angle.
+        opencv_video_ecc_euclidean_result rev = kEucSentinel;
+        check(euc_call(moving.get(), base.get(), &rev) == OPENCV_VIDEO_OK, "Euclidean reversed failed");
+        check(std::fabs(rev.rotation_radians + t) < 0.005, "Euclidean reversed angle not negated");
+    }
+    check(cv::norm(output(base.get()), base_image, cv::NORM_INF) == 0, "Euclidean changed an input");
+
+    // Same handle as both inputs.
+    {
+        opencv_video_ecc_euclidean_result r = kEucSentinel;
+        check(euc_call(base.get(), base.get(), &r) == OPENCV_VIDEO_OK, "Euclidean same-handle failed");
+        check(std::fabs(r.rotation_radians) < 1e-6 && std::fabs(r.displacement_x) < 1e-6 &&
+              std::fabs(r.displacement_y) < 1e-6 && std::fabs(r.correlation - 1.0) < 1e-6,
+              "Euclidean same-handle identity");
+    }
+    // Distinct headers sharing storage.
+    {
+        auto first = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto second = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(first.get()) = output(base.get());
+        output(second.get()) = output(base.get());
+        check(output(first.get()).data == output(second.get()).data, "headers do not share storage");
+        opencv_video_ecc_euclidean_result r = kEucSentinel;
+        check(euc_call(first.get(), second.get(), &r) == OPENCV_VIDEO_OK && std::fabs(r.rotation_radians) < 1e-6,
+              "Euclidean shared-storage identity");
+        check(cv::norm(output(base.get()), base_image, cv::NORM_INF) == 0, "shared storage modified");
+    }
+
+    // Argument and option failures leave every result byte unchanged.
+    {
+        const cv::Mat mv = euc_moving(base_image, 3 * d2r, 2, 1);
+        auto moving = ecc_handle(mv);
+        opencv_video_ecc_euclidean_result r = kEucSentinel;
+        check(euc_call(nullptr, moving.get(), &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null template");
+        euc_unchanged(r, "null template changed result");
+        check(euc_call(base.get(), nullptr, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null moving");
+        euc_unchanged(r, "null moving changed result");
+        check(euc_call(base.get(), moving.get(), nullptr) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null output");
+        for (int iterations : {0, -1, 101, std::numeric_limits<int32_t>::max()}) {
+            check(euc_call(base.get(), moving.get(), &r, iterations) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                  "invalid iterations accepted");
+            euc_unchanged(r, "invalid iterations changed result");
+        }
+        for (double eps : {0.0, -1e-4, 1e-9, 0.11, std::numeric_limits<double>::quiet_NaN(),
+                           std::numeric_limits<double>::infinity()}) {
+            check(euc_call(base.get(), moving.get(), &r, 50, eps) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                  "invalid epsilon accepted");
+            euc_unchanged(r, "invalid epsilon changed result");
+        }
+        check(euc_call(base.get(), moving.get(), &r, 1, 1e-8) == OPENCV_VIDEO_OK, "options lower bound");
+        r = kEucSentinel;
+        check(euc_call(base.get(), moving.get(), &r, 100, 0.1) == OPENCV_VIDEO_OK, "options upper bound");
+        // Iteration and epsilon options reach the native call.
+        r = kEucSentinel;
+        check(euc_call(base.get(), moving.get(), &r, 1) == OPENCV_VIDEO_OK, "one iteration");
+        euc_matches_direct(r, euc_direct(base_image, mv, 1), "iteration option not forwarded");
+        opencv_video_ecc_euclidean_result full = kEucSentinel;
+        check(euc_call(base.get(), moving.get(), &full) == OPENCV_VIDEO_OK, "default call");
+        check(std::memcmp(&r, &full, sizeof r) != 0, "iteration count had no effect");
+        r = kEucSentinel;
+        check(euc_call(base.get(), moving.get(), &r, 50, 1e-8) == OPENCV_VIDEO_OK, "tight epsilon");
+        euc_matches_direct(r, euc_direct(base_image, mv, 50, 1e-8), "epsilon option not forwarded");
+        check(std::memcmp(&r, &full, sizeof r) != 0, "epsilon had no effect");
+
+        // Wrong type, channels, geometry, envelope.
+        r = kEucSentinel;
+        auto flt = matrix(n, n, OPENCV_CORE_DEPTH_FLOAT32, 1);
+        auto color = matrix(n, n, OPENCV_CORE_DEPTH_UINT8, 3);
+        auto other = matrix(n, n + 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto small = matrix(31, 31, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto wide = matrix(32, 16385, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto area_a = matrix(4097, 4096, OPENCV_CORE_DEPTH_UINT8, 1);
+        for (const opencv_core_mat_handle *bad : {flt.get(), color.get(), other.get(), small.get(),
+                                                 wide.get(), area_a.get()}) {
+            check(euc_call(base.get(), bad, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "bad moving accepted");
+            check(euc_call(bad, base.get(), &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "bad template accepted");
+            euc_unchanged(r, "bad image changed result");
+        }
+    }
+
+    // Nonconvergence is an error with the result untouched, never a fabricated identity.
+    {
+        auto constant = ecc_handle(ecc_fixture::constant(n, n, 128));
+        opencv_video_ecc_euclidean_result r = kEucSentinel;
+        check(euc_call(constant.get(), constant.get(), &r) == OPENCV_VIDEO_ERROR_OPENCV,
+              "constant images did not fail");
+        euc_unchanged(r, "nonconvergence changed result");
+        auto noise = ecc_handle(ecc_fixture::noise(n, n, 3));
+        auto noise2 = ecc_handle(ecc_fixture::noise(n, n, 9));
+        check(euc_call(noise.get(), noise2.get(), &r) == OPENCV_VIDEO_ERROR_OPENCV,
+              "uncorrelated noise did not fail");
+        euc_unchanged(r, "noise failure changed result");
+    }
+
+    // Centred rotation: the matrix translation, not the centre displacement, is returned.
+    {
+        const double t = 3 * d2r, cx = (n - 1) / 2.0, cy = (n - 1) / 2.0;
+        const double tx = cx - (std::cos(t) * cx - std::sin(t) * cy) + 1.5;
+        const double ty = cy - (std::sin(t) * cx + std::cos(t) * cy) - 1.0;
+        auto moving = ecc_handle(euc_moving(base_image, t, tx, ty));
+        opencv_video_ecc_euclidean_result r = kEucSentinel;
+        check(euc_call(base.get(), moving.get(), &r) == OPENCV_VIDEO_OK, "centred call failed");
+        check(std::fabs(r.displacement_x - tx) < 0.1 && std::fabs(r.displacement_y - ty) < 0.1 &&
+              std::fabs(r.rotation_radians - t) < 0.005, "centred rotation matrix translation");
+        check(std::fabs(r.displacement_x - 1.5) > 1.0, "centred translation equals centre displacement");
+    }
+
+    // Genuine non-contiguous Regions equal the direct call on the same Regions.
+    {
+        const cv::Mat parent_a = ecc_fixture::texture(160, 160);
+        const cv::Mat parent_b = euc_moving(parent_a, 3 * d2r, 2, 1);
+        const cv::Rect roi(16, 16, n, n);
+        auto h_a = ecc_handle(parent_a);
+        auto h_b = ecc_handle(parent_b);
+        auto region_a = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto region_b = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(region_a.get()) = output(h_a.get())(roi);
+        output(region_b.get()) = output(h_b.get())(roi);
+        check(!output(region_a.get()).isContinuous(), "fixture Region is contiguous");
+        opencv_video_ecc_euclidean_result r = kEucSentinel;
+        check(euc_call(region_a.get(), region_b.get(), &r) == OPENCV_VIDEO_OK, "Euclidean Region call failed");
+        euc_matches_direct(r, euc_direct(parent_a(roi), parent_b(roi)),
+                           "Euclidean Region differs from direct native Region call");
+        check(cv::norm(output(h_a.get()), parent_a, cv::NORM_INF) == 0 &&
+              cv::norm(output(h_b.get()), parent_b, cv::NORM_INF) == 0, "Euclidean changed Region parents");
+    }
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    {
+        auto moving = ecc_handle(euc_moving(base_image, 3 * d2r, 2, 1));
+        for (int stage : {1, 2}) for (int kind : {1, 2, 3, 4}) {
+            fault_stage = stage; fault_kind = kind;
+            opencv_video_ecc_euclidean_result r = kEucSentinel;
+            const auto code = euc_call(base.get(), moving.get(), &r);
+            fault_stage = 0;
+            check(code == (kind == 2 ? OPENCV_VIDEO_ERROR_OPENCV
+                           : kind == 3 ? OPENCV_VIDEO_ERROR_UNKNOWN : OPENCV_VIDEO_ERROR_STANDARD),
+                  "Euclidean injected exception mapped to the wrong status");
+            euc_unchanged(r, "Euclidean injected failure changed result");
+        }
+        // 1 NaN X, 2 Inf Y, 3 NaN rho, 4 -Inf rho, 5 scaled a, 6 asymmetric b, 7 scaled
+        // rotation, 8 reflection, 9 NaN rotation entry, 10 asymmetric c.
+        for (int mode : {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13}) {
+            ecc_corrupt_mode = mode;
+            opencv_video_ecc_euclidean_result r = kEucSentinel;
+            const auto code = euc_call(base.get(), moving.get(), &r);
+            ecc_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_ERROR_OPENCV, "Euclidean corrupted native output accepted");
+            euc_unchanged(r, "Euclidean corrupted native output was partially published");
+        }
+        // Valid rigid warps beyond a quarter turn are published with the atan2 angle and sign
+        // (an asin decode would return pi - theta here).
+        for (int mode : {11, 12}) {
+            ecc_corrupt_mode = mode;
+            opencv_video_ecc_euclidean_result r = kEucSentinel;
+            const auto code = euc_call(base.get(), moving.get(), &r);
+            ecc_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_OK, "Euclidean valid large-angle warp rejected");
+            const double expected = (mode == 11 ? 120.0 : -150.0) * kPi / 180.0;
+            check(std::fabs(r.rotation_radians - expected) < 1e-6, "Euclidean large angle decoded wrongly");
+            check(r.displacement_x == 3.0f && r.displacement_y == -4.0f, "Euclidean large-angle translation");
+        }
+    }
+#endif
+    auto moving = ecc_handle(euc_moving(base_image, 3 * d2r, 2, 1));
+    opencv_video_ecc_euclidean_result r = kEucSentinel;
+    check(euc_call(base.get(), moving.get(), &r) == OPENCV_VIDEO_OK, "post-fault Euclidean call failed");
+    std::cout << "PASS: ECC Euclidean shim vs direct findTransformECC, ABI layout, signs, roles, options, nonconvergence, Regions, atomicity, faults, corruption\n";
+}
+}  // namespace
+
+
 
 int main() {
     try {
@@ -1398,6 +1674,7 @@ int main() {
         run_farneback();
         run_farneback_seeded();
         run_ecc();
+        run_ecc_euclidean();
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "FAIL: " << error.what() << '\n';

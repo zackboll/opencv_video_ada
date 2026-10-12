@@ -900,15 +900,13 @@ package body OpenCV.Video is
       return Count;
    end Successful_Count;
 
-   function Estimate_ECC_Translation
+   --  Image and option preflight shared by every ECC motion model (Task 011 policy).
+   procedure Validate_ECC_Arguments
      (Template_Image : OpenCV.Core.Mat;
       Moving_Image   : OpenCV.Core.Mat;
-      Options        : ECC_Translation_Options := (others => <>))
-      return ECC_Translation_Result
+      Options        : ECC_Translation_Options)
    is
       Maximum_Pixels : constant Long_Long_Integer := 2 ** 24;
-      Native         : aliased C.ECC_Translation_Result;
-      Code           : C.Status := C.Success;
    begin
       if Template_Image.Is_Empty or else Moving_Image.Is_Empty then
          raise OpenCV.OpenCV_Error with "ECC images must be nonempty";
@@ -942,6 +940,18 @@ package body OpenCV.Video is
       then
          raise OpenCV.OpenCV_Error with "ECC Epsilon outside 1.0E-8 .. 0.1";
       end if;
+   end Validate_ECC_Arguments;
+
+   function Estimate_ECC_Translation
+     (Template_Image : OpenCV.Core.Mat;
+      Moving_Image   : OpenCV.Core.Mat;
+      Options        : ECC_Translation_Options := (others => <>))
+      return ECC_Translation_Result
+   is
+      Native         : aliased C.ECC_Translation_Result;
+      Code           : C.Status := C.Success;
+   begin
+      Validate_ECC_Arguments (Template_Image, Moving_Image, Options);
 
       declare
          procedure Template_Callback (Template_Handle : Bridge.Input_Mat_Handle) is
@@ -967,4 +977,41 @@ package body OpenCV.Video is
             Y => OpenCV.Float32_Value (Native.Displacement_Y)),
          Correlation  => OpenCV.Float64_Value (Native.Correlation));
    end Estimate_ECC_Translation;
+
+   function Estimate_ECC_Euclidean
+     (Template_Image : OpenCV.Core.Mat;
+      Moving_Image   : OpenCV.Core.Mat;
+      Options        : ECC_Euclidean_Options := (others => <>))
+      return ECC_Euclidean_Result
+   is
+      Native : aliased C.ECC_Euclidean_Result;
+      Code   : C.Status := C.Success;
+   begin
+      Validate_ECC_Arguments (Template_Image, Moving_Image, Options);
+
+      declare
+         procedure Template_Callback (Template_Handle : Bridge.Input_Mat_Handle) is
+            procedure Moving_Callback (Moving_Handle : Bridge.Input_Mat_Handle) is
+            begin
+               Code := C.Estimate_ECC_Euclidean
+                 (Template_Handle, Moving_Handle,
+                  Interfaces.Integer_32 (Options.Maximum_Iterations),
+                  Interfaces.C.double (Options.Epsilon),
+                  Native'Access);
+            end Moving_Callback;
+         begin
+            Bridge.With_Input_Handle (Moving_Image, Moving_Callback'Access);
+         end Template_Callback;
+      begin
+         Bridge.With_Input_Handle (Template_Image, Template_Callback'Access);
+      end;
+      C.Check (Code, "Video.Estimate_ECC_Euclidean");
+
+      return
+        (Displacement     =>
+           (X => OpenCV.Float32_Value (Native.Displacement_X),
+            Y => OpenCV.Float32_Value (Native.Displacement_Y)),
+         Rotation_Radians => OpenCV.Float64_Value (Native.Rotation_Radians),
+         Correlation      => OpenCV.Float64_Value (Native.Correlation));
+   end Estimate_ECC_Euclidean;
 end OpenCV.Video;
