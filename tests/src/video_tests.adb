@@ -2,6 +2,7 @@ with AUnit.Assertions;
 with AUnit.Test_Caller;
 with AUnit.Test_Fixtures;
 with Ada.Environment_Variables;
+with Ada.Exceptions;
 with Ada.Text_IO;
 with Ada.Unchecked_Conversion;
 with ECC_Fixtures;
@@ -3423,6 +3424,28 @@ package body Video_Tests is
       when OpenCV.OpenCV_Error => null;
    end ECC_Expect_Error;
 
+   --  The Ada preflight must reject before any native call. A rejection raised by the
+   --  shim carries the "Video.Estimate_ECC_Translation:" prefix added by C_API.Check, so
+   --  its presence means the Ada validation layer was bypassed.
+   procedure ECC_Expect_Preflight_Error
+     (Template, Moving : OpenCV.Core.Mat; Message : String)
+   is
+      Unused : ECC_Translation_Result;
+   begin
+      Unused := Estimate_ECC_Translation (Template, Moving);
+      Assert (False, Message & ": request accepted");
+   exception
+      when Error : OpenCV.OpenCV_Error =>
+         declare
+            Text   : constant String := Ada.Exceptions.Exception_Message (Error);
+            Marker : constant String := "Video.Estimate_ECC_Translation";
+         begin
+            Assert (Text'Length < Marker'Length
+                    or else Text (Text'First .. Text'First + Marker'Length - 1) /= Marker,
+                    Message & ": rejected by the native layer, not the Ada preflight");
+         end;
+   end ECC_Expect_Preflight_Error;
+
    procedure ECC_Default_Options (T : in out Fixture) is
       pragma Unreferenced (T);
       Defaults : constant ECC_Translation_Options := (others => <>);
@@ -3576,6 +3599,9 @@ package body Video_Tests is
       ECC_Expect_Error (Empty, Good, Message => "empty template");
       ECC_Expect_Error (Good, Empty, Message => "empty moving");
       ECC_Expect_Error (Float_Image, Float_Image, Message => "Float32 images");
+      ECC_Expect_Preflight_Error (Float_Image, Float_Image, "Float32 images");
+      ECC_Expect_Preflight_Error (Color, Color, "three-channel images");
+      ECC_Expect_Preflight_Error (Good, Other_Columns, "different columns");
       ECC_Expect_Error (Good, Float_Image, Message => "Float32 moving");
       ECC_Expect_Error (Color, Color, Message => "three-channel images");
       ECC_Expect_Error (Good, Color, Message => "three-channel moving");
