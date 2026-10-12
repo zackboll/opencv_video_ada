@@ -46,6 +46,9 @@ void opencv_video_test_corrupt_ecc(float *warp, double *correlation) {
         case 8: warp[4] = -warp[4]; warp[3] = -warp[3]; break;
         case 9: warp[0] = nan; break;
         case 10: warp[3] += 1e-3f; break;
+        // 13: a = d violated by 3e-6 only. Unit length, orthogonality and determinant all
+        // stay within their 1e-5 bounds, so ONLY the strict symmetry check can reject it.
+        case 13: warp[4] += 3e-6f; break;
         // 11/12 replace the warp with a VALID rigid transform beyond the quarter turn
         // (+120 and -150 degrees, translation (3,-4)); real native fits never reach it.
         case 11: case 12: {
@@ -1625,7 +1628,7 @@ void run_ecc_euclidean() {
         }
         // 1 NaN X, 2 Inf Y, 3 NaN rho, 4 -Inf rho, 5 scaled a, 6 asymmetric b, 7 scaled
         // rotation, 8 reflection, 9 NaN rotation entry, 10 asymmetric c.
-        for (int mode = 1; mode <= 10; ++mode) {
+        for (int mode : {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13}) {
             ecc_corrupt_mode = mode;
             opencv_video_ecc_euclidean_result r = kEucSentinel;
             const auto code = euc_call(base.get(), moving.get(), &r);
