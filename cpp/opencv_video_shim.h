@@ -220,6 +220,26 @@ opencv_video_status opencv_video_estimate_ecc_euclidean(
     double epsilon,
     opencv_video_ecc_euclidean_result *result);
 
+/* Caller-seeded ECC Euclidean alignment (Task 013). Identical to
+ * opencv_video_estimate_ecc_euclidean except the private 2x3 Float32 warp starts as
+ *   [cos(r) -sin(r) tx; sin(r) cos(r) ty]
+ * with r = initial_rotation_radians, tx/ty = initial_translation_x/y (template -> moving,
+ * rotation about the coordinate origin). The seed is passed by value; nothing is retained.
+ * Seed domain (binding policy, not an OpenCV guarantee): translations finite with
+ * |value| <= 2^20, rotation finite with |value| <= 1 radian (inside the principal asin
+ * branch of the native update). Violations return OPENCV_VIDEO_ERROR_INVALID_ARGUMENT and
+ * are never clamped. An accepted seed does not imply convergence or a correct optimum.
+ * *result is written only after every native and validation step succeeds. */
+opencv_video_status opencv_video_estimate_ecc_euclidean_seeded(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations,
+    double epsilon,
+    float initial_translation_x,
+    float initial_translation_y,
+    double initial_rotation_radians,
+    opencv_video_ecc_euclidean_result *result);
+
 #ifdef __cplusplus
 }
 #endif

@@ -724,11 +724,75 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_translation(
     }
 }
 
-extern "C" opencv_video_status opencv_video_estimate_ecc_euclidean(
-    const opencv_core_mat_handle *template_image,
-    const opencv_core_mat_handle *moving_image,
-    int32_t maximum_iterations, double epsilon,
-    opencv_video_ecc_euclidean_result *result) {
+namespace {
+// Binding-policy seed domain (docs/ecc-euclidean-seeded-source-contract.md). The angle
+// bound keeps the seed inside the principal asin branch used by the native update; it is
+// not a claim that every accepted seed converges. 2^20 is exactly representable in float.
+constexpr double kEccSeedMaximumTranslation = 1048576.0;
+constexpr double kEccSeedMaximumAngle = 1.0;
+
+// Shared Euclidean ECC core (identity-initialized and seeded entry points). `warp` is a
+// private 2x3 CV_32F matrix already initialized by the caller; native code mutates it.
+// *result is published only after native execution and every validation step succeed.
+opencv_video_status run_ecc_euclidean(const cv::Mat &tmpl, const cv::Mat &moving,
+                                      int32_t maximum_iterations, double epsilon,
+                                      cv::Mat &warp, opencv_video_ecc_euclidean_result *result) {
+    const auto *storage = warp.data;
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    opencv_video_test_fault(1);
+#endif
+    double correlation = cv::findTransformECC(
+        tmpl, moving, warp, cv::MOTION_EUCLIDEAN,
+        cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS,
+                         maximum_iterations, epsilon),
+        cv::noArray(), 5);
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    opencv_video_test_fault(2);
+    opencv_video_test_corrupt_ecc(warp.ptr<float>(), &correlation);
+#endif
+    if (warp.data != storage || warp.dims != 2 || warp.rows != 2 || warp.cols != 3 ||
+        warp.type() != CV_32FC1 || !warp.isContinuous())
+        return fail(OPENCV_VIDEO_ERROR_OPENCV, "OpenCV returned an unexpected ECC warp schema");
+    const float *w = warp.ptr<float>();
+    for (int i = 0; i < 6; ++i)
+        if (!std::isfinite(w[i]))
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite warp entry");
+    if (!std::isfinite(correlation))
+        return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite correlation");
+
+    // Rigid-transform structure: [a b; c d] = [cos -sin; sin cos]. Native writes
+    // a = d from one Float32 cast and b = -c exactly; the tolerances below are
+    // conservative Float32 bounds (see docs/ecc-euclidean-source-contract.md).
+    const double a = w[0], b = w[1], c = w[3], d = w[4];
+    constexpr double kSymmetry = 1e-6;
+    constexpr double kRigid = 1e-5;
+    if (std::fabs(a - d) > kSymmetry || std::fabs(b + c) > kSymmetry)
+        return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC Euclidean warp is not a rotation matrix");
+    if (std::fabs(a * a + c * c - 1.0) > kRigid || std::fabs(b * b + d * d - 1.0) > kRigid ||
+        std::fabs(a * b + c * d) > kRigid)
+        return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC Euclidean warp is scaled or sheared");
+    const double determinant = a * d - b * c;
+    if (!(determinant > 0.0) || std::fabs(determinant - 1.0) > kRigid)
+        return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC Euclidean warp is reflected or scaled");
+    const double theta = std::atan2(double(w[3]), double(w[0]));
+    if (!std::isfinite(theta))
+        return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite rotation angle");
+
+    opencv_video_ecc_euclidean_result computed;
+    computed.displacement_x = w[2];
+    computed.displacement_y = w[5];
+    computed.rotation_radians = theta;
+    computed.correlation = correlation;
+    *result = computed;
+    clear_error();
+    return OPENCV_VIDEO_OK;
+}
+
+opencv_video_status ecc_euclidean_entry(
+    const opencv_core_mat_handle *template_image, const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations, double epsilon, bool seeded, float seed_x, float seed_y,
+    double seed_theta, opencv_video_ecc_euclidean_result *result) {
     try {
         clear_error();
         if (result == nullptr)
@@ -741,56 +805,34 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_euclidean(
 
         // Private warp: native code may mutate it; the caller's result is untouched.
         cv::Mat warp = cv::Mat::eye(2, 3, CV_32F);
-        const auto *storage = warp.data;
-
-#ifdef OPENCV_VIDEO_TEST_FAULTS
-        opencv_video_test_fault(1);
-#endif
-        double correlation = cv::findTransformECC(
-            *tmpl, *moving, warp, cv::MOTION_EUCLIDEAN,
-            cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS,
-                             maximum_iterations, epsilon),
-            cv::noArray(), 5);
-#ifdef OPENCV_VIDEO_TEST_FAULTS
-        opencv_video_test_fault(2);
-        opencv_video_test_corrupt_ecc(warp.ptr<float>(), &correlation);
-#endif
-        if (warp.data != storage || warp.dims != 2 || warp.rows != 2 || warp.cols != 3 ||
-            warp.type() != CV_32FC1 || !warp.isContinuous())
-            return fail(OPENCV_VIDEO_ERROR_OPENCV, "OpenCV returned an unexpected ECC warp schema");
-        const float *w = warp.ptr<float>();
-        for (int i = 0; i < 6; ++i)
-            if (!std::isfinite(w[i]))
-                return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite warp entry");
-        if (!std::isfinite(correlation))
-            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite correlation");
-
-        // Rigid-transform structure: [a b; c d] = [cos -sin; sin cos]. Native writes
-        // a = d from one Float32 cast and b = -c exactly; the tolerances below are
-        // conservative Float32 bounds (see docs/ecc-euclidean-source-contract.md).
-        const double a = w[0], b = w[1], c = w[3], d = w[4];
-        constexpr double kSymmetry = 1e-6;
-        constexpr double kRigid = 1e-5;
-        if (std::fabs(a - d) > kSymmetry || std::fabs(b + c) > kSymmetry)
-            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC Euclidean warp is not a rotation matrix");
-        if (std::fabs(a * a + c * c - 1.0) > kRigid || std::fabs(b * b + d * d - 1.0) > kRigid ||
-            std::fabs(a * b + c * d) > kRigid)
-            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC Euclidean warp is scaled or sheared");
-        const double determinant = a * d - b * c;
-        if (!(determinant > 0.0) || std::fabs(determinant - 1.0) > kRigid)
-            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC Euclidean warp is reflected or scaled");
-        const double theta = std::atan2(double(w[3]), double(w[0]));
-        if (!std::isfinite(theta))
-            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite rotation angle");
-
-        opencv_video_ecc_euclidean_result computed;
-        computed.displacement_x = w[2];
-        computed.displacement_y = w[5];
-        computed.rotation_radians = theta;
-        computed.correlation = correlation;
-        *result = computed;
-        clear_error();
-        return OPENCV_VIDEO_OK;
+        if (seeded) {
+            // Widened (double) validation before any native matrix is built.
+            if (!std::isfinite(double(seed_x)) || !std::isfinite(double(seed_y)) ||
+                std::fabs(double(seed_x)) > kEccSeedMaximumTranslation ||
+                std::fabs(double(seed_y)) > kEccSeedMaximumTranslation)
+                return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                            "ECC initial translation must be finite with magnitude <= 2^20");
+            if (!std::isfinite(seed_theta) || std::fabs(seed_theta) > kEccSeedMaximumAngle)
+                return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                            "ECC initial rotation must be finite with magnitude <= 1 radian");
+            const double c = std::cos(seed_theta);
+            const double s = std::sin(seed_theta);
+            float *m = warp.ptr<float>();
+            m[0] = float(c);
+            m[1] = float(-s);
+            m[2] = seed_x;
+            m[3] = float(s);
+            m[4] = float(c);
+            m[5] = seed_y;
+            if (warp.dims != 2 || warp.rows != 2 || warp.cols != 3 || warp.type() != CV_32FC1 ||
+                !warp.isContinuous())
+                return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC seeded warp has an unexpected schema");
+            for (int i = 0; i < 6; ++i)
+                if (!std::isfinite(m[i]))
+                    return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                                "ECC seeded warp has a nonfinite element");
+        }
+        return run_ecc_euclidean(*tmpl, *moving, maximum_iterations, epsilon, warp, result);
     } catch (const cv::Exception &e) {
         return fail(OPENCV_VIDEO_ERROR_OPENCV, e.what());
     } catch (const std::exception &e) {
@@ -798,4 +840,26 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_euclidean(
     } catch (...) {
         return fail(OPENCV_VIDEO_ERROR_UNKNOWN, "Unknown ECC exception");
     }
+}
+}  // namespace
+
+extern "C" opencv_video_status opencv_video_estimate_ecc_euclidean(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations, double epsilon,
+    opencv_video_ecc_euclidean_result *result) {
+    return ecc_euclidean_entry(template_image, moving_image, maximum_iterations, epsilon,
+                               false, 0.0f, 0.0f, 0.0, result);
+}
+
+extern "C" opencv_video_status opencv_video_estimate_ecc_euclidean_seeded(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations, double epsilon,
+    float initial_translation_x, float initial_translation_y,
+    double initial_rotation_radians,
+    opencv_video_ecc_euclidean_result *result) {
+    return ecc_euclidean_entry(template_image, moving_image, maximum_iterations, epsilon,
+                               true, initial_translation_x, initial_translation_y,
+                               initial_rotation_radians, result);
 }

@@ -337,6 +337,28 @@ package OpenCV.Video is
       Moving_Image   : OpenCV.Core.Mat;
       Options        : ECC_Euclidean_Options := (others => <>))
       return ECC_Euclidean_Result;
+
+   --  Caller-seeded ECC Euclidean alignment (Task 013). The private native warp starts
+   --  from Initial_Transform instead of the identity and is refined by the same
+   --  findTransformECC call (MOTION_EUCLIDEAN, COUNT|EPS, no mask, Gaussian size 5).
+   --  Only Initial_Transform.Displacement and .Rotation_Radians initialize the warp,
+   --  using the template-to-moving convention above (rotation about the origin, no
+   --  implicit composition). Initial_Transform.Correlation is IGNORED: it is neither an
+   --  optimization input, a threshold, nor propagated to the result, so a previous
+   --  ECC_Euclidean_Result may be passed directly. The seed is a prediction for THIS
+   --  image pair; a previous pair's result is not automatically the right transform.
+   --  Seed domain (binding policy, not an OpenCV guarantee): Displacement components
+   --  finite with absolute value <= 2**20, Rotation_Radians finite with absolute value
+   --  <= 1.0 (keeps the seed inside the principal asin branch used by the native
+   --  update). Violations raise OpenCV_Error and are never clamped. An accepted seed
+   --  does not guarantee convergence; ECC may still raise on nonconvergence or end at
+   --  a wrong finite optimum. Initial_Transform is not modified.
+   function Estimate_ECC_Euclidean
+     (Template_Image    : OpenCV.Core.Mat;
+      Moving_Image      : OpenCV.Core.Mat;
+      Options           : ECC_Euclidean_Options := (others => <>);
+      Initial_Transform : ECC_Euclidean_Result)
+      return ECC_Euclidean_Result;
 private
    type PyrLK_Pyramid is new Ada.Finalization.Limited_Controlled with record
       Handle : System.Address := System.Null_Address;

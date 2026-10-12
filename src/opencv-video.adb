@@ -1014,4 +1014,62 @@ package body OpenCV.Video is
          Rotation_Radians => OpenCV.Float64_Value (Native.Rotation_Radians),
          Correlation      => OpenCV.Float64_Value (Native.Correlation));
    end Estimate_ECC_Euclidean;
+
+   function Estimate_ECC_Euclidean
+     (Template_Image    : OpenCV.Core.Mat;
+      Moving_Image      : OpenCV.Core.Mat;
+      Options           : ECC_Euclidean_Options := (others => <>);
+      Initial_Transform : ECC_Euclidean_Result)
+      return ECC_Euclidean_Result
+   is
+      Maximum_Translation : constant OpenCV.Float32_Value := 2.0 ** 20;
+      Maximum_Angle       : constant OpenCV.Float64_Value := 1.0;
+      Native : aliased C.ECC_Euclidean_Result;
+      Code   : C.Status := C.Success;
+   begin
+      Validate_ECC_Arguments (Template_Image, Moving_Image, Options);
+      --  Initial_Transform.Correlation is deliberately never read.
+      if not Is_Finite (Initial_Transform.Displacement.X)
+        or else not Is_Finite (Initial_Transform.Displacement.Y)
+        or else abs Initial_Transform.Displacement.X > Maximum_Translation
+        or else abs Initial_Transform.Displacement.Y > Maximum_Translation
+      then
+         raise OpenCV.OpenCV_Error with
+           "ECC initial displacement must be finite with absolute value <= 2**20";
+      end if;
+      if not Is_Finite (Initial_Transform.Rotation_Radians)
+        or else abs Initial_Transform.Rotation_Radians > Maximum_Angle
+      then
+         raise OpenCV.OpenCV_Error with
+           "ECC initial rotation must be finite with absolute value <= 1.0 radian";
+      end if;
+
+      declare
+         procedure Template_Callback (Template_Handle : Bridge.Input_Mat_Handle) is
+            procedure Moving_Callback (Moving_Handle : Bridge.Input_Mat_Handle) is
+            begin
+               Code := C.Estimate_ECC_Euclidean_Seeded
+                 (Template_Handle, Moving_Handle,
+                  Interfaces.Integer_32 (Options.Maximum_Iterations),
+                  Interfaces.C.double (Options.Epsilon),
+                  Interfaces.C.C_float (Initial_Transform.Displacement.X),
+                  Interfaces.C.C_float (Initial_Transform.Displacement.Y),
+                  Interfaces.C.double (Initial_Transform.Rotation_Radians),
+                  Native'Access);
+            end Moving_Callback;
+         begin
+            Bridge.With_Input_Handle (Moving_Image, Moving_Callback'Access);
+         end Template_Callback;
+      begin
+         Bridge.With_Input_Handle (Template_Image, Template_Callback'Access);
+      end;
+      C.Check (Code, "Video.Estimate_ECC_Euclidean");
+
+      return
+        (Displacement     =>
+           (X => OpenCV.Float32_Value (Native.Displacement_X),
+            Y => OpenCV.Float32_Value (Native.Displacement_Y)),
+         Rotation_Radians => OpenCV.Float64_Value (Native.Rotation_Radians),
+         Correlation      => OpenCV.Float64_Value (Native.Correlation));
+   end Estimate_ECC_Euclidean;
 end OpenCV.Video;

@@ -163,4 +163,15 @@ package OpenCV.Video.Internal.C_API is
       Epsilon                      : Interfaces.C.double;
       Result                       : access ECC_Euclidean_Result) return Status
      with Import, Convention => C, External_Name => "opencv_video_estimate_ecc_euclidean";
+
+   function Estimate_ECC_Euclidean_Seeded
+     (Template_Image, Moving_Image : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Maximum_Iterations           : Interfaces.Integer_32;
+      Epsilon                      : Interfaces.C.double;
+      Initial_Translation_X        : Interfaces.C.C_float;
+      Initial_Translation_Y        : Interfaces.C.C_float;
+      Initial_Rotation_Radians     : Interfaces.C.double;
+      Result                       : access ECC_Euclidean_Result) return Status
+     with Import, Convention => C,
+          External_Name => "opencv_video_estimate_ecc_euclidean_seeded";
 end OpenCV.Video.Internal.C_API;
