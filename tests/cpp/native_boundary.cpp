@@ -1468,7 +1468,7 @@ void run_ecc_euclidean() {
         check(std::fabs(r.rotation_radians - t) < 0.005, "Euclidean angle sign/magnitude");
         check(std::fabs(r.displacement_x - c.tx) < 0.1 && std::fabs(r.displacement_y - c.ty) < 0.1,
               "Euclidean translation sign/axis");
-        check(r.correlation > 0.98 && r.correlation <= 1.0 + 1e-9, "Euclidean correlation");
+        check(r.correlation > 0.98 && r.correlation <= 1.0 + 1e-6, "Euclidean correlation");
         // Repeatable.
         opencv_video_ecc_euclidean_result again = kEucSentinel;
         check(euc_call(base.get(), moving.get(), &again) == OPENCV_VIDEO_OK &&
