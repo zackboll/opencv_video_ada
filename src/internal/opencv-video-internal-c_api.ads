@@ -174,4 +174,23 @@ package OpenCV.Video.Internal.C_API is
       Result                       : access ECC_Euclidean_Result) return Status
      with Import, Convention => C,
           External_Name => "opencv_video_estimate_ecc_euclidean_seeded";
+   --  Mirrors opencv_video_ecc_affine_result exactly (six float, double):
+   --  offsets 0, 4, 8, 12, 16, 20, 24; size 32.
+   type ECC_Affine_Result is record
+      M00         : Interfaces.C.C_float := 1.0;
+      M01         : Interfaces.C.C_float := 0.0;
+      M02         : Interfaces.C.C_float := 0.0;
+      M10         : Interfaces.C.C_float := 0.0;
+      M11         : Interfaces.C.C_float := 1.0;
+      M12         : Interfaces.C.C_float := 0.0;
+      Correlation : Interfaces.C.double := 0.0;
+   end record
+     with Convention => C;
+
+   function Estimate_ECC_Affine
+     (Template_Image, Moving_Image : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Maximum_Iterations           : Interfaces.Integer_32;
+      Epsilon                      : Interfaces.C.double;
+      Result                       : access ECC_Affine_Result) return Status
+     with Import, Convention => C, External_Name => "opencv_video_estimate_ecc_affine";
 end OpenCV.Video.Internal.C_API;

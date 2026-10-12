@@ -2,12 +2,16 @@ with AUnit.Assertions;
 with AUnit.Test_Caller;
 with AUnit.Test_Fixtures;
 with Ada.Environment_Variables;
+with Ada.Directories;
 with Ada.Exceptions;
 with Ada.Numerics.Long_Elementary_Functions;
+with Ada.Strings.Fixed;
+with Ada.Strings.Unbounded;
 with Ada.Text_IO;
 with Ada.Unchecked_Conversion;
 with ECC_Fixtures;
 with Interfaces;
+with Interfaces.C.Strings;
 with OpenCV.Core;
 with OpenCV.Core.Float32_Vec2;
 with OpenCV.Core.Float32_Vec2_Access;
@@ -5224,6 +5228,890 @@ package body Video_Tests is
    end ECC_Seeded_Direct_Oracle;
 
 
+   ---------------------------------------------------------------------
+   --  Task 014: ECC six-parameter affine alignment
+   ---------------------------------------------------------------------
+   Aff_Linear_Tolerance      : constant Long_Float := 0.003;
+   Aff_Translation_Tolerance : constant Long_Float := 0.1;
+
+   function Aff_Pair (A, B, C, D, TX, TY : Long_Float) return ECC_Pair is
+     (Template => EF.Texture (128, 128),
+      Moving   => EF.Affine_Texture (128, 128, A, B, C, D, TX, TY));
+
+   function Aff_Near
+     (R : ECC_Affine_Result; A, B, C, D, TX, TY : Long_Float) return Boolean is
+     (abs (LF (R.Warp.M00) - A) < Aff_Linear_Tolerance
+      and then abs (LF (R.Warp.M01) - B) < Aff_Linear_Tolerance
+      and then abs (LF (R.Warp.M10) - C) < Aff_Linear_Tolerance
+      and then abs (LF (R.Warp.M11) - D) < Aff_Linear_Tolerance
+      and then abs (LF (R.Warp.M02) - TX) < Aff_Translation_Tolerance
+      and then abs (LF (R.Warp.M12) - TY) < Aff_Translation_Tolerance);
+
+   --  Applies the returned 2 x 3 matrix: template coordinates to moving coordinates.
+   procedure Aff_Map (W : ECC_Affine_Warp; X, Y : Long_Float; MX, MY : out Long_Float) is
+   begin
+      MX := LF (W.M00) * X + LF (W.M01) * Y + LF (W.M02);
+      MY := LF (W.M10) * X + LF (W.M11) * Y + LF (W.M12);
+   end Aff_Map;
+
+   --  Mean absolute difference over the interior; Aligned resamples the moving image at
+   --  W * p, which is exactly what WARP_INVERSE_MAP does with the returned matrix.
+   function Aff_Residual (Pair : ECC_Pair; W : ECC_Affine_Warp; Aligned : Boolean) return Long_Float is
+      Margin : constant := 24;
+      Sum    : Long_Float := 0.0;
+      Count  : Natural := 0;
+      MX, MY : Long_Float;
+   begin
+      for Y in Margin .. 127 - Margin loop
+         for X in Margin .. 127 - Margin loop
+            if Aligned then
+               Aff_Map (W, Long_Float (X), Long_Float (Y), MX, MY);
+            else
+               MX := Long_Float (X);
+               MY := Long_Float (Y);
+            end if;
+            Sum := Sum + abs (Sample (Pair.Moving, MX, MY)
+                              - Long_Float (OpenCV.Core.UInt8_Access.Get (Pair.Template, Y, X)));
+            Count := Count + 1;
+         end loop;
+      end loop;
+      return Sum / Long_Float (Count);
+   end Aff_Residual;
+
+   function Euc_As_Warp (R : ECC_Euclidean_Result) return ECC_Affine_Warp is
+      Theta : constant Long_Float := Long_Float (R.Rotation_Radians);
+   begin
+      return (M00 => OpenCV.Float32_Value (LM.Cos (Theta)),
+              M01 => OpenCV.Float32_Value (-LM.Sin (Theta)),
+              M02 => R.Displacement.X,
+              M10 => OpenCV.Float32_Value (LM.Sin (Theta)),
+              M11 => OpenCV.Float32_Value (LM.Cos (Theta)),
+              M12 => R.Displacement.Y);
+   end Euc_As_Warp;
+
+   procedure Aff_Expect_Error
+     (Template, Moving : OpenCV.Core.Mat;
+      Options : ECC_Affine_Options := (others => <>);
+      Message : String)
+   is
+      Unused : ECC_Affine_Result;
+   begin
+      Unused := Estimate_ECC_Affine (Template, Moving, Options);
+      Assert (False, Message & ": request accepted");
+   exception
+      when OpenCV.OpenCV_Error => null;
+   end Aff_Expect_Error;
+
+   --  A shim-originated rejection carries the "Video.Estimate_ECC_Affine" prefix.
+   procedure Aff_Expect_Preflight_Error (Template, Moving : OpenCV.Core.Mat; Message : String) is
+      Unused : ECC_Affine_Result;
+   begin
+      Unused := Estimate_ECC_Affine (Template, Moving);
+      Assert (False, Message & ": request accepted");
+   exception
+      when Error : OpenCV.OpenCV_Error =>
+         declare
+            Text   : constant String := Ada.Exceptions.Exception_Message (Error);
+            Marker : constant String := "Video.Estimate_ECC_Affine";
+         begin
+            Assert (Text'Length < Marker'Length
+                    or else Text (Text'First .. Text'First + Marker'Length - 1) /= Marker,
+                    Message & ": rejected by the native layer, not the Ada preflight");
+         end;
+   end Aff_Expect_Preflight_Error;
+
+   procedure ECC_Affine_Defaults (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Options     : constant ECC_Affine_Options := (others => <>);
+      Translation : constant ECC_Translation_Options := Options;
+      Zero        : constant ECC_Affine_Result := (others => <>);
+      Identity    : constant ECC_Affine_Warp := (M00 => 1.0, M01 => 0.0, M02 => 0.0,
+                                                  M10 => 0.0, M11 => 1.0, M12 => 0.0);
+   begin
+      Assert (Options.Maximum_Iterations = 50 and then Options.Epsilon = 0.0001
+              and then Translation = Options, "ECC affine options reuse the translation defaults");
+      Assert (Zero.Warp = Identity and then Zero.Correlation = 0.0, "ECC affine default result");
+      Assert (Zero.Warp.M00 = 1.0 and then Zero.Warp.M11 = 1.0 and then Zero.Warp.M01 = 0.0
+              and then Zero.Warp.M10 = 0.0 and then Zero.Warp.M02 = 0.0 and then Zero.Warp.M12 = 0.0,
+              "ECC affine default warp is the identity");
+   end ECC_Affine_Defaults;
+
+   procedure ECC_Affine_Identity_And_Translation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Base     : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+      Before   : constant Long_Long_Integer := EF.Checksum (Base);
+      Identity : constant ECC_Affine_Result := Estimate_ECC_Affine (Base, Base);
+      Forward  : constant ECC_Pair := Aff_Pair (1.0, 0.0, 0.0, 1.0, 2.0, 1.0);
+      Backward : constant ECC_Pair := Aff_Pair (1.0, 0.0, 0.0, 1.0, -2.0, -1.0);
+      Plus     : constant ECC_Affine_Result := Estimate_ECC_Affine (Forward.Template, Forward.Moving);
+      Minus    : constant ECC_Affine_Result := Estimate_ECC_Affine (Backward.Template, Backward.Moving);
+      Swapped  : constant ECC_Pair := Aff_Pair (1.0, 0.0, 0.0, 1.0, 1.0, 2.0);
+      Distinct : constant ECC_Affine_Result := Estimate_ECC_Affine (Swapped.Template, Swapped.Moving);
+   begin
+      Assert (Aff_Near (Identity, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+              and then abs (Identity.Correlation - 1.0) < 1.0E-6, "ECC affine identity");
+      Assert (Aff_Near (Plus, 1.0, 0.0, 0.0, 1.0, 2.0, 1.0), "ECC affine translation (2,1)");
+      Assert (Aff_Near (Minus, 1.0, 0.0, 0.0, 1.0, -2.0, -1.0), "ECC affine translation (-2,-1)");
+      --  Placement: M02 is X and M12 is Y; a transposed or swapped translation fails here.
+      Assert (abs (LF (Plus.Warp.M02) - 2.0) < 0.1 and then abs (LF (Plus.Warp.M12) - 1.0) < 0.1,
+              "ECC affine translation placed in the wrong column entries");
+      Assert (abs (LF (Distinct.Warp.M02) - 1.0) < 0.1 and then abs (LF (Distinct.Warp.M12) - 2.0) < 0.1,
+              "ECC affine (1,2) translation not distinguished from (2,1)");
+      Assert (LF (Plus.Warp.M02) > 0.0 and then LF (Minus.Warp.M02) < 0.0
+              and then LF (Plus.Warp.M12) > 0.0 and then LF (Minus.Warp.M12) < 0.0,
+              "ECC affine translation signs");
+      Assert (EF.Checksum (Base) = Before, "ECC affine modified an input");
+   end ECC_Affine_Identity_And_Translation;
+
+   procedure ECC_Affine_Rotation_And_Scale (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pi : constant Long_Float := 3.14159265358979323846;
+      Angles : constant array (1 .. 4) of Long_Float := [1.0, -1.0, 3.0, -3.0];
+   begin
+      for Degrees of Angles loop
+         declare
+            Theta : constant Long_Float := Degrees * Pi / 180.0;
+            C     : constant Long_Float := LM.Cos (Theta);
+            S     : constant Long_Float := LM.Sin (Theta);
+            Pair  : constant ECC_Pair := Aff_Pair (C, -S, S, C, 0.0, 0.0);
+            R     : constant ECC_Affine_Result := Estimate_ECC_Affine (Pair.Template, Pair.Moving);
+         begin
+            --  The sine terms sit at M10 (+sin) and M01 (-sin) for a positive rotation.
+            Assert (abs (LF (R.Warp.M10) - S) < Aff_Linear_Tolerance
+                    and then abs (LF (R.Warp.M01) + S) < Aff_Linear_Tolerance
+                    and then abs (LF (R.Warp.M00) - C) < Aff_Linear_Tolerance
+                    and then abs (LF (R.Warp.M11) - C) < Aff_Linear_Tolerance
+                    and then abs (LF (R.Warp.M02)) < Aff_Translation_Tolerance
+                    and then abs (LF (R.Warp.M12)) < Aff_Translation_Tolerance,
+                    "ECC affine signed rotation coefficients");
+            Assert ((Degrees > 0.0) = (R.Warp.M10 > 0.0), "ECC affine rotation sign");
+         end;
+      end loop;
+      declare
+         Up   : constant ECC_Pair := Aff_Pair (1.02, 0.0, 0.0, 1.02, 0.0, 0.0);
+         Down : constant ECC_Pair := Aff_Pair (0.98, 0.0, 0.0, 0.98, 0.0, 0.0);
+         Aniso : constant ECC_Pair := Aff_Pair (1.03, 0.0, 0.0, 0.97, 0.0, 0.0);
+         Tall  : constant ECC_Pair := Aff_Pair (0.97, 0.0, 0.0, 1.03, 0.0, 0.0);
+         RU : constant ECC_Affine_Result := Estimate_ECC_Affine (Up.Template, Up.Moving);
+         RD : constant ECC_Affine_Result := Estimate_ECC_Affine (Down.Template, Down.Moving);
+         RA : constant ECC_Affine_Result := Estimate_ECC_Affine (Aniso.Template, Aniso.Moving);
+         RT : constant ECC_Affine_Result := Estimate_ECC_Affine (Tall.Template, Tall.Moving);
+      begin
+         Assert (Aff_Near (RU, 1.02, 0.0, 0.0, 1.02, 0.0, 0.0), "ECC affine uniform scale up");
+         Assert (Aff_Near (RD, 0.98, 0.0, 0.0, 0.98, 0.0, 0.0), "ECC affine uniform scale down");
+         --  Nonuniform: X and Y scales are independent (M00 /= M11), which a similarity
+         --  or rigid model cannot express; swapping M00 and M11 fails here.
+         Assert (Aff_Near (RA, 1.03, 0.0, 0.0, 0.97, 0.0, 0.0), "ECC affine nonuniform scale");
+         Assert (Aff_Near (RT, 0.97, 0.0, 0.0, 1.03, 0.0, 0.0), "ECC affine nonuniform scale swapped axes");
+         Assert (LF (RA.Warp.M00) - LF (RA.Warp.M11) > 0.04
+                 and then LF (RT.Warp.M11) - LF (RT.Warp.M00) > 0.04,
+                 "ECC affine scales were forced to be equal");
+      end;
+   end ECC_Affine_Rotation_And_Scale;
+
+   procedure ECC_Affine_Shear_And_Combined (T : in out Fixture) is
+      pragma Unreferenced (T);
+      XP    : constant ECC_Pair := Aff_Pair (1.0, 0.012, 0.0, 1.0, 0.0, 0.0);
+      XL    : constant ECC_Pair := Aff_Pair (1.0, 0.03, 0.0, 1.0, 0.0, 0.0);
+      YN    : constant ECC_Pair := Aff_Pair (1.0, 0.0, -0.008, 1.0, 0.0, 0.0);
+      Both  : constant ECC_Pair := Aff_Pair (1.0, 0.012, -0.008, 1.0, 0.0, 0.0);
+      Mixed : constant ECC_Pair := Aff_Pair (1.01, 0.012, -0.008, 0.99, 2.0, 1.0);
+      Neg   : constant ECC_Pair := Aff_Pair (0.99, -0.012, 0.008, 1.01, -2.0, -1.0);
+      RX    : constant ECC_Affine_Result := Estimate_ECC_Affine (XP.Template, XP.Moving);
+      RL    : constant ECC_Affine_Result := Estimate_ECC_Affine (XL.Template, XL.Moving);
+      RY    : constant ECC_Affine_Result := Estimate_ECC_Affine (YN.Template, YN.Moving);
+      RB    : constant ECC_Affine_Result := Estimate_ECC_Affine (Both.Template, Both.Moving);
+      RM    : constant ECC_Affine_Result := Estimate_ECC_Affine (Mixed.Template, Mixed.Moving);
+      RN    : constant ECC_Affine_Result := Estimate_ECC_Affine (Neg.Template, Neg.Moving);
+      MX, MY : Long_Float;
+      type Int_Point is record
+         X, Y : Integer;
+      end record;
+      type Int_Points is array (Positive range <>) of Int_Point;
+      Fixture_Points : constant Int_Points := [(20, 30), (60, 64), (100, 90), (45, 110)];
+      Corner_Points  : constant Int_Points := [(0, 0), (127, 0), (0, 127), (64, 64)];
+   begin
+      --  Independent fixture check: moving (A p + t) reproduces template (p) at reference
+      --  points, using the forward matrix only (no inverse code shared with the fixture).
+      for P of Fixture_Points loop
+         declare
+            PX : constant Long_Float := Long_Float (P.X);
+            PY : constant Long_Float := Long_Float (P.Y);
+            QX : constant Long_Float := 1.01 * PX + 0.012 * PY + 2.0;
+            QY : constant Long_Float := -0.008 * PX + 0.99 * PY + 1.0;
+         begin
+            Assert (abs (Sample (Mixed.Moving, QX, QY)
+                         - Long_Float (OpenCV.Core.UInt8_Access.Get (Mixed.Template, P.Y, P.X))) < 2.5,
+                    "affine fixture does not map template points into the moving image");
+         end;
+      end loop;
+
+      Assert (Aff_Near (RX, 1.0, 0.012, 0.0, 1.0, 0.0, 0.0), "ECC affine X shear");
+      Assert (Aff_Near (RL, 1.0, 0.03, 0.0, 1.0, 0.0, 0.0), "ECC affine larger X shear");
+      Assert (Aff_Near (RY, 1.0, 0.0, -0.008, 1.0, 0.0, 0.0), "ECC affine negative Y shear");
+      Assert (Aff_Near (RB, 1.0, 0.012, -0.008, 1.0, 0.0, 0.0), "ECC affine two-sided shear");
+      --  Coefficient placement: X shear lives in M01 only, Y shear in M10 only, and their
+      --  signs are preserved (a swap, transpose or negation fails one of these).
+      Assert (RX.Warp.M01 > 0.008 and then abs (RX.Warp.M10) < 0.003, "X shear is not in M01");
+      Assert (RL.Warp.M01 > 0.02 and then abs (RL.Warp.M10) < 0.003, "larger X shear is not in M01");
+      Assert (RY.Warp.M10 < -0.005 and then abs (RY.Warp.M01) < 0.003, "Y shear is not in M10");
+      Assert (RB.Warp.M01 > 0.008 and then RB.Warp.M10 < -0.005, "two-sided shear signs");
+
+      Assert (Aff_Near (RM, 1.01, 0.012, -0.008, 0.99, 2.0, 1.0), "ECC affine combined transform");
+      Assert (Aff_Near (RN, 0.99, -0.012, 0.008, 1.01, -2.0, -1.0), "ECC affine combined negative transform");
+      Assert (RM.Warp.M00 > RM.Warp.M11 and then RN.Warp.M00 < RN.Warp.M11,
+              "ECC affine diagonal entries swapped");
+      Assert (RM.Warp.M02 > RM.Warp.M12 and then RM.Warp.M12 > 0.0,
+              "ECC affine translation entries swapped or negated");
+      Assert (RM.Correlation > 0.98 and then RN.Correlation > 0.98, "ECC affine combined correlation");
+
+      --  Matrix reconstruction from the returned plain values maps reference points.
+      for P of Corner_Points loop
+         declare
+            PX : constant Long_Float := Long_Float (P.X);
+            PY : constant Long_Float := Long_Float (P.Y);
+         begin
+            Aff_Map (RM.Warp, PX, PY, MX, MY);
+            Assert (abs (MX - (1.01 * PX + 0.012 * PY + 2.0)) < 0.25
+                    and then abs (MY - (-0.008 * PX + 0.99 * PY + 1.0)) < 0.25,
+                    "reconstructed affine matrix misplaces a reference point");
+         end;
+      end loop;
+   end ECC_Affine_Shear_And_Combined;
+
+   procedure ECC_Affine_Versus_Euclidean (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pair   : constant ECC_Pair := Aff_Pair (1.03, 0.03, -0.02, 0.97, 0.0, 0.0);
+      Affine : constant ECC_Affine_Result := Estimate_ECC_Affine (Pair.Template, Pair.Moving);
+      Before : constant Long_Float := Aff_Residual (Pair, (others => <>), False);
+      After  : constant Long_Float := Aff_Residual (Pair, Affine.Warp, True);
+      Rigid_Residual    : Long_Float := Long_Float'Last;
+      Rigid_Correlation : Long_Float := -1.0;
+   begin
+      begin
+         declare
+            Rigid : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean (Pair.Template, Pair.Moving);
+         begin
+            Rigid_Residual := Aff_Residual (Pair, Euc_As_Warp (Rigid), True);
+            Rigid_Correlation := Long_Float (Rigid.Correlation);
+         end;
+      exception
+         when OpenCV.OpenCV_Error => null;  --  a rigid model that cannot fit is also a distinction
+      end;
+      Assert (Aff_Near (Affine, 1.03, 0.03, -0.02, 0.97, 0.0, 0.0), "ECC affine anisotropic shear fit");
+      Assert (After < 1.0 and then After * 5.0 < Before, "ECC affine residual did not collapse");
+      --  The Euclidean model cannot represent anisotropic scale plus shear: its residual
+      --  stays several gray levels and its correlation is lower.
+      Assert (Rigid_Residual > 3.0 and then Rigid_Residual > After * 4.0,
+              "Euclidean model represents the affine fixture as well as the affine model");
+      Assert (Long_Float (Affine.Correlation) > Rigid_Correlation + 0.02,
+              "affine correlation is not higher than Euclidean");
+      --  A rigid result always has M00 = M11 and M01 = -M10; the affine result does not.
+      Assert (LF (Affine.Warp.M00) - LF (Affine.Warp.M11) > 0.04
+              and then abs (LF (Affine.Warp.M01) + LF (Affine.Warp.M10)) > 0.005,
+              "affine result is constrained like a rigid transform");
+   end ECC_Affine_Versus_Euclidean;
+
+   procedure ECC_Affine_Inverse_Warp (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Cases : constant array (1 .. 4) of ECC_Affine_Warp :=
+        [(M00 => 1.01, M01 => 0.012, M02 => 2.0, M10 => -0.008, M11 => 0.99, M12 => 1.0),
+         (M00 => 1.0, M01 => 0.03, M02 => 0.0, M10 => 0.0, M11 => 1.0, M12 => 0.0),
+         (M00 => 1.03, M01 => 0.0, M02 => 0.0, M10 => 0.0, M11 => 0.97, M12 => 0.0),
+         (M00 => 1.0, M01 => 0.0, M02 => -2.0, M10 => 0.0, M11 => 1.0, M12 => -1.0)];
+   begin
+      for W of Cases loop
+         declare
+            Pair   : constant ECC_Pair := Aff_Pair
+              (LF (W.M00), LF (W.M01), LF (W.M10), LF (W.M11), LF (W.M02), LF (W.M12));
+            R      : constant ECC_Affine_Result := Estimate_ECC_Affine (Pair.Template, Pair.Moving);
+            Before : constant Long_Float := Aff_Residual (Pair, (others => <>), False);
+            After  : constant Long_Float := Aff_Residual (Pair, R.Warp, True);
+            --  Negative controls: the same numbers used the wrong way around.
+            Negated : constant ECC_Affine_Warp :=
+              (M00 => R.Warp.M00, M01 => R.Warp.M01, M02 => -R.Warp.M02,
+               M10 => R.Warp.M10, M11 => R.Warp.M11, M12 => -R.Warp.M12);
+            Transposed : constant ECC_Affine_Warp :=
+              (M00 => R.Warp.M00, M01 => R.Warp.M10, M02 => R.Warp.M02,
+               M10 => R.Warp.M01, M11 => R.Warp.M11, M12 => R.Warp.M12);
+         begin
+            Assert (After < 1.0 and then After * 4.0 < Before,
+                    "ECC affine WARP_INVERSE_MAP resampling did not reduce the residual");
+            if abs (LF (W.M02)) + abs (LF (W.M12)) > 0.0 then
+               Assert (Aff_Residual (Pair, Negated, True) > After * 3.0,
+                       "negating the translation does not worsen alignment");
+            end if;
+            if abs (LF (W.M01)) > 0.0 then
+               Assert (Aff_Residual (Pair, Transposed, True) > After * 1.5,
+                       "transposing the linear part does not worsen alignment");
+            end if;
+         end;
+      end loop;
+   end ECC_Affine_Inverse_Warp;
+
+   procedure ECC_Affine_Options_And_Repeatability (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pair    : constant ECC_Pair := Aff_Pair (1.01, 0.012, -0.008, 0.99, 2.0, 1.0);
+      Default : constant ECC_Affine_Result := Estimate_ECC_Affine (Pair.Template, Pair.Moving);
+      One     : constant ECC_Affine_Result := Estimate_ECC_Affine
+        (Pair.Template, Pair.Moving, (Maximum_Iterations => 1, Epsilon => 1.0E-4));
+      Three   : constant ECC_Affine_Result := Estimate_ECC_Affine
+        (Pair.Template, Pair.Moving, (Maximum_Iterations => 3, Epsilon => 1.0E-4));
+      Tight   : constant ECC_Affine_Result := Estimate_ECC_Affine
+        (Pair.Template, Pair.Moving, (Maximum_Iterations => 100, Epsilon => 1.0E-8));
+      Loose   : constant ECC_Affine_Result := Estimate_ECC_Affine
+        (Pair.Template, Pair.Moving, (Maximum_Iterations => 50, Epsilon => 0.1));
+   begin
+      Assert (Aff_Near (Default, 1.01, 0.012, -0.008, 0.99, 2.0, 1.0), "ECC affine default options");
+      Assert (Default = Estimate_ECC_Affine (Pair.Template, Pair.Moving), "ECC affine not repeatable");
+      --  One iteration cannot reach the optimum: the maximum-iteration option is consumed.
+      Assert (One /= Default and then One.Correlation < Default.Correlation - 0.1,
+              "ECC affine iteration option ignored");
+      Assert (abs (LF (One.Warp.M02) - 2.0) > 0.3, "one affine iteration reached the optimum");
+      Assert (Aff_Near (Three, 1.01, 0.012, -0.008, 0.99, 2.0, 1.0), "ECC affine three iterations");
+      Assert (Aff_Near (Tight, 1.01, 0.012, -0.008, 0.99, 2.0, 1.0)
+              and then Aff_Near (Loose, 1.01, 0.012, -0.008, 0.99, 2.0, 1.0),
+              "ECC affine nondefault options lost accuracy");
+      Assert (Tight /= Loose, "ECC affine epsilon option ignored");
+      --  Correlation semantics: a finite intensity score that is not clamped by the binding.
+      Assert (abs (Default.Correlation) <= 1.0001 and then Default.Correlation > 0.98,
+              "ECC affine correlation outside the expected range");
+   end ECC_Affine_Options_And_Repeatability;
+
+   procedure ECC_Affine_Regions_Lifetime (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Window : constant OpenCV.Rect := (16, 16, 128, 128);
+      Saved, Contiguous : ECC_Affine_Result;
+      Before_A, Before_B : Long_Long_Integer;
+   begin
+      declare
+         Parent_A : constant OpenCV.Core.Mat := EF.Texture (160, 160);
+         Parent_B : constant OpenCV.Core.Mat :=
+           EF.Affine_Texture (160, 160, 1.01, 0.012, -0.008, 0.99, 2.0, 1.0);
+         Region_A : constant OpenCV.Core.Mat := Parent_A.Region (Window);
+         Region_B : constant OpenCV.Core.Mat := Parent_B.Region (Window);
+      begin
+         Before_A := EF.Checksum (Parent_A);
+         Before_B := EF.Checksum (Parent_B);
+         Assert (not Region_A.Is_Continuous and then not Region_B.Is_Continuous,
+                 "ECC affine fixture Regions are contiguous");
+         Saved := Estimate_ECC_Affine (Region_A, Region_B);
+         Contiguous := Estimate_ECC_Affine (Region_A.Clone, Region_B.Clone);
+         Assert (Saved = Contiguous, "ECC affine Region differs from the contiguous clone");
+         Assert (EF.Checksum (Parent_A) = Before_A and then EF.Checksum (Parent_B) = Before_B,
+                 "ECC affine modified a Region parent");
+         --  Template and moving may also share one allocation (same image for both roles).
+         Assert (Aff_Near (Estimate_ECC_Affine (Parent_A, Parent_A), 1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+                 "ECC affine with one image in both roles");
+      end;
+      --  Parents and Regions are finalized; the result is a plain value.
+      Assert (abs (LF (Saved.Warp.M00) - 1.01) < Aff_Linear_Tolerance
+              and then abs (LF (Saved.Warp.M01) - 0.012) < Aff_Linear_Tolerance
+              and then abs (LF (Saved.Warp.M10) + 0.008) < Aff_Linear_Tolerance
+              and then abs (LF (Saved.Warp.M11) - 0.99) < Aff_Linear_Tolerance
+              and then Saved.Correlation > 0.98, "ECC affine result after finalization");
+   end ECC_Affine_Regions_Lifetime;
+
+   procedure ECC_Affine_Other_Models_Unchanged (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Shift  : constant ECC_Pair := Euc_Pair (0.0, 2.0, 1.0);
+      Rigid  : constant ECC_Pair := Euc_Pair (3.0, 2.0, 1.0);
+      Trans  : constant ECC_Translation_Result := Estimate_ECC_Translation (Shift.Template, Shift.Moving);
+      Euc    : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean (Rigid.Template, Rigid.Moving);
+      Aff    : constant ECC_Affine_Result := Estimate_ECC_Affine (Shift.Template, Shift.Moving);
+   begin
+      Assert (ECC_Near (Trans, 2, 1), "translation ECC regression");
+      Assert (Euc_Near (Euc, 3.0, 2.0, 1.0), "Euclidean ECC regression");
+      --  A pure shift fits the affine model with an identity linear part.
+      Assert (Aff_Near (Aff, 1.0, 0.0, 0.0, 1.0, 2.0, 1.0), "affine pure-shift fit");
+      Assert (abs (LF (Aff.Warp.M02) - LF (Trans.Displacement.X)) < 0.1
+              and then abs (LF (Aff.Warp.M12) - LF (Trans.Displacement.Y)) < 0.1,
+              "affine and translation models disagree on a pure shift");
+   end ECC_Affine_Other_Models_Unchanged;
+
+   procedure ECC_Affine_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Good : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+      Empty : OpenCV.Core.Mat;
+      Float_Image : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (128, 128, (Depth => OpenCV.Core.Float32, Channels => 1));
+      Color : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (128, 128, (Depth => OpenCV.Core.UInt8, Channels => 3));
+      function From_Bits is new Ada.Unchecked_Conversion (Interfaces.Unsigned_64, OpenCV.Float64_Value);
+      Bad_Epsilons : constant array (Positive range <>) of OpenCV.Float64_Value :=
+        [0.0, -1.0E-4, 9.0E-9, 0.1000001, 1.0,
+         From_Bits (16#7FF0_0000_0000_0000#), From_Bits (16#FFF0_0000_0000_0000#),
+         From_Bits (16#7FF8_0000_0000_0000#)];
+   begin
+      Aff_Expect_Error (Empty, Good, Message => "empty template");
+      Aff_Expect_Error (Good, Empty, Message => "empty moving");
+      Aff_Expect_Preflight_Error (Float_Image, Float_Image, "Float32 images");
+      Aff_Expect_Preflight_Error (Color, Color, "three-channel images");
+      Aff_Expect_Preflight_Error (Good, EF.Texture (128, 129), "different columns");
+      Aff_Expect_Preflight_Error (EF.Texture (129, 128), Good, "different rows");
+      Aff_Expect_Error (Good, Float_Image, Message => "Float32 moving");
+      Aff_Expect_Error (EF.Texture (31, 128), EF.Texture (31, 128), Message => "31 rows");
+      Aff_Expect_Error (EF.Texture (128, 31), EF.Texture (128, 31), Message => "31 columns");
+      declare
+         Wide : constant OpenCV.Core.Mat := OpenCV.Core.Create
+           (32, 16_385, (Depth => OpenCV.Core.UInt8, Channels => 1));
+         Area : constant OpenCV.Core.Mat := OpenCV.Core.Create
+           (4_097, 4_096, (Depth => OpenCV.Core.UInt8, Channels => 1));
+      begin
+         --  Rejected before native work: no ECC temporaries (six Jacobian blocks) are built.
+         Aff_Expect_Preflight_Error (Wide, Wide, "16385 columns");
+         Aff_Expect_Preflight_Error (Area, Area, "4097 x 4096 pixels");
+      end;
+      Aff_Expect_Error (Good, Good, (Maximum_Iterations => 101, Epsilon => 0.0001),
+                        Message => "101 iterations");
+      Aff_Expect_Error (Good, Good, (Maximum_Iterations => Positive'Last, Epsilon => 0.0001),
+                        Message => "Positive'Last iterations");
+      for Epsilon of Bad_Epsilons loop
+         Aff_Expect_Error (Good, Good, (Maximum_Iterations => 50, Epsilon => Epsilon),
+                           Message => "invalid epsilon");
+      end loop;
+      declare
+         Pair  : constant ECC_Pair := Aff_Pair (1.01, 0.012, -0.008, 0.99, 2.0, 1.0);
+         Lower : constant ECC_Affine_Result := Estimate_ECC_Affine
+           (Pair.Template, Pair.Moving, (Maximum_Iterations => 1, Epsilon => 1.0E-8));
+         Upper : constant ECC_Affine_Result := Estimate_ECC_Affine
+           (Pair.Template, Pair.Moving, (Maximum_Iterations => 100, Epsilon => 0.1));
+      begin
+         Assert (Lower /= Estimate_ECC_Affine (Pair.Template, Pair.Moving), "lower option bound clamped");
+         Assert (Aff_Near (Upper, 1.01, 0.012, -0.008, 0.99, 2.0, 1.0), "ECC affine upper option bounds");
+      end;
+   end ECC_Affine_Validation;
+
+   procedure ECC_Affine_Degenerate_And_Limits (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Flat          : constant OpenCV.Core.Mat := EF.Constant_Image (128, 128, 128);
+      Texture_Image : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+      Noise         : constant OpenCV.Core.Mat := EF.Noise (128, 128, 7);
+      Reflected     : constant OpenCV.Core.Mat := EF.Affine_Texture (128, 128, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+      Strong        : constant OpenCV.Core.Mat := EF.Affine_Texture (128, 128, 1.2, 0.1, -0.1, 0.8, 5.0, -3.0);
+      Sheared       : constant OpenCV.Core.Mat := EF.Affine_Texture (128, 128, 1.0, 0.2, 0.0, 1.0, 0.0, 0.0);
+   begin
+      Aff_Expect_Error (Flat, Flat, Message => "constant images");
+      Aff_Expect_Error (Flat, Texture_Image, Message => "constant template");
+      Aff_Expect_Error (Texture_Image, Flat, Message => "constant moving");
+      Aff_Expect_Error (EF.Noise (128, 128, 3), EF.Noise (128, 128, 9), Message => "uncorrelated noise");
+      --  Reflection and large deformations lie outside the identity-initialized basin on every
+      --  qualified version: native ECC raises and no identity is fabricated.
+      Aff_Expect_Error (Texture_Image, Reflected, Message => "reflection outside the basin");
+      Aff_Expect_Error (Texture_Image, Sheared, Message => "0.2 shear outside the basin");
+      Aff_Expect_Error (Texture_Image, Strong, Message => "strong affine deformation");
+      --  Finite is not correct: independent noise against a texture is accepted with a low
+      --  correlation and a wrong (but finite, non-rigid) matrix, repeatably.
+      declare
+         R : constant ECC_Affine_Result := Estimate_ECC_Affine (Texture_Image, Noise);
+      begin
+         Assert (R.Correlation < 0.2, "ECC affine noise-vs-texture correlation");
+         Assert (abs (LF (R.Warp.M02)) > 1.0 or else abs (LF (R.Warp.M00) - 1.0) > 0.05,
+                 "noise-vs-texture was unexpectedly an identity fit");
+         Assert (R = Estimate_ECC_Affine (Texture_Image, Noise), "ECC affine noise result not repeatable");
+      exception
+         when OpenCV.OpenCV_Error => null;  --  accepted alternative on another native version
+      end;
+   end ECC_Affine_Degenerate_And_Limits;
+
+   ---------------------------------------------------------------------
+   --  Task 014: independent affine oracle (ecc-affine-oracle 1)
+   ---------------------------------------------------------------------
+   function Aff_Native_Version return Interfaces.C.Strings.chars_ptr
+     with Import, Convention => C, External_Name => "opencv_video_native_version";
+
+   function Aff_Name (Index : Positive) return String is
+   begin
+      case Index is
+         when 1 => return "identity";
+         when 2 => return "translation-2-1";
+         when 3 => return "translation-m2-m1";
+         when 4 => return "rot+1";
+         when 5 => return "rot-1";
+         when 6 => return "rot+3";
+         when 7 => return "rot-3";
+         when 8 => return "iso-1.02";
+         when 9 => return "iso-0.98";
+         when 10 => return "aniso-1.01-0.99";
+         when 11 => return "aniso-1.03-0.97";
+         when 12 => return "shear-x+0.012";
+         when 13 => return "shear-x+0.03";
+         when 14 => return "shear-y-0.008";
+         when 15 => return "shear-both";
+         when 16 => return "combined";
+         when 17 => return "combined-neg";
+         when 18 => return "rot-scale-shear-t";
+         when 19 => return "reflect-x";
+         when 20 => return "shear-0.2";
+         when 21 => return "strong-1.2-0.8";
+         when 22 => return "reversed-combined";
+         when 23 => return "photometric";
+         when 24 => return "constant";
+         when 25 => return "noise-vs-texture";
+         when 26 => return "noise-vs-noise";
+         when 27 => return "it1";
+         when 28 => return "it3";
+         when 29 => return "it100-e8";
+         when 30 => return "e0.1";
+         when 31 => return "e1e-8";
+         when 32 => return "region-both";
+         when others => raise Constraint_Error with "affine oracle fixture index";
+      end case;
+   end Aff_Name;
+
+   --  Rebuilds a named oracle fixture independently of the C++ code.
+   function Aff_Build (Name : String) return ECC_Pair is
+      Pi     : constant Long_Float := 3.14159265358979323846;
+      D2R    : constant Long_Float := Pi / 180.0;
+      Window : constant OpenCV.Rect := (16, 16, 128, 128);
+      function Tex return OpenCV.Core.Mat is (EF.Texture (128, 128));
+      function A (P, Q, R, S, TX, TY : Long_Float) return OpenCV.Core.Mat is
+        (EF.Affine_Texture (128, 128, P, Q, R, S, TX, TY));
+      function Rot (Degrees : Long_Float) return OpenCV.Core.Mat is
+         T : constant Long_Float := Degrees * Pi / 180.0;
+      begin
+         return A (LM.Cos (T), -LM.Sin (T), LM.Sin (T), LM.Cos (T), 0.0, 0.0);
+      end Rot;
+      function Comb return OpenCV.Core.Mat is (A (1.01, 0.012, -0.008, 0.99, 2.0, 1.0));
+      function P (M : OpenCV.Core.Mat) return ECC_Pair is (Tex, M);
+   begin
+      if Name = "identity" then return (Tex, Tex);
+      elsif Name = "translation-2-1" then return P (A (1.0, 0.0, 0.0, 1.0, 2.0, 1.0));
+      elsif Name = "translation-m2-m1" then return P (A (1.0, 0.0, 0.0, 1.0, -2.0, -1.0));
+      elsif Name = "rot+1" then return P (Rot (1.0));
+      elsif Name = "rot-1" then return P (Rot (-1.0));
+      elsif Name = "rot+3" then return P (Rot (3.0));
+      elsif Name = "rot-3" then return P (Rot (-3.0));
+      elsif Name = "iso-1.02" then return P (A (1.02, 0.0, 0.0, 1.02, 0.0, 0.0));
+      elsif Name = "iso-0.98" then return P (A (0.98, 0.0, 0.0, 0.98, 0.0, 0.0));
+      elsif Name = "aniso-1.01-0.99" then return P (A (1.01, 0.0, 0.0, 0.99, 0.0, 0.0));
+      elsif Name = "aniso-1.03-0.97" then return P (A (1.03, 0.0, 0.0, 0.97, 0.0, 0.0));
+      elsif Name = "shear-x+0.012" then return P (A (1.0, 0.012, 0.0, 1.0, 0.0, 0.0));
+      elsif Name = "shear-x+0.03" then return P (A (1.0, 0.03, 0.0, 1.0, 0.0, 0.0));
+      elsif Name = "shear-y-0.008" then return P (A (1.0, 0.0, -0.008, 1.0, 0.0, 0.0));
+      elsif Name = "shear-both" then return P (A (1.0, 0.012, -0.008, 1.0, 0.0, 0.0));
+      elsif Name = "combined" or else Name = "it1" or else Name = "it3" or else Name = "it100-e8"
+        or else Name = "e0.1" or else Name = "e1e-8" then return P (Comb);
+      elsif Name = "combined-neg" then return P (A (0.99, -0.012, 0.008, 1.01, -2.0, -1.0));
+      elsif Name = "rot-scale-shear-t" then
+         return P (A (1.02 * LM.Cos (2.0 * D2R), -0.98 * LM.Sin (2.0 * D2R) + 0.01,
+                      1.02 * LM.Sin (2.0 * D2R), 0.98 * LM.Cos (2.0 * D2R), 1.5, -1.0));
+      elsif Name = "reflect-x" then return P (A (-1.0, 0.0, 0.0, 1.0, 0.0, 0.0));
+      elsif Name = "shear-0.2" then return P (A (1.0, 0.2, 0.0, 1.0, 0.0, 0.0));
+      elsif Name = "strong-1.2-0.8" then return P (A (1.2, 0.1, -0.1, 0.8, 5.0, -3.0));
+      elsif Name = "reversed-combined" then return (Comb, Tex);
+      elsif Name = "photometric" then return P (EF.Affine (Comb, 4, 5, 20));
+      elsif Name = "constant" then
+         return (EF.Constant_Image (128, 128, 128), EF.Constant_Image (128, 128, 128));
+      elsif Name = "noise-vs-texture" then return P (EF.Noise (128, 128, 7));
+      elsif Name = "noise-vs-noise" then return (EF.Noise (128, 128, 3), EF.Noise (128, 128, 9));
+      elsif Name = "region-both" then
+         return (EF.Texture (160, 160).Region (Window),
+                 EF.Affine_Texture (160, 160, 1.01, 0.012, -0.008, 0.99, 2.0, 1.0).Region (Window));
+      end if;
+      raise Constraint_Error with "unknown affine oracle fixture " & Name;
+   end Aff_Build;
+
+
+   Expected_Aff_Oracle_Fixtures : constant := 32;
+
+   type Aff_Line_Array is array (1 .. 64) of Ada.Strings.Unbounded.Unbounded_String;
+   type Aff_Token_Array is array (1 .. 16) of Ada.Strings.Unbounded.Unbounded_String;
+
+   function Aff_Oracle_Path return String is
+     (Ada.Environment_Variables.Value ("VIDEO_ECC_AFFINE_ORACLE", "../obj/oracle/ecc-affine.txt"));
+
+   procedure Aff_Read_Lines (Path : String; Lines : out Aff_Line_Array; Count : out Natural) is
+      File : Ada.Text_IO.File_Type;
+   begin
+      Count := 0;
+      Lines := [others => Ada.Strings.Unbounded.Null_Unbounded_String];
+      Ada.Text_IO.Open (File, Ada.Text_IO.In_File, Path);
+      while not Ada.Text_IO.End_Of_File (File) loop
+         if Count = Lines'Last then
+            Ada.Text_IO.Close (File);
+            raise Constraint_Error with "oracle has too many lines";
+         end if;
+         Count := Count + 1;
+         Lines (Count) := Ada.Strings.Unbounded.To_Unbounded_String (Ada.Text_IO.Get_Line (File));
+      end loop;
+      Ada.Text_IO.Close (File);
+   end Aff_Read_Lines;
+
+   procedure Aff_Write_Lines (Path : String; Lines : Aff_Line_Array; Count : Natural) is
+      File : Ada.Text_IO.File_Type;
+   begin
+      Ada.Text_IO.Create (File, Ada.Text_IO.Out_File, Path);
+      for I in 1 .. Count loop
+         Ada.Text_IO.Put_Line (File, Ada.Strings.Unbounded.To_String (Lines (I)));
+      end loop;
+      Ada.Text_IO.Close (File);
+   end Aff_Write_Lines;
+
+   procedure Aff_Split (Line : String; Tokens : out Aff_Token_Array; Count : out Natural) is
+      First : Natural := Line'First;
+   begin
+      Count := 0;
+      Tokens := [others => Ada.Strings.Unbounded.Null_Unbounded_String];
+      while First <= Line'Last loop
+         if Line (First) = ' ' then
+            First := First + 1;
+         else
+            declare
+               Last : Natural := First;
+            begin
+               while Last < Line'Last and then Line (Last + 1) /= ' ' loop
+                  Last := Last + 1;
+               end loop;
+               if Count = Tokens'Last then
+                  Count := Tokens'Last + 1;
+                  return;
+               end if;
+               Count := Count + 1;
+               Tokens (Count) := Ada.Strings.Unbounded.To_Unbounded_String (Line (First .. Last));
+               First := Last + 1;
+            end;
+         end if;
+      end loop;
+   end Aff_Split;
+
+   function Aff_Tok (Tokens : Aff_Token_Array; Index : Positive) return String is
+     (Ada.Strings.Unbounded.To_String (Tokens (Index)));
+
+   --  Strict verifier. Returns the empty string when the oracle is complete, current and
+   --  agrees with the binding; otherwise a description of the first defect. It never
+   --  raises, so tampered copies can be asserted to be rejected.
+   function Verify_Aff_Oracle (Path : String; Succeeded, Raised : out Natural) return String is
+      Lines : Aff_Line_Array;
+      N     : Natural;
+      Tok   : Aff_Token_Array;
+      TC    : Natural;
+      Native : constant String := Interfaces.C.Strings.Value (Aff_Native_Version);
+      function Line (I : Positive) return String is (Ada.Strings.Unbounded.To_String (Lines (I)));
+   begin
+      Succeeded := 0;
+      Raised := 0;
+      begin
+         Aff_Read_Lines (Path, Lines, N);
+      exception
+         when others => return "oracle missing or unreadable";
+      end;
+      if N = 0 then return "oracle is empty"; end if;
+      if Line (1) /= "ecc-affine-oracle 1" then return "oracle magic or format version"; end if;
+      if N < 2 or else Line (2) /= "version " & Native then return "oracle OpenCV version differs"; end if;
+      if N < 3 or else Ada.Strings.Fixed.Head (Line (N), 4) /= "end " then
+         return "oracle truncated (no end record)";
+      end if;
+      if Line (N) /= "end" & Integer'Image (Expected_Aff_Oracle_Fixtures) then
+         return "oracle record count";
+      end if;
+      if N - 3 /= Expected_Aff_Oracle_Fixtures then return "oracle fixture record count"; end if;
+
+      for I in 1 .. Expected_Aff_Oracle_Fixtures loop
+         Aff_Split (Line (I + 2), Tok, TC);
+         if TC /= 15 or else Aff_Tok (Tok, 1) /= "fixture" then return "malformed fixture record"; end if;
+         declare
+            Name       : constant String := Aff_Name (I);
+            Iterations : constant Integer := Integer'Value (Aff_Tok (Tok, 3));
+            Epsilon    : constant Long_Float := Long_Float'Value (Aff_Tok (Tok, 4));
+            Outcome    : constant String := Aff_Tok (Tok, 5);
+            W          : array (0 .. 5) of Long_Float;
+            Rho        : Long_Float;
+            Det        : Long_Float;
+            Pair       : constant ECC_Pair := Aff_Build (Name);
+            Options    : constant ECC_Affine_Options :=
+              (Maximum_Iterations => Iterations, Epsilon => OpenCV.Float64_Value (Epsilon));
+         begin
+            if Aff_Tok (Tok, 2) /= Name then return "fixture identity or order: " & Name; end if;
+            if Outcome /= "OK" and then Outcome /= "EXC" then return "outcome token: " & Name; end if;
+            for K in W'Range loop
+               W (K) := Long_Float'Value (Aff_Tok (Tok, 6 + K));
+            end loop;
+            Rho := Long_Float'Value (Aff_Tok (Tok, 12));
+            Det := Long_Float'Value (Aff_Tok (Tok, 13));
+            if Long_Long_Integer'Value (Aff_Tok (Tok, 14)) /= EF.Checksum (Pair.Template)
+              or else Long_Long_Integer'Value (Aff_Tok (Tok, 15)) /= EF.Checksum (Pair.Moving)
+            then
+               return "fixture checksum differs: " & Name;
+            end if;
+            if Outcome = "OK" then
+               declare
+                  R : ECC_Affine_Result;
+               begin
+                  begin
+                     R := Estimate_ECC_Affine (Pair.Template, Pair.Moving, Options);
+                  exception
+                     when OpenCV.OpenCV_Error => return "binding raised where native succeeded: " & Name;
+                  end;
+                  Succeeded := Succeeded + 1;
+                  if abs (LF (R.Warp.M00) - W (0)) > 1.0E-6 then return "M00 differs: " & Name; end if;
+                  if abs (LF (R.Warp.M01) - W (1)) > 1.0E-6 then return "M01 differs: " & Name; end if;
+                  if abs (LF (R.Warp.M02) - W (2)) > 1.0E-5 then return "M02 differs: " & Name; end if;
+                  if abs (LF (R.Warp.M10) - W (3)) > 1.0E-6 then return "M10 differs: " & Name; end if;
+                  if abs (LF (R.Warp.M11) - W (4)) > 1.0E-6 then return "M11 differs: " & Name; end if;
+                  if abs (LF (R.Warp.M12) - W (5)) > 1.0E-5 then return "M12 differs: " & Name; end if;
+                  if abs (Long_Float (R.Correlation) - Rho) > 1.0E-6 then
+                     return "correlation differs: " & Name;
+                  end if;
+                  if abs (LF (R.Warp.M00) * LF (R.Warp.M11) - LF (R.Warp.M01) * LF (R.Warp.M10) - Det) > 1.0E-5 then
+                     return "determinant differs: " & Name;
+                  end if;
+               end;
+            else
+               declare
+                  R : ECC_Affine_Result;
+               begin
+                  R := Estimate_ECC_Affine (Pair.Template, Pair.Moving, Options);
+                  return "binding succeeded where native raised: " & Name & Long_Float'Image (LF (R.Warp.M00));
+               exception
+                  when OpenCV.OpenCV_Error => Raised := Raised + 1;
+               end;
+            end if;
+         end;
+      end loop;
+      return "";
+   exception
+      when others => return "oracle parse error";
+   end Verify_Aff_Oracle;
+
+   procedure ECC_Affine_Direct_Oracle (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Succeeded, Raised : Natural;
+      Defect : constant String := Verify_Aff_Oracle (Aff_Oracle_Path, Succeeded, Raised);
+   begin
+      Assert (Defect = "", "affine oracle: " & Defect);
+      Assert (Succeeded > 0 and then Raised > 0, "affine oracle did not cover both outcomes");
+      Assert (Succeeded + Raised = Expected_Aff_Oracle_Fixtures, "affine oracle outcome accounting");
+   end ECC_Affine_Direct_Oracle;
+
+   function Aff_With_Token
+     (Lines : Aff_Line_Array; Line_Index, Token_Index : Positive; Value : String) return Aff_Line_Array
+   is
+      Result : Aff_Line_Array := Lines;
+      Tok    : Aff_Token_Array;
+      TC     : Natural;
+      Text   : Ada.Strings.Unbounded.Unbounded_String;
+   begin
+      Aff_Split (Ada.Strings.Unbounded.To_String (Lines (Line_Index)), Tok, TC);
+      Tok (Token_Index) := Ada.Strings.Unbounded.To_Unbounded_String (Value);
+      for K in 1 .. TC loop
+         if K > 1 then Ada.Strings.Unbounded.Append (Text, " "); end if;
+         Ada.Strings.Unbounded.Append (Text, Tok (K));
+      end loop;
+      Result (Line_Index) := Text;
+      return Result;
+   end Aff_With_Token;
+
+   function Aff_Swap_Tokens
+     (Lines : Aff_Line_Array; Line_Index, A, B : Positive) return Aff_Line_Array
+   is
+      Tok : Aff_Token_Array;
+      TC  : Natural;
+   begin
+      Aff_Split (Ada.Strings.Unbounded.To_String (Lines (Line_Index)), Tok, TC);
+      return Aff_With_Token
+        (Aff_With_Token (Lines, Line_Index, A, Aff_Tok (Tok, B)), Line_Index, B, Aff_Tok (Tok, A));
+   end Aff_Swap_Tokens;
+
+   --  Fixture line index in the file: 2 header lines, then fixtures in table order.
+   function Aff_Line_Of (Name : String) return Positive is
+   begin
+      for I in 1 .. Expected_Aff_Oracle_Fixtures loop
+         if Aff_Name (I) = Name then return I + 2; end if;
+      end loop;
+      raise Constraint_Error with "no such affine oracle fixture " & Name;
+   end Aff_Line_Of;
+
+   procedure ECC_Affine_Oracle_Integrity (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Original : constant String := Aff_Oracle_Path;
+      Scratch  : constant String := Original & ".tampered";
+      Lines    : Aff_Line_Array;
+      Count    : Natural;
+      Succeeded, Raised : Natural;
+
+      procedure Expect_Rejected (Label, Fragment : String; Edited : Aff_Line_Array; Edited_Count : Natural) is
+      begin
+         Aff_Write_Lines (Scratch, Edited, Edited_Count);
+         declare
+            Defect : constant String := Verify_Aff_Oracle (Scratch, Succeeded, Raised);
+         begin
+            Assert (Defect /= "", "tampered affine oracle accepted: " & Label);
+            Assert (Ada.Strings.Fixed.Index (Defect, Fragment) > 0,
+                    "tampered affine oracle (" & Label & ") rejected for the wrong reason: " & Defect);
+         end;
+      end Expect_Rejected;
+
+      function Value_Of (Line_Index, Token_Index : Positive) return Long_Float is
+         Tok : Aff_Token_Array;
+         TC  : Natural;
+      begin
+         Aff_Split (Ada.Strings.Unbounded.To_String (Lines (Line_Index)), Tok, TC);
+         return Long_Float'Value (Aff_Tok (Tok, Token_Index));
+      end Value_Of;
+   begin
+      Aff_Read_Lines (Original, Lines, Count);
+      Assert (Count = Expected_Aff_Oracle_Fixtures + 3, "affine oracle line count");
+      Assert (Verify_Aff_Oracle (Original, Succeeded, Raised) = "", "pristine affine oracle rejected");
+
+      --  Missing and empty files.
+      Assert (Verify_Aff_Oracle (Original & ".does-not-exist", Succeeded, Raised) = "oracle missing or unreadable",
+              "missing affine oracle accepted");
+      Expect_Rejected ("empty", "empty", Lines, 0);
+      --  Truncated: end record dropped, and a half-written fixture record.
+      Expect_Rejected ("truncated", "truncated", Lines, Count - 1);
+      Expect_Rejected ("truncated mid-record", "truncated", Lines, Count - 5);
+      --  Format and native version.
+      Expect_Rejected ("wrong format version", "format version",
+                       Aff_With_Token (Lines, 1, 2, "2"), Count);
+      Expect_Rejected ("wrong OpenCV version", "OpenCV version",
+                       Aff_With_Token (Lines, 2, 2, "0.0.0"), Count);
+      --  Record count: end record altered, fixture record removed, extra record appended.
+      Expect_Rejected ("wrong declared count", "record count",
+                       Aff_With_Token (Lines, Count, 2, "31"), Count);
+      declare
+         Removed : Aff_Line_Array := Lines;
+      begin
+         for I in Aff_Line_Of ("it3") .. Count - 1 loop
+            Removed (I) := Lines (I + 1);
+         end loop;
+         Expect_Rejected ("missing fixture record", "record count", Removed, Count - 1);
+      end;
+      --  Fixture identity and checksum.
+      Expect_Rejected ("renamed fixture", "fixture identity",
+                       Aff_With_Token (Lines, Aff_Line_Of ("combined"), 2, "combinedX"), Count);
+      Expect_Rejected ("altered template checksum", "checksum",
+                       Aff_With_Token (Lines, Aff_Line_Of ("combined"), 14, "1"), Count);
+      Expect_Rejected ("altered moving checksum", "checksum",
+                       Aff_With_Token (Lines, Aff_Line_Of ("shear-both"), 15, "1"), Count);
+      --  Swapped coefficients (values differ, so a swap is observable).
+      Assert (abs (Value_Of (Aff_Line_Of ("combined"), 7) - Value_Of (Aff_Line_Of ("combined"), 9)) > 0.01,
+              "swap fixture M01/M10 must differ");
+      Expect_Rejected ("swapped M01 and M10", "differs",
+                       Aff_Swap_Tokens (Lines, Aff_Line_Of ("combined"), 7, 9), Count);
+      Expect_Rejected ("swapped M02 and M12", "differs",
+                       Aff_Swap_Tokens (Lines, Aff_Line_Of ("combined"), 8, 11), Count);
+      Expect_Rejected ("swapped M00 and M11", "differs",
+                       Aff_Swap_Tokens (Lines, Aff_Line_Of ("aniso-1.03-0.97"), 6, 10), Count);
+      --  Altered translation and correlation.
+      Expect_Rejected ("altered M02", "M02 differs",
+                       Aff_With_Token (Lines, Aff_Line_Of ("translation-2-1"), 8, "3.0"), Count);
+      Expect_Rejected ("altered M12", "M12 differs",
+                       Aff_With_Token (Lines, Aff_Line_Of ("translation-2-1"), 11, "-1.0"), Count);
+      Expect_Rejected ("altered correlation", "correlation differs",
+                       Aff_With_Token (Lines, Aff_Line_Of ("combined"), 12, "0.5"), Count);
+      Expect_Rejected ("altered determinant", "determinant differs",
+                       Aff_With_Token (Lines, Aff_Line_Of ("combined"), 13, "2.0"), Count);
+      --  Incorrect outcome classification, in both directions.
+      Expect_Rejected ("success recorded as exception", "binding succeeded where native raised",
+                       Aff_With_Token (Lines, Aff_Line_Of ("identity"), 5, "EXC"), Count);
+      Expect_Rejected ("exception recorded as success", "binding raised where native succeeded",
+                       Aff_With_Token (Lines, Aff_Line_Of ("reflect-x"), 5, "OK"), Count);
+      Expect_Rejected ("unknown outcome token", "outcome token",
+                       Aff_With_Token (Lines, Aff_Line_Of ("identity"), 5, "MAYBE"), Count);
+      Ada.Directories.Delete_File (Scratch);
+   end ECC_Affine_Oracle_Integrity;
+
    function Suite return AUnit.Test_Suites.Access_Test_Suite is
       Result : constant AUnit.Test_Suites.Access_Test_Suite := AUnit.Test_Suites.New_Suite;
    begin
@@ -5367,6 +6255,19 @@ package body Video_Tests is
       Result.Add_Test (Caller.Create ("ECC_Seeded_Image_Validation", ECC_Seeded_Image_Validation'Access));
       Result.Add_Test (Caller.Create ("ECC_Seeded_Nonconvergence", ECC_Seeded_Nonconvergence'Access));
       Result.Add_Test (Caller.Create ("ECC_Seeded_Direct_Oracle", ECC_Seeded_Direct_Oracle'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Defaults", ECC_Affine_Defaults'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Identity_And_Translation", ECC_Affine_Identity_And_Translation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Rotation_And_Scale", ECC_Affine_Rotation_And_Scale'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Shear_And_Combined", ECC_Affine_Shear_And_Combined'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Versus_Euclidean", ECC_Affine_Versus_Euclidean'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Inverse_Warp", ECC_Affine_Inverse_Warp'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Options_And_Repeatability", ECC_Affine_Options_And_Repeatability'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Regions_Lifetime", ECC_Affine_Regions_Lifetime'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Other_Models_Unchanged", ECC_Affine_Other_Models_Unchanged'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Validation", ECC_Affine_Validation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Degenerate_And_Limits", ECC_Affine_Degenerate_And_Limits'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Direct_Oracle", ECC_Affine_Direct_Oracle'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Oracle_Integrity", ECC_Affine_Oracle_Integrity'Access));
       return Result;
    end Suite;
 end Video_Tests;

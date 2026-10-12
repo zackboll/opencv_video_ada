@@ -1,5 +1,51 @@
 # OpenCV Video for Ada
 
+### ECC six-parameter affine alignment (Task 014)
+
+```ada
+Alignment : constant ECC_Affine_Result :=
+  OpenCV.Video.Estimate_ECC_Affine
+    (Template_Image => Previous_Image,
+     Moving_Image   => Current_Image);
+```
+
+Native `cv::findTransformECC` with `MOTION_AFFINE`, an identity-initialized private warp, `COUNT | EPS`
+termination (`ECC_Affine_Options` is a subtype of `ECC_Translation_Options`), no mask and Gaussian
+size 5. The returned matrix is the native 2x3 warp, in pixels with X right and Y down, mapping
+**template coordinates into moving coordinates**:
+
+```text
+[ M00 M01 M02 ]      moving_x = M00 * template_x + M01 * template_y + M02
+[ M10 M11 M12 ]      moving_y = M10 * template_x + M11 * template_y + M12
+```
+
+* **Full matrix, no decomposition.** All six coefficients are returned as `Float32_Value`; a general
+  affine matrix (scale, shear, rotation, reflection) has no unique rotation/scale/shear split, so
+  none is imposed. Apply the same matrix with `WARP_INVERSE_MAP` to resample the moving image into
+  the template frame; do not transpose, negate or invert it.
+* **Unlike Euclidean ECC** (Task 012) the linear part is not required to be a rotation: no
+  orthogonality or determinant test is applied, so scale, shear and finite singular matrices are
+  returned as the native optimizer produced them. Only a malformed warp or a nonfinite coefficient
+  or correlation is an error. Affine ECC updates its six coefficients directly (no `asin` rule).
+* **Correlation** is the native value, computed before the final update (it scores the previous
+  matrix). Native nonconvergence raises `OpenCV_Error`; a returned matrix is not proof of
+  registration (noise against a texture returns a finite wrong matrix with low correlation).
+* **Convergence basin.** Identity-initialized: small transforms (about 1-3% scale, a degree or
+  three of rotation, a few pixels of translation, ~0.03 shear) converge; reflection, 0.2 shear
+  and 20% scale change throw on every qualified version.
+* **Limits** are the Task 011 envelope (2-D UInt8 C1, 32 .. 16,384 per side, at most 2**24 pixels,
+  iterations 1 .. 100, epsilon 1e-8 .. 0.1). Peak memory at 2**24 pixels was measured at about
+  1.2-1.3 GB (see the task note); validation does not guarantee the memory is available.
+* The result is a plain value; Regions are accepted and inputs are never modified. It is an
+  image-alignment matrix, not a geographic mapping, camera pose, yaw or navigation estimate.
+
+Production ABI: 20 exports (`opencv_video_estimate_ecc_affine`, result size 32 bytes). AUnit has 153
+registrations. See the [task note](docs/tasks/014-ecc-affine.md), the
+[source contract](docs/ecc-affine-source-contract.md) and the
+[qualification](docs/task014-qualification.md). Task 013's post-merge Windows run (38197543379)
+completed successfully on `e16a00c`; Windows remains push-to-main only. The accepted upstream
+Farnebäck pointer-arithmetic finding does not extend to ECC.
+
 ### Caller-seeded ECC Euclidean alignment (Task 013)
 
 ```ada
@@ -561,7 +607,8 @@ The first slice does not bind:
 
 - forward/backward prebuilt-pyramid composition;
 - DIS dense optical flow and Farneback options beyond the Task 009/010 subset (Gaussian, UMat);
-- ECC registration;
+- ECC homography/perspective, masked, multiscale and caller-seeded affine registration
+  (translation, Euclidean, seeded Euclidean and identity-initialized affine ECC are bound);
 - KalmanFilter;
 - CamShift / meanShift;
 - UMat/OpenCL overloads;

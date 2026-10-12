@@ -1,6 +1,7 @@
 #ifndef OPENCV_VIDEO_ADA_SHIM_H
 #define OPENCV_VIDEO_ADA_SHIM_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -239,6 +240,61 @@ opencv_video_status opencv_video_estimate_ecc_euclidean_seeded(
     float initial_translation_y,
     double initial_rotation_radians,
     opencv_video_ecc_euclidean_result *result);
+
+/* ECC six-parameter affine alignment (Task 014): cv::findTransformECC with MOTION_AFFINE,
+ * a private identity 2x3 Float32 warp, COUNT|EPS criteria, no mask, Gaussian size 5.
+ * The native warp maps template coordinates to moving coordinates (X right, Y down):
+ *   moving_x = m00 * x + m01 * y + m02
+ *   moving_y = m10 * x + m11 * y + m12
+ * The six row-major native coefficients are returned without decomposition; apply the
+ * same matrix with WARP_INVERSE_MAP to resample the moving image into the template frame.
+ * Input and option envelope is identical to opencv_video_estimate_ecc_translation.
+ * Every coefficient and the correlation must be finite. No rigidity, orthogonality or
+ * determinant policy is applied: scale, shear, reflection and near-singular finite
+ * matrices that native ECC returns are accepted (docs/ecc-affine-source-contract.md).
+ * *result is written only after every native and validation step succeeds; on any
+ * failure it is left unchanged. Native nonconvergence is OPENCV_VIDEO_ERROR_OPENCV.
+ * Layout on qualified targets: offsets 0,4,8,12,16,20,24; size 32; alignment 8. */
+typedef struct {
+    float m00;
+    float m01;
+    float m02;
+    float m10;
+    float m11;
+    float m12;
+    double correlation;
+} opencv_video_ecc_affine_result;
+
+#if defined(__cplusplus)
+static_assert(sizeof(opencv_video_ecc_affine_result) == 32 &&
+              alignof(opencv_video_ecc_affine_result) == 8 &&
+              offsetof(opencv_video_ecc_affine_result, m00) == 0 &&
+              offsetof(opencv_video_ecc_affine_result, m01) == 4 &&
+              offsetof(opencv_video_ecc_affine_result, m02) == 8 &&
+              offsetof(opencv_video_ecc_affine_result, m10) == 12 &&
+              offsetof(opencv_video_ecc_affine_result, m11) == 16 &&
+              offsetof(opencv_video_ecc_affine_result, m12) == 20 &&
+              offsetof(opencv_video_ecc_affine_result, correlation) == 24,
+              "opencv_video_ecc_affine_result layout");
+#else
+_Static_assert(sizeof(opencv_video_ecc_affine_result) == 32 &&
+               _Alignof(opencv_video_ecc_affine_result) == 8 &&
+               offsetof(opencv_video_ecc_affine_result, m00) == 0 &&
+               offsetof(opencv_video_ecc_affine_result, m01) == 4 &&
+               offsetof(opencv_video_ecc_affine_result, m02) == 8 &&
+               offsetof(opencv_video_ecc_affine_result, m10) == 12 &&
+               offsetof(opencv_video_ecc_affine_result, m11) == 16 &&
+               offsetof(opencv_video_ecc_affine_result, m12) == 20 &&
+               offsetof(opencv_video_ecc_affine_result, correlation) == 24,
+               "opencv_video_ecc_affine_result layout");
+#endif
+
+opencv_video_status opencv_video_estimate_ecc_affine(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations,
+    double epsilon,
+    opencv_video_ecc_affine_result *result);
 
 #ifdef __cplusplus
 }

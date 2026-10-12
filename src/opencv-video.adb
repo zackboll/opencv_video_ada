@@ -1072,4 +1072,44 @@ package body OpenCV.Video is
          Rotation_Radians => OpenCV.Float64_Value (Native.Rotation_Radians),
          Correlation      => OpenCV.Float64_Value (Native.Correlation));
    end Estimate_ECC_Euclidean;
+
+   function Estimate_ECC_Affine
+     (Template_Image : OpenCV.Core.Mat;
+      Moving_Image   : OpenCV.Core.Mat;
+      Options        : ECC_Affine_Options := (others => <>))
+      return ECC_Affine_Result
+   is
+      Native : aliased C.ECC_Affine_Result;
+      Code   : C.Status := C.Success;
+   begin
+      Validate_ECC_Arguments (Template_Image, Moving_Image, Options);
+
+      declare
+         procedure Template_Callback (Template_Handle : Bridge.Input_Mat_Handle) is
+            procedure Moving_Callback (Moving_Handle : Bridge.Input_Mat_Handle) is
+            begin
+               Code := C.Estimate_ECC_Affine
+                 (Template_Handle, Moving_Handle,
+                  Interfaces.Integer_32 (Options.Maximum_Iterations),
+                  Interfaces.C.double (Options.Epsilon),
+                  Native'Access);
+            end Moving_Callback;
+         begin
+            Bridge.With_Input_Handle (Moving_Image, Moving_Callback'Access);
+         end Template_Callback;
+      begin
+         Bridge.With_Input_Handle (Template_Image, Template_Callback'Access);
+      end;
+      C.Check (Code, "Video.Estimate_ECC_Affine");
+
+      return
+        (Warp        =>
+           (M00 => OpenCV.Float32_Value (Native.M00),
+            M01 => OpenCV.Float32_Value (Native.M01),
+            M02 => OpenCV.Float32_Value (Native.M02),
+            M10 => OpenCV.Float32_Value (Native.M10),
+            M11 => OpenCV.Float32_Value (Native.M11),
+            M12 => OpenCV.Float32_Value (Native.M12)),
+         Correlation => OpenCV.Float64_Value (Native.Correlation));
+   end Estimate_ECC_Affine;
 end OpenCV.Video;

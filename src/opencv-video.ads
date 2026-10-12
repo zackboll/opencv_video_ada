@@ -359,6 +359,51 @@ package OpenCV.Video is
       Options           : ECC_Euclidean_Options := (others => <>);
       Initial_Transform : ECC_Euclidean_Result)
       return ECC_Euclidean_Result;
+   --  ECC six-parameter affine alignment (Task 014): cv::findTransformECC with
+   --  MOTION_AFFINE, privately initialized identity warp, COUNT|EPS, no mask, Gaussian
+   --  size 5. The image and option contract is exactly that of Estimate_ECC_Translation
+   --  (ECC_Affine_Options intentionally reuses the same iteration/epsilon policy).
+   subtype ECC_Affine_Options is ECC_Translation_Options;
+
+   --  The native 2x3 warp maps TEMPLATE coordinates to MOVING coordinates (X right,
+   --  Y down), expressed in pixels:
+   --     moving_x = M00 * template_x + M01 * template_y + M02
+   --     moving_y = M10 * template_x + M11 * template_y + M12
+   --  The six native coefficients are returned directly, row-major, WITHOUT any
+   --  rotation/scale/shear decomposition. To resample the moving image into the template
+   --  frame apply this same matrix with WARP_INVERSE_MAP; never transpose, negate or
+   --  invert it for that reason. The default is the identity. The linear part need not
+   --  be a rotation: scale, shear, reflection and near-singular finite matrices are
+   --  legitimate native outputs and are not rejected.
+   type ECC_Affine_Warp is record
+      M00 : OpenCV.Float32_Value := 1.0;
+      M01 : OpenCV.Float32_Value := 0.0;
+      M02 : OpenCV.Float32_Value := 0.0;
+      M10 : OpenCV.Float32_Value := 0.0;
+      M11 : OpenCV.Float32_Value := 1.0;
+      M12 : OpenCV.Float32_Value := 0.0;
+   end record;
+
+   --  Correlation is the native value, computed before the final update. It is an image
+   --  intensity measure, neither clamped nor a confidence. The result is a plain Ada
+   --  value and owns no native resource. It is an image-alignment matrix, not a
+   --  geographic mapping, camera pose, yaw or verified navigation estimate.
+   type ECC_Affine_Result is record
+      Warp        : ECC_Affine_Warp := (others => <>);
+      Correlation : OpenCV.Float64_Value := 0.0;
+   end record;
+
+   --  Native nonconvergence (constant or uncorrelated images, transforms outside the
+   --  identity-initialized convergence basin) raises OpenCV_Error; no identity result is
+   --  fabricated. A returned finite matrix means native ECC returned and the binding
+   --  schema held, NOT that the images are reliably registered. Peak memory grows with
+   --  image area (six Float32 Jacobian blocks per pixel); validation does not guarantee
+   --  sufficient system memory.
+   function Estimate_ECC_Affine
+     (Template_Image : OpenCV.Core.Mat;
+      Moving_Image   : OpenCV.Core.Mat;
+      Options        : ECC_Affine_Options := (others => <>))
+      return ECC_Affine_Result;
 private
    type PyrLK_Pyramid is new Ada.Finalization.Limited_Controlled with record
       Handle : System.Address := System.Null_Address;
