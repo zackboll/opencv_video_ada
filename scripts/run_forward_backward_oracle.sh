@@ -36,4 +36,11 @@ env -u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u LIBRARY_PATH \
     -u GCC_EXEC_PREFIX -u COMPILER_PATH \
     "$compiler" "$@" -std=c++17 -Wall -Wextra -Wpedantic -Werror $cflags \
     tests/cpp/direct_oracle.cpp $("$pkg_config" --libs "$package") -o obj/oracle/direct-oracle
+# Independent ECC translation oracle: same compiler/flags, own output file and format.
+env -u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u LIBRARY_PATH \
+    -u GCC_EXEC_PREFIX -u COMPILER_PATH \
+    "$compiler" "$@" -std=c++17 -Wall -Wextra -Wpedantic -Werror $cflags \
+    tests/cpp/ecc_oracle.cpp $("$pkg_config" --libs "$package") -o obj/oracle/ecc-oracle
+rm -f obj/oracle/ecc-translation.txt
+sh scripts/run_native.sh obj/oracle/ecc-oracle obj/oracle/ecc-translation.txt
 sh scripts/run_native.sh obj/oracle/direct-oracle obj/oracle/forward-backward.txt obj/oracle/trackability.txt obj/oracle/farneback.txt obj/oracle/farneback-seeded.txt

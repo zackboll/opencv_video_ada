@@ -36,6 +36,19 @@ inline cv::Mat photometric(const cv::Mat &m, double alpha, double beta) {
     return out;
 }
 
+// Exact integer photometric map: sat(floor((v*num + den/2)/den) + beta). No floating
+// rounding, so Ada and C++ build identical pixels.
+inline cv::Mat affine_int(const cv::Mat &m, int num, int den, int beta) {
+    cv::Mat out(m.rows, m.cols, CV_8UC1);
+    for (int r = 0; r < m.rows; ++r)
+        for (int c = 0; c < m.cols; ++c) {
+            const int v = m.at<uint8_t>(r, c);
+            const int q = (v * num + den / 2) / den + beta;
+            out.at<uint8_t>(r, c) = uint8_t(q < 0 ? 0 : q > 255 ? 255 : q);
+        }
+    return out;
+}
+
 // Deterministic LCG noise: poorly correlated with any texture.
 inline cv::Mat noise(int rows, int cols, uint32_t seed) {
     cv::Mat m(rows, cols, CV_8UC1);
