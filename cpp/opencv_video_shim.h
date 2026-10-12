@@ -194,6 +194,32 @@ opencv_video_status opencv_video_estimate_ecc_translation(
     double epsilon,
     opencv_video_ecc_translation_result *result);
 
+/* ECC Euclidean alignment (Task 012): cv::findTransformECC with MOTION_EUCLIDEAN, a
+ * private identity 2x3 Float32 warp, COUNT|EPS criteria, no mask, Gaussian size 5.
+ * The native warp maps template coordinates to moving coordinates:
+ *   moving_x = cos(t) * x - sin(t) * y + displacement_x
+ *   moving_y = sin(t) * x + cos(t) * y + displacement_y
+ * (X right, Y down; rotation about the coordinate origin, not the image centre).
+ * rotation_radians = atan2(warp[1][0], warp[0][0]) of the returned warp, in [-pi, pi].
+ * Input and option envelope is identical to opencv_video_estimate_ecc_translation.
+ * The returned warp must be a finite rotation (a = d, b = -c, unit columns,
+ * determinant +1 within Float32 tolerance) or the call fails.
+ * *result is written only after every native and validation step succeeds; on any
+ * failure it is left unchanged. Native nonconvergence is OPENCV_VIDEO_ERROR_OPENCV. */
+typedef struct {
+    float displacement_x;
+    float displacement_y;
+    double rotation_radians;
+    double correlation;
+} opencv_video_ecc_euclidean_result;
+
+opencv_video_status opencv_video_estimate_ecc_euclidean(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations,
+    double epsilon,
+    opencv_video_ecc_euclidean_result *result);
+
 #ifdef __cplusplus
 }
 #endif

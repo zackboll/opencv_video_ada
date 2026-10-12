@@ -147,4 +147,20 @@ package OpenCV.Video.Internal.C_API is
       Epsilon                      : Interfaces.C.double;
       Result                       : access ECC_Translation_Result) return Status
      with Import, Convention => C, External_Name => "opencv_video_estimate_ecc_translation";
+   --  Mirrors opencv_video_ecc_euclidean_result exactly (float, float, double, double):
+   --  offsets 0, 4, 8, 16; size 24.
+   type ECC_Euclidean_Result is record
+      Displacement_X   : Interfaces.C.C_float := 0.0;
+      Displacement_Y   : Interfaces.C.C_float := 0.0;
+      Rotation_Radians : Interfaces.C.double := 0.0;
+      Correlation      : Interfaces.C.double := 0.0;
+   end record
+     with Convention => C;
+
+   function Estimate_ECC_Euclidean
+     (Template_Image, Moving_Image : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Maximum_Iterations           : Interfaces.Integer_32;
+      Epsilon                      : Interfaces.C.double;
+      Result                       : access ECC_Euclidean_Result) return Status
+     with Import, Convention => C, External_Name => "opencv_video_estimate_ecc_euclidean";
 end OpenCV.Video.Internal.C_API;

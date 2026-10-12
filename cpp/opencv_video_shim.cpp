@@ -629,6 +629,38 @@ namespace {
 constexpr int kEccMinimumDimension = 32;
 constexpr int kEccMaximumDimension = 16384;
 constexpr int64_t kEccMaximumPixels = int64_t(1) << 24;
+
+// Image and option envelope shared by every ECC motion model (Task 011 policy,
+// unchanged). Resolves both handles; on failure no output pointer is meaningful.
+opencv_video_status validate_ecc_inputs(const opencv_core_mat_handle *template_image,
+                                        const opencv_core_mat_handle *moving_image,
+                                        int32_t maximum_iterations, double epsilon,
+                                        const cv::Mat **tmpl_out, const cv::Mat **moving_out) {
+    const cv::Mat *tmpl = nullptr;
+    const cv::Mat *moving = nullptr;
+    auto status = resolve_input(template_image, &tmpl, "template image");
+    if (status != OPENCV_VIDEO_OK) return status;
+    status = resolve_input(moving_image, &moving, "moving image");
+    if (status != OPENCV_VIDEO_OK) return status;
+    if (tmpl->empty() || moving->empty() || tmpl->dims != 2 || moving->dims != 2 ||
+        tmpl->type() != CV_8UC1 || moving->type() != CV_8UC1 ||
+        tmpl->size() != moving->size())
+        return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                    "ECC images must be matching nonempty 2-D UInt8 C1 Mats");
+    if (tmpl->rows < kEccMinimumDimension || tmpl->cols < kEccMinimumDimension ||
+        tmpl->rows > kEccMaximumDimension || tmpl->cols > kEccMaximumDimension ||
+        int64_t(tmpl->rows) * int64_t(tmpl->cols) > kEccMaximumPixels ||
+        tmpl->step[0] > size_t(std::numeric_limits<int>::max()) ||
+        moving->step[0] > size_t(std::numeric_limits<int>::max()))
+        return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                    "ECC image geometry outside 32..16384 per side and 2^24 pixels");
+    if (maximum_iterations < 1 || maximum_iterations > 100 || !std::isfinite(epsilon) ||
+        epsilon < 1e-8 || epsilon > 0.1)
+        return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Invalid ECC options");
+    *tmpl_out = tmpl;
+    *moving_out = moving;
+    return OPENCV_VIDEO_OK;
+}
 }  // namespace
 
 extern "C" opencv_video_status opencv_video_estimate_ecc_translation(
@@ -642,25 +674,9 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_translation(
             return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Null ECC result");
         const cv::Mat *tmpl = nullptr;
         const cv::Mat *moving = nullptr;
-        auto status = resolve_input(template_image, &tmpl, "template image");
+        auto status = validate_ecc_inputs(template_image, moving_image, maximum_iterations,
+                                          epsilon, &tmpl, &moving);
         if (status != OPENCV_VIDEO_OK) return status;
-        status = resolve_input(moving_image, &moving, "moving image");
-        if (status != OPENCV_VIDEO_OK) return status;
-        if (tmpl->empty() || moving->empty() || tmpl->dims != 2 || moving->dims != 2 ||
-            tmpl->type() != CV_8UC1 || moving->type() != CV_8UC1 ||
-            tmpl->size() != moving->size())
-            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
-                        "ECC images must be matching nonempty 2-D UInt8 C1 Mats");
-        if (tmpl->rows < kEccMinimumDimension || tmpl->cols < kEccMinimumDimension ||
-            tmpl->rows > kEccMaximumDimension || tmpl->cols > kEccMaximumDimension ||
-            int64_t(tmpl->rows) * int64_t(tmpl->cols) > kEccMaximumPixels ||
-            tmpl->step[0] > size_t(std::numeric_limits<int>::max()) ||
-            moving->step[0] > size_t(std::numeric_limits<int>::max()))
-            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
-                        "ECC image geometry outside 32..16384 per side and 2^24 pixels");
-        if (maximum_iterations < 1 || maximum_iterations > 100 || !std::isfinite(epsilon) ||
-            epsilon < 1e-8 || epsilon > 0.1)
-            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Invalid ECC options");
 
         // Private warp: native code may mutate it; the caller's result is untouched.
         cv::Mat warp = cv::Mat::eye(2, 3, CV_32F);
@@ -695,6 +711,82 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_translation(
         opencv_video_ecc_translation_result computed;
         computed.displacement_x = w[2];
         computed.displacement_y = w[5];
+        computed.correlation = correlation;
+        *result = computed;
+        clear_error();
+        return OPENCV_VIDEO_OK;
+    } catch (const cv::Exception &e) {
+        return fail(OPENCV_VIDEO_ERROR_OPENCV, e.what());
+    } catch (const std::exception &e) {
+        return fail(OPENCV_VIDEO_ERROR_STANDARD, e.what());
+    } catch (...) {
+        return fail(OPENCV_VIDEO_ERROR_UNKNOWN, "Unknown ECC exception");
+    }
+}
+
+extern "C" opencv_video_status opencv_video_estimate_ecc_euclidean(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations, double epsilon,
+    opencv_video_ecc_euclidean_result *result) {
+    try {
+        clear_error();
+        if (result == nullptr)
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Null ECC result");
+        const cv::Mat *tmpl = nullptr;
+        const cv::Mat *moving = nullptr;
+        auto status = validate_ecc_inputs(template_image, moving_image, maximum_iterations,
+                                          epsilon, &tmpl, &moving);
+        if (status != OPENCV_VIDEO_OK) return status;
+
+        // Private warp: native code may mutate it; the caller's result is untouched.
+        cv::Mat warp = cv::Mat::eye(2, 3, CV_32F);
+        const auto *storage = warp.data;
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+        opencv_video_test_fault(1);
+#endif
+        double correlation = cv::findTransformECC(
+            *tmpl, *moving, warp, cv::MOTION_EUCLIDEAN,
+            cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS,
+                             maximum_iterations, epsilon),
+            cv::noArray(), 5);
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+        opencv_video_test_fault(2);
+        opencv_video_test_corrupt_ecc(warp.ptr<float>(), &correlation);
+#endif
+        if (warp.data != storage || warp.dims != 2 || warp.rows != 2 || warp.cols != 3 ||
+            warp.type() != CV_32FC1 || !warp.isContinuous())
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "OpenCV returned an unexpected ECC warp schema");
+        const float *w = warp.ptr<float>();
+        for (int i = 0; i < 6; ++i)
+            if (!std::isfinite(w[i]))
+                return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite warp entry");
+        if (!std::isfinite(correlation))
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite correlation");
+
+        // Rigid-transform structure: [a b; c d] = [cos -sin; sin cos]. Native writes
+        // a = d from one Float32 cast and b = -c exactly; the tolerances below are
+        // conservative Float32 bounds (see docs/ecc-euclidean-source-contract.md).
+        const double a = w[0], b = w[1], c = w[3], d = w[4];
+        constexpr double kSymmetry = 1e-6;
+        constexpr double kRigid = 1e-5;
+        if (std::fabs(a - d) > kSymmetry || std::fabs(b + c) > kSymmetry)
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC Euclidean warp is not a rotation matrix");
+        if (std::fabs(a * a + c * c - 1.0) > kRigid || std::fabs(b * b + d * d - 1.0) > kRigid ||
+            std::fabs(a * b + c * d) > kRigid)
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC Euclidean warp is scaled or sheared");
+        const double determinant = a * d - b * c;
+        if (!(determinant > 0.0) || std::fabs(determinant - 1.0) > kRigid)
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC Euclidean warp is reflected or scaled");
+        const double theta = std::atan2(double(w[3]), double(w[0]));
+        if (!std::isfinite(theta))
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite rotation angle");
+
+        opencv_video_ecc_euclidean_result computed;
+        computed.displacement_x = w[2];
+        computed.displacement_y = w[5];
+        computed.rotation_radians = theta;
         computed.correlation = correlation;
         *result = computed;
         clear_error();

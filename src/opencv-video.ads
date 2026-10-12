@@ -304,6 +304,39 @@ package OpenCV.Video is
       Moving_Image   : OpenCV.Core.Mat;
       Options        : ECC_Translation_Options := (others => <>))
       return ECC_Translation_Result;
+   --  ECC Euclidean (rigid) alignment: cv::findTransformECC with MOTION_EUCLIDEAN,
+   --  privately initialized identity warp, COUNT|EPS, no mask, Gaussian size 5. The
+   --  image and option contract is exactly that of Estimate_ECC_Translation.
+   subtype ECC_Euclidean_Options is ECC_Translation_Options;
+
+   --  The native 2x3 warp maps TEMPLATE coordinates to MOVING coordinates
+   --  (X right, Y down), with theta = Rotation_Radians:
+   --     moving_x = cos (theta) * template_x - sin (theta) * template_y + Displacement.X
+   --     moving_y = sin (theta) * template_x + cos (theta) * template_y + Displacement.Y
+   --  Rotation is about the coordinate origin (0, 0), the top-left pixel, NOT the
+   --  image centre; Displacement is the matrix translation column, so a rotation
+   --  about the centre carries compensating translation terms. To resample the moving
+   --  image into the template frame, apply this same matrix with WARP_INVERSE_MAP;
+   --  never negate the angle or translation for that reason.
+   --  Rotation_Radians is atan2 (warp(1,0), warp(0,0)) of the returned warp, in
+   --  [-Pi, Pi]; precision is limited by the Float32 warp. It is an image-alignment
+   --  angle, not a heading, yaw or aircraft attitude. Native updates decode the
+   --  previous angle with asin, so recovery is reliable only for modest rotations;
+   --  larger ones may fail or converge to a wrong finite result.
+   --  Correlation is the native value, computed before the final update.
+   type ECC_Euclidean_Result is record
+      Displacement     : OpenCV.Float32_Point := (X => 0.0, Y => 0.0);
+      Rotation_Radians : OpenCV.Float64_Value := 0.0;
+      Correlation      : OpenCV.Float64_Value := 0.0;
+   end record;
+
+   --  Native nonconvergence raises OpenCV_Error; no identity is fabricated. A returned
+   --  value, even with a valid rotation matrix, does not prove correct alignment.
+   function Estimate_ECC_Euclidean
+     (Template_Image : OpenCV.Core.Mat;
+      Moving_Image   : OpenCV.Core.Mat;
+      Options        : ECC_Euclidean_Options := (others => <>))
+      return ECC_Euclidean_Result;
 private
    type PyrLK_Pyramid is new Ada.Finalization.Limited_Controlled with record
       Handle : System.Address := System.Null_Address;
