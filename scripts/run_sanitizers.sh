@@ -55,3 +55,11 @@ UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 "obj/sanitizers/video-faults$su
     $(pkg-config --libs "$package") -o "obj/sanitizers/video-oracle$suffix"
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 "obj/sanitizers/video-oracle$suffix"
+
+# Independent ECC translation oracle under the same sanitizers (fixtures only).
+"$compiler" "$@" -std=c++17 -Wall -Wextra -Wpedantic -Werror \
+    $flags -Itests/cpp $opencv_cflags tests/cpp/ecc_oracle.cpp \
+    $(pkg-config --libs "$package") -o "obj/sanitizers/ecc-oracle$suffix"
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+    "obj/sanitizers/ecc-oracle$suffix" "obj/sanitizers/ecc-translation$suffix.txt"

@@ -24,6 +24,7 @@ struct opencv_video_pyramid_handle {
 #ifdef OPENCV_VIDEO_TEST_FAULTS
 void opencv_video_test_fault(int);
 void opencv_video_test_corrupt_flow(float *values, size_t count);
+void opencv_video_test_corrupt_ecc(float *warp, double *correlation);
 #endif
 
 namespace {
@@ -621,4 +622,88 @@ extern "C" opencv_video_status opencv_video_calc_farneback_flow_seeded(
     return calc_farneback(previous_image, next_image, initial_flow, true, result_flow,
                           pyramid_scale, levels, window_size, iterations, poly_neighborhood,
                           poly_sigma);
+}
+
+namespace {
+// Binding-policy envelope (docs/ecc-source-contract.md), not an OpenCV guarantee.
+constexpr int kEccMinimumDimension = 32;
+constexpr int kEccMaximumDimension = 16384;
+constexpr int64_t kEccMaximumPixels = int64_t(1) << 24;
+}  // namespace
+
+extern "C" opencv_video_status opencv_video_estimate_ecc_translation(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations, double epsilon,
+    opencv_video_ecc_translation_result *result) {
+    try {
+        clear_error();
+        if (result == nullptr)
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Null ECC result");
+        const cv::Mat *tmpl = nullptr;
+        const cv::Mat *moving = nullptr;
+        auto status = resolve_input(template_image, &tmpl, "template image");
+        if (status != OPENCV_VIDEO_OK) return status;
+        status = resolve_input(moving_image, &moving, "moving image");
+        if (status != OPENCV_VIDEO_OK) return status;
+        if (tmpl->empty() || moving->empty() || tmpl->dims != 2 || moving->dims != 2 ||
+            tmpl->type() != CV_8UC1 || moving->type() != CV_8UC1 ||
+            tmpl->size() != moving->size())
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                        "ECC images must be matching nonempty 2-D UInt8 C1 Mats");
+        if (tmpl->rows < kEccMinimumDimension || tmpl->cols < kEccMinimumDimension ||
+            tmpl->rows > kEccMaximumDimension || tmpl->cols > kEccMaximumDimension ||
+            int64_t(tmpl->rows) * int64_t(tmpl->cols) > kEccMaximumPixels ||
+            tmpl->step[0] > size_t(std::numeric_limits<int>::max()) ||
+            moving->step[0] > size_t(std::numeric_limits<int>::max()))
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                        "ECC image geometry outside 32..16384 per side and 2^24 pixels");
+        if (maximum_iterations < 1 || maximum_iterations > 100 || !std::isfinite(epsilon) ||
+            epsilon < 1e-8 || epsilon > 0.1)
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Invalid ECC options");
+
+        // Private warp: native code may mutate it; the caller's result is untouched.
+        cv::Mat warp = cv::Mat::eye(2, 3, CV_32F);
+        const auto *storage = warp.data;
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+        opencv_video_test_fault(1);
+#endif
+        double correlation = cv::findTransformECC(
+            *tmpl, *moving, warp, cv::MOTION_TRANSLATION,
+            cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS,
+                             maximum_iterations, epsilon),
+            cv::noArray(), 5);
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+        opencv_video_test_fault(2);
+        opencv_video_test_corrupt_ecc(warp.ptr<float>(), &correlation);
+#endif
+        if (warp.data != storage || warp.dims != 2 || warp.rows != 2 || warp.cols != 3 ||
+            warp.type() != CV_32FC1 || !warp.isContinuous())
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "OpenCV returned an unexpected ECC warp schema");
+        const float *w = warp.ptr<float>();
+        for (int i = 0; i < 6; ++i)
+            if (!std::isfinite(w[i]))
+                return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite warp entry");
+        // Translation never writes the linear part; any drift means the model changed.
+        if (std::fabs(w[0] - 1.0f) > 1e-6f || std::fabs(w[1]) > 1e-6f ||
+            std::fabs(w[3]) > 1e-6f || std::fabs(w[4] - 1.0f) > 1e-6f)
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC translation warp linear part is not identity");
+        if (!std::isfinite(correlation))
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite correlation");
+
+        opencv_video_ecc_translation_result computed;
+        computed.displacement_x = w[2];
+        computed.displacement_y = w[5];
+        computed.correlation = correlation;
+        *result = computed;
+        clear_error();
+        return OPENCV_VIDEO_OK;
+    } catch (const cv::Exception &e) {
+        return fail(OPENCV_VIDEO_ERROR_OPENCV, e.what());
+    } catch (const std::exception &e) {
+        return fail(OPENCV_VIDEO_ERROR_STANDARD, e.what());
+    } catch (...) {
+        return fail(OPENCV_VIDEO_ERROR_UNKNOWN, "Unknown ECC exception");
+    }
 }

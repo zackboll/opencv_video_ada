@@ -173,6 +173,27 @@ opencv_video_status opencv_video_calc_farneback_flow_seeded(
     double pyramid_scale, int32_t levels, int32_t window_size,
     int32_t iterations, int32_t poly_neighborhood, double poly_sigma);
 
+/* ECC translation alignment (Task 011): cv::findTransformECC with MOTION_TRANSLATION,
+ * a private identity 2x3 Float32 warp, COUNT|EPS criteria, no mask, Gaussian size 5.
+ * The native warp maps template coordinates to moving coordinates:
+ * moving = template + (displacement_x, displacement_y). Not an inverse warp.
+ * Images: nonempty 2-D UInt8 C1, equal geometry, 32..16384 rows/columns, area
+ * <= 2^24. maximum_iterations 1..100, epsilon finite in [1e-8, 0.1].
+ * *result is written only after every native and validation step succeeds; on any
+ * failure it is left unchanged. Native nonconvergence is OPENCV_VIDEO_ERROR_OPENCV. */
+typedef struct {
+    float displacement_x;
+    float displacement_y;
+    double correlation;
+} opencv_video_ecc_translation_result;
+
+opencv_video_status opencv_video_estimate_ecc_translation(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations,
+    double epsilon,
+    opencv_video_ecc_translation_result *result);
+
 #ifdef __cplusplus
 }
 #endif

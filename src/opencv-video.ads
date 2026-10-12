@@ -272,6 +272,38 @@ package OpenCV.Video is
       Next_Image     : OpenCV.Core.Mat;
       Options        : Farneback_Options := (others => <>);
       Initial_Flow   : OpenCV.Core.Mat) return OpenCV.Core.Mat;
+
+   --  ECC translation alignment (cv::findTransformECC, MOTION_TRANSLATION,
+   --  privately initialized identity warp, COUNT|EPS, no mask, Gaussian size 5).
+   --  Maximum_Iterations 1 .. 100; Epsilon finite in 1.0E-8 .. 0.1. Values
+   --  outside these ranges raise OpenCV_Error and are never clamped.
+   type ECC_Translation_Options is record
+      Maximum_Iterations : Positive := 50;
+      Epsilon            : OpenCV.Float64_Value := 0.0001;
+   end record;
+
+   --  Displacement maps template coordinates into the moving image:
+   --  moving_x = template_x + Displacement.X, moving_y = template_y + Displacement.Y
+   --  (X right, Y down). It is NOT the inverse warp; OpenCV applies it with
+   --  WARP_INVERSE_MAP to bring the moving image into the template frame.
+   --  Correlation is the finite value returned by native findTransformECC. It
+   --  scores the warp from the start of the final native iteration, is an image
+   --  intensity measure only, and is neither clamped, normalized nor a confidence.
+   type ECC_Translation_Result is record
+      Displacement : OpenCV.Float32_Point := (X => 0.0, Y => 0.0);
+      Correlation  : OpenCV.Float64_Value := 0.0;
+   end record;
+
+   --  Both images: nonempty 2-D UInt8 C1, identical geometry, 32 .. 16384 rows and
+   --  columns, at most 16_777_216 pixels (Regions accepted; inputs unchanged).
+   --  Native nonconvergence (constant or uncorrelated images, translation outside
+   --  the unseeded convergence basin) raises OpenCV_Error; no identity result is
+   --  fabricated. A returned value does not prove correct physical alignment.
+   function Estimate_ECC_Translation
+     (Template_Image : OpenCV.Core.Mat;
+      Moving_Image   : OpenCV.Core.Mat;
+      Options        : ECC_Translation_Options := (others => <>))
+      return ECC_Translation_Result;
 private
    type PyrLK_Pyramid is new Ada.Finalization.Limited_Controlled with record
       Handle : System.Address := System.Null_Address;

@@ -38,7 +38,7 @@ def main() -> None:
     cpp = (ROOT / "cpp/opencv_video_shim.cpp").read_text()
     declared = set(re.findall(r"\b(opencv_video_\w+)\s*\(", header))
     imported = set(re.findall(r'External_Name\s*=>\s*"(opencv_video_\w+)"', ada))
-    check(len(declared) == 16, "production ABI inventory must be sixteen")
+    check(len(declared) == 17, "production ABI inventory must be seventeen")
     check(declared == imported, f"C/Ada import mismatch: {declared ^ imported}")
     check(all(re.search(r"\b" + re.escape(name) + r"\s*\(", cpp) for name in declared),
           "missing C++ export")
@@ -64,7 +64,7 @@ def main() -> None:
 
     tests = (ROOT / "tests/src/video_tests.adb").read_text()
     registrations = re.findall(r"Result\.Add_Test\s*\(Caller\.Create", tests)
-    check(len(registrations) == 107, "update documented AUnit inventory when changing tests")
+    check(len(registrations) == 118, "update documented AUnit inventory when changing tests")
 
     configure = (ROOT / "scripts/configure_opencv.sh").read_text()
     check("opencv2/video/tracking.hpp" in configure and "libopencv_video" in configure,
@@ -79,11 +79,22 @@ def main() -> None:
           "cross-platform workflow topology changed")
     check("pull_request:" not in windows and "workflow_dispatch:" not in windows,
           "Windows must remain post-merge-only")
+    pacman_lines = re.findall(r"pacman\s+(-\S+)((?:[^\n\\]|\\\n)*)", windows)
+    check(pacman_lines, "Windows workflow must invoke pacman")
+    for flags, rest in pacman_lines:
+        check(re.fullmatch(r"-Syu+", flags) is not None,
+              "Windows pacman must use a full upgrade (-Syu), never partial -Sy")
+        for forbidden in ("--nodeps", "--overwrite", "-dd", "--ignore", "--force"):
+            check(forbidden not in rest and forbidden not in flags,
+                  f"Windows pacman must not use {forbidden}")
+    check(re.search(r"pacman\s+-Sy\s", windows) is None
+          and re.search(r"pacman\s+-Sy\b(?!u)", windows) is None,
+          "Windows workflow regressed to partial-upgrade pacman -Sy")
     check("workflow_dispatch:" in compat and "pull_request:" not in compat,
           "compatibility matrix must remain manual-only")
 
     print(f"PASS: manifests, Core pin {CORE_PIN[:12]}, {len(declared)} ABI declarations/imports, "
-          f"107 AUnit registrations, Core ownership, video backend, CI topology")
+          f"118 AUnit registrations, Core ownership, video backend, CI topology")
 
 
 if __name__ == "__main__":

@@ -899,4 +899,72 @@ package body OpenCV.Video is
       end loop;
       return Count;
    end Successful_Count;
+
+   function Estimate_ECC_Translation
+     (Template_Image : OpenCV.Core.Mat;
+      Moving_Image   : OpenCV.Core.Mat;
+      Options        : ECC_Translation_Options := (others => <>))
+      return ECC_Translation_Result
+   is
+      Maximum_Pixels : constant Long_Long_Integer := 2 ** 24;
+      Native         : aliased C.ECC_Translation_Result;
+      Code           : C.Status := C.Success;
+   begin
+      if Template_Image.Is_Empty or else Moving_Image.Is_Empty then
+         raise OpenCV.OpenCV_Error with "ECC images must be nonempty";
+      end if;
+      if Template_Image.Dimension_Count /= 2 or else Moving_Image.Dimension_Count /= 2 then
+         raise OpenCV.OpenCV_Error with "ECC accepts only 2-D images";
+      end if;
+      if Template_Image.Depth /= OpenCV.Core.UInt8 or else Moving_Image.Depth /= OpenCV.Core.UInt8
+        or else Template_Image.Channels /= 1 or else Moving_Image.Channels /= 1
+      then
+         raise OpenCV.OpenCV_Error with "ECC images must be UInt8 C1";
+      end if;
+      if Template_Image.Rows /= Moving_Image.Rows
+        or else Template_Image.Columns /= Moving_Image.Columns
+      then
+         raise OpenCV.OpenCV_Error with "ECC image geometry differs";
+      end if;
+      if Template_Image.Rows not in 32 .. 16_384
+        or else Template_Image.Columns not in 32 .. 16_384
+        or else Long_Long_Integer (Template_Image.Rows)
+                * Long_Long_Integer (Template_Image.Columns) > Maximum_Pixels
+      then
+         raise OpenCV.OpenCV_Error with
+           "ECC image size outside 32 .. 16384 per side and 16777216 pixels";
+      end if;
+      if Options.Maximum_Iterations > 100 then
+         raise OpenCV.OpenCV_Error with "ECC Maximum_Iterations outside 1 .. 100";
+      end if;
+      if not Is_Finite (Options.Epsilon) or else Options.Epsilon < 1.0E-8
+        or else Options.Epsilon > 0.1
+      then
+         raise OpenCV.OpenCV_Error with "ECC Epsilon outside 1.0E-8 .. 0.1";
+      end if;
+
+      declare
+         procedure Template_Callback (Template_Handle : Bridge.Input_Mat_Handle) is
+            procedure Moving_Callback (Moving_Handle : Bridge.Input_Mat_Handle) is
+            begin
+               Code := C.Estimate_ECC_Translation
+                 (Template_Handle, Moving_Handle,
+                  Interfaces.Integer_32 (Options.Maximum_Iterations),
+                  Interfaces.C.double (Options.Epsilon),
+                  Native'Access);
+            end Moving_Callback;
+         begin
+            Bridge.With_Input_Handle (Moving_Image, Moving_Callback'Access);
+         end Template_Callback;
+      begin
+         Bridge.With_Input_Handle (Template_Image, Template_Callback'Access);
+      end;
+      C.Check (Code, "Video.Estimate_ECC_Translation");
+
+      return
+        (Displacement =>
+           (X => OpenCV.Float32_Value (Native.Displacement_X),
+            Y => OpenCV.Float32_Value (Native.Displacement_Y)),
+         Correlation  => OpenCV.Float64_Value (Native.Correlation));
+   end Estimate_ECC_Translation;
 end OpenCV.Video;

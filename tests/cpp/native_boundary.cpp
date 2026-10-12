@@ -5,6 +5,8 @@
 #include <opencv2/core.hpp>
 #include <opencv2/video/tracking.hpp>
 #include "synthetic_fixture.hpp"
+#include "ecc_fixture.hpp"
+#include <cstddef>
 #include <cstring>
 #include <cmath>
 #include <iostream>
@@ -23,6 +25,22 @@ void opencv_video_test_fault(int stage) {
     if (fault_kind == 2) CV_Error(cv::Error::StsError, "qualification native exception");
     if (fault_kind == 4) throw std::runtime_error("qualification standard exception");
     throw 42;
+}
+// ECC: which post-native value to corrupt before validation (test builds only).
+// 1 warp[2]=NaN, 2 warp[5]=+Inf, 3 correlation=NaN, 4 correlation=-Inf, 5 warp[0]=1.5
+// (linear part no longer identity), 6 warp[1]=0.25.
+int ecc_corrupt_mode = 0;
+void opencv_video_test_corrupt_ecc(float *warp, double *correlation) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    switch (ecc_corrupt_mode) {
+        case 1: warp[2] = nan; break;
+        case 2: warp[5] = std::numeric_limits<float>::infinity(); break;
+        case 3: *correlation = std::numeric_limits<double>::quiet_NaN(); break;
+        case 4: *correlation = -std::numeric_limits<double>::infinity(); break;
+        case 5: warp[0] = 1.5f; break;
+        case 6: warp[1] = 0.25f; break;
+        default: break;
+    }
 }
 int corrupt_mode = 0;  // 1 NaN, 2 +Inf, 3 -Inf written into one private component
 void opencv_video_test_corrupt_flow(float *values, size_t count) {
@@ -1146,7 +1164,224 @@ void run_farneback_seeded() {
     check(call(previous.get(), next.get(), seed.get(), flow.get()) == OPENCV_VIDEO_OK, "post-fault seeded call failed");
     std::cout << "PASS: seeded Farneback actual shim flags 4 oracle, seed validation, aliases, Region seed, private clone, atomicity, faults\n";
 }
+
+// ECC translation (Task 011): actual shim versus a direct cv::findTransformECC call.
+namespace {
+const opencv_video_ecc_translation_result kEccSentinel = {123.5f, -456.25f, 789.125};
+
+Mat ecc_handle(const cv::Mat &source) {
+    auto h = matrix(source.rows, source.cols, OPENCV_CORE_DEPTH_UINT8, 1);
+    source.copyTo(output(h.get()));
+    return h;
+}
+
+opencv_video_status ecc_call(const opencv_core_mat_handle *a, const opencv_core_mat_handle *b,
+                             opencv_video_ecc_translation_result *r, int iterations = 50,
+                             double epsilon = 1e-4) {
+    return opencv_video_estimate_ecc_translation(a, b, iterations, epsilon, r);
+}
+
+cv::Point2f ecc_direct(const cv::Mat &a, const cv::Mat &b, double &rho) {
+    cv::Mat warp = cv::Mat::eye(2, 3, CV_32F);
+    rho = cv::findTransformECC(a, b, warp, cv::MOTION_TRANSLATION,
+        cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 50, 1e-4),
+        cv::noArray(), 5);
+    return cv::Point2f(warp.at<float>(0, 2), warp.at<float>(1, 2));
+}
+
+void ecc_unchanged(const opencv_video_ecc_translation_result &r, const char *message) {
+    check(std::memcmp(&r, &kEccSentinel, sizeof r) == 0, message);
+}
+
+void run_ecc_values(const cv::Mat &base_image, const Mat &base) {
+    const int n = base_image.rows;
+    struct Case { int dx, dy; } cases[] = {{0, 0}, {2, 1}, {-2, -1}, {3, 0}, {0, 3}};
+    for (const auto &c : cases) {
+        const cv::Mat moving_image = ecc_fixture::texture(n, n, c.dx, c.dy);
+        auto moving = ecc_handle(moving_image);
+        opencv_video_ecc_translation_result r = kEccSentinel;
+        check(ecc_call(base.get(), moving.get(), &r) == OPENCV_VIDEO_OK, "ECC valid call failed");
+        double rho = 0;
+        const cv::Point2f expected = ecc_direct(base_image, moving_image, rho);
+        check(r.displacement_x == expected.x && r.displacement_y == expected.y &&
+              r.correlation == rho, "ECC shim differs from direct native call");
+        check(std::fabs(r.displacement_x - c.dx) < 0.05 && std::fabs(r.displacement_y - c.dy) < 0.05,
+              "ECC displacement sign/order/magnitude");
+        check(std::isfinite(r.correlation) && r.correlation > 0.99, "ECC correlation");
+        opencv_video_ecc_translation_result reversed = kEccSentinel;
+        check(ecc_call(moving.get(), base.get(), &reversed) == OPENCV_VIDEO_OK, "ECC reversed failed");
+        check(std::fabs(reversed.displacement_x + c.dx) < 0.05 &&
+              std::fabs(reversed.displacement_y + c.dy) < 0.05, "ECC reversed roles not negated");
+    }
+    opencv_video_ecc_translation_result r = kEccSentinel;
+    check(ecc_call(base.get(), base.get(), &r) == OPENCV_VIDEO_OK, "ECC same-handle identity call");
+    check(std::fabs(r.displacement_x) < 1e-4 && std::fabs(r.displacement_y) < 1e-4 &&
+          std::fabs(r.correlation - 1.0) < 1e-6, "ECC same-handle identity near zero");
+    {
+        double rho = 0;
+        const cv::Point2f expected = ecc_direct(base_image, base_image, rho);
+        check(r.displacement_x == expected.x && r.displacement_y == expected.y && r.correlation == rho,
+              "ECC same-handle identity differs from direct native call");
+    }
+    check(cv::norm(output(base.get()), base_image, cv::NORM_INF) == 0, "ECC changed an input");
+}
 }  // namespace
+
+}  // namespace
+namespace {
+void run_ecc_arguments(const Mat &base, int n) {
+    auto moving = ecc_handle(ecc_fixture::texture(n, n, 2, 1));
+    opencv_video_ecc_translation_result r = kEccSentinel;
+    check(ecc_call(nullptr, moving.get(), &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null template");
+    ecc_unchanged(r, "null template changed result");
+    check(ecc_call(base.get(), nullptr, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null moving");
+    ecc_unchanged(r, "null moving changed result");
+    check(ecc_call(base.get(), moving.get(), nullptr) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+          "null result accepted");
+    for (int iterations : {0, -1, 101})
+        check(ecc_call(base.get(), moving.get(), &r, iterations) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+              "bad iterations accepted");
+    for (double epsilon : {0.0, -1e-4, 9e-9, 0.1000001, std::numeric_limits<double>::quiet_NaN(),
+                           std::numeric_limits<double>::infinity()})
+        check(ecc_call(base.get(), moving.get(), &r, 50, epsilon) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+              "bad epsilon accepted");
+    ecc_unchanged(r, "invalid options changed result");
+    check(ecc_call(base.get(), moving.get(), &r, 1, 1e-8) == OPENCV_VIDEO_OK, "options lower bound");
+    r = kEccSentinel;
+    check(ecc_call(base.get(), moving.get(), &r, 100, 0.1) == OPENCV_VIDEO_OK, "options upper bound");
+
+    r = kEccSentinel;
+    auto wrong_depth = matrix(n, n, OPENCV_CORE_DEPTH_FLOAT32, 1);
+    auto wrong_channels = matrix(n, n, OPENCV_CORE_DEPTH_UINT8, 3);
+    auto other_size = matrix(n, n + 1, OPENCV_CORE_DEPTH_UINT8, 1);
+    for (auto *bad : {wrong_depth.get(), wrong_channels.get(), other_size.get()}) {
+        check(ecc_call(base.get(), bad, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "bad moving accepted");
+        check(ecc_call(bad, base.get(), &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "bad template accepted");
+    }
+    auto small = matrix(31, 128, OPENCV_CORE_DEPTH_UINT8, 1);
+    auto small_peer = matrix(31, 128, OPENCV_CORE_DEPTH_UINT8, 1);
+    check(ecc_call(small.get(), small_peer.get(), &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+          "below minimum dimension accepted");
+    auto empty = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+    output(empty.get()) = cv::Mat();
+    check(ecc_call(empty.get(), base.get(), &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "empty accepted");
+    auto wide = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+    auto wide_peer = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+    output(wide.get()) = cv::Mat(32, 16385, CV_8UC1, cv::Scalar(0));
+    output(wide_peer.get()) = cv::Mat(32, 16385, CV_8UC1, cv::Scalar(0));
+    check(ecc_call(wide.get(), wide_peer.get(), &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+          "above maximum dimension accepted");
+    ecc_unchanged(r, "invalid input changed result");
+}
+
+void run_ecc_nonconvergence(const Mat &base, int n) {
+    auto flat = ecc_handle(ecc_fixture::constant(n, n, 128));
+    auto noise_a = ecc_handle(ecc_fixture::noise(n, n, 3));
+    auto noise_b = ecc_handle(ecc_fixture::noise(n, n, 9));
+    auto far = ecc_handle(ecc_fixture::texture(n, n, 40, 30));
+    opencv_video_ecc_translation_result r = kEccSentinel;
+    check(ecc_call(flat.get(), flat.get(), &r) == OPENCV_VIDEO_ERROR_OPENCV, "constant images accepted");
+    ecc_unchanged(r, "constant failure changed result");
+    check(ecc_call(noise_a.get(), noise_b.get(), &r) == OPENCV_VIDEO_ERROR_OPENCV, "noise accepted");
+    ecc_unchanged(r, "noise failure changed result");
+    check(ecc_call(base.get(), far.get(), &r) == OPENCV_VIDEO_ERROR_OPENCV, "far translation accepted");
+    ecc_unchanged(r, "far translation failure changed result");
+    check(std::strlen(opencv_video_last_error()) > 0, "no diagnostic after nonconvergence");
+}
+}  // namespace
+
+
+namespace {
+void run_ecc() {
+    static_assert(sizeof(opencv_video_ecc_translation_result) == 16 &&
+                  offsetof(opencv_video_ecc_translation_result, displacement_x) == 0 &&
+                  offsetof(opencv_video_ecc_translation_result, displacement_y) == 4 &&
+                  offsetof(opencv_video_ecc_translation_result, correlation) == 8,
+                  "ECC result layout");
+    const int n = 128;
+    const cv::Mat base_image = ecc_fixture::texture(n, n);
+    auto base = ecc_handle(base_image);
+    run_ecc_values(base_image, base);
+
+    // Two distinct Core headers sharing one allocation: a valid identity request, and
+    // the shared pixels are unchanged afterwards.
+    {
+        auto first = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto second = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(first.get()) = output(base.get());
+        output(second.get()) = output(base.get());
+        check(&output(first.get()) != &output(second.get()) &&
+              output(first.get()).data == output(second.get()).data &&
+              output(first.get()).data == output(base.get()).data, "fixture headers do not share storage");
+        opencv_video_ecc_translation_result r = kEccSentinel;
+        check(ecc_call(first.get(), second.get(), &r) == OPENCV_VIDEO_OK, "shared-storage identity failed");
+        check(std::fabs(r.displacement_x) < 1e-4 && std::fabs(r.displacement_y) < 1e-4 &&
+              std::fabs(r.correlation - 1.0) < 1e-6, "shared-storage identity value");
+        check(cv::norm(output(first.get()), base_image, cv::NORM_INF) == 0, "shared storage modified");
+        // Repeatable.
+        opencv_video_ecc_translation_result again = kEccSentinel;
+        check(ecc_call(first.get(), second.get(), &again) == OPENCV_VIDEO_OK &&
+              std::memcmp(&r, &again, sizeof r) == 0, "ECC call is not repeatable");
+    }
+    run_ecc_arguments(base, n);
+    run_ecc_nonconvergence(base, n);
+
+    // Real non-contiguous Regions equal the same direct call on the same Regions.
+    {
+        const cv::Mat parent_a = ecc_fixture::texture(160, 160);
+        const cv::Mat parent_b = ecc_fixture::texture(160, 160, 2, 1);
+        const cv::Rect roi(16, 16, n, n);
+        auto h_a = ecc_handle(parent_a);
+        auto h_b = ecc_handle(parent_b);
+        auto region_a = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto region_b = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(region_a.get()) = output(h_a.get())(roi);
+        output(region_b.get()) = output(h_b.get())(roi);
+        check(!output(region_a.get()).isContinuous(), "fixture Region is contiguous");
+        opencv_video_ecc_translation_result r = kEccSentinel;
+        check(ecc_call(region_a.get(), region_b.get(), &r) == OPENCV_VIDEO_OK, "ECC Region call failed");
+        double rho = 0;
+        const cv::Point2f expected = ecc_direct(parent_a(roi), parent_b(roi), rho);
+        check(r.displacement_x == expected.x && r.displacement_y == expected.y && r.correlation == rho,
+              "ECC Region differs from direct native Region call");
+        check(std::fabs(r.displacement_x - 2) < 0.05 && std::fabs(r.displacement_y - 1) < 0.05,
+              "ECC Region displacement");
+        check(cv::norm(output(h_a.get()), parent_a, cv::NORM_INF) == 0 &&
+              cv::norm(output(h_b.get()), parent_b, cv::NORM_INF) == 0, "ECC changed Region parents");
+    }
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    {
+        auto moving = ecc_handle(ecc_fixture::texture(n, n, 2, 1));
+        for (int stage : {1, 2}) for (int kind : {1, 2, 3, 4}) {
+            fault_stage = stage; fault_kind = kind;
+            opencv_video_ecc_translation_result r = kEccSentinel;
+            const auto code = ecc_call(base.get(), moving.get(), &r);
+            fault_stage = 0;
+            check(code == (kind == 2 ? OPENCV_VIDEO_ERROR_OPENCV
+                           : kind == 3 ? OPENCV_VIDEO_ERROR_UNKNOWN : OPENCV_VIDEO_ERROR_STANDARD),
+                  "ECC injected exception mapped to the wrong status");
+            ecc_unchanged(r, "ECC injected failure changed result");
+        }
+        // Post-native corruption must be rejected with the caller's result untouched.
+        for (int mode = 1; mode <= 6; ++mode) {
+            ecc_corrupt_mode = mode;
+            opencv_video_ecc_translation_result r = kEccSentinel;
+            const auto code = ecc_call(base.get(), moving.get(), &r);
+            ecc_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_ERROR_OPENCV, "ECC corrupted native output accepted");
+            ecc_unchanged(r, "ECC corrupted native output was partially published");
+        }
+    }
+#endif
+    auto moving = ecc_handle(ecc_fixture::texture(n, n, 2, 1));
+    opencv_video_ecc_translation_result r = kEccSentinel;
+    check(ecc_call(base.get(), moving.get(), &r) == OPENCV_VIDEO_OK, "post-fault ECC call failed");
+    std::cout << "PASS: ECC translation shim vs direct findTransformECC, signs, roles, options, schema, nonconvergence, Regions, atomicity, faults\n";
+}
+}  // namespace
+
+
 
 int main() {
     try {
@@ -1162,6 +1397,7 @@ int main() {
         run_seeded_pyramids(true,false);
         run_farneback();
         run_farneback_seeded();
+        run_ecc();
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "FAIL: " << error.what() << '\n';

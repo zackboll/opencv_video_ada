@@ -23,9 +23,12 @@ jobs:
           msys2: true
       - name: Select Ada toolchain
         run: alr -n --force toolchain --select gnat_native=16.1.0 gprbuild=26.0.1
+      - name: Upgrade MSYS2 system coherently
+        run: |
+          alr exec -- pacman -Syu --noconfirm
       - name: Install MSYS2 native dependencies
         run: |
-          alr exec -- pacman -Sy --noconfirm --needed \
+          alr exec -- pacman -Syu --noconfirm --needed \
             mingw-w64-x86_64-opencv mingw-w64-x86_64-pkg-config mingw-w64-x86_64-gcc
       - name: Build and run with isolated runtime
         run: sh scripts/test.sh

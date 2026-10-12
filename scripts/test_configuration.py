@@ -148,5 +148,40 @@ exit 1
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+class WindowsWorkflowTests(unittest.TestCase):
+    """Inspect the real Windows workflow, not a stand-in."""
+
+    def setUp(self):
+        self.text = (ROOT / ".github/workflows/windows-post-merge.yml").read_text()
+
+    def pacman_commands(self):
+        flat = self.text.replace("\\\n", " ")
+        return [line.strip() for line in flat.splitlines() if "pacman " in line]
+
+    def test_full_upgrade_only(self):
+        commands = self.pacman_commands()
+        self.assertTrue(commands)
+        for command in commands:
+            words = command.split()
+            flag = words[words.index("pacman") + 1]
+            self.assertRegex(flag, r"^-Syu+$", command)
+
+    def test_no_dependency_bypass(self):
+        for command in self.pacman_commands():
+            for forbidden in ("--nodeps", "--overwrite", " -dd", "--ignore", "--force"):
+                self.assertNotIn(forbidden, command)
+
+    def test_install_command_names_required_packages(self):
+        installs = [c for c in self.pacman_commands() if "mingw-w64-x86_64-opencv" in c]
+        self.assertEqual(len(installs), 1)
+        for package in ("mingw-w64-x86_64-pkg-config", "mingw-w64-x86_64-gcc"):
+            self.assertIn(package, installs[0])
+
+    def test_post_merge_only_trigger(self):
+        self.assertNotIn("pull_request", self.text)
+        self.assertNotIn("workflow_dispatch", self.text)
+        self.assertIn("branches:\n      - main", self.text)
+
+
 if __name__ == "__main__":
     unittest.main()

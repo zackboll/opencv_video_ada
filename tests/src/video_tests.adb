@@ -2,8 +2,10 @@ with AUnit.Assertions;
 with AUnit.Test_Caller;
 with AUnit.Test_Fixtures;
 with Ada.Environment_Variables;
+with Ada.Exceptions;
 with Ada.Text_IO;
 with Ada.Unchecked_Conversion;
+with ECC_Fixtures;
 with Interfaces;
 with OpenCV.Core;
 with OpenCV.Core.Float32_Vec2;
@@ -3389,6 +3391,559 @@ package body Video_Tests is
       end loop;
    end Pyramid_Quality_Previous_Unavailable;
 
+   ---------------------------------------------------------------------
+   --  Task 011: ECC translation
+   ---------------------------------------------------------------------
+   package EF renames ECC_Fixtures;
+
+   ECC_Tolerance : constant OpenCV.Float32_Value := 0.05;
+
+   function ECC_Close (A, B : ECC_Translation_Result; Tolerance : OpenCV.Float64_Value)
+     return Boolean is
+     (abs (OpenCV.Float64_Value (A.Displacement.X) - OpenCV.Float64_Value (B.Displacement.X)) <= Tolerance
+      and then abs (OpenCV.Float64_Value (A.Displacement.Y) - OpenCV.Float64_Value (B.Displacement.Y))
+               <= Tolerance
+      and then abs (A.Correlation - B.Correlation) <= Tolerance);
+
+   function ECC_Near (R : ECC_Translation_Result; DX, DY : Integer) return Boolean is
+     (abs (R.Displacement.X - OpenCV.Float32_Value (DX)) < ECC_Tolerance
+      and then abs (R.Displacement.Y - OpenCV.Float32_Value (DY)) < ECC_Tolerance);
+
+   function ECC_Template return OpenCV.Core.Mat is (EF.Texture (128, 128));
+
+   procedure ECC_Expect_Error
+     (Template, Moving : OpenCV.Core.Mat;
+      Options : ECC_Translation_Options := (others => <>);
+      Message : String)
+   is
+      Unused : ECC_Translation_Result;
+   begin
+      Unused := Estimate_ECC_Translation (Template, Moving, Options);
+      Assert (False, Message & ": request accepted");
+   exception
+      when OpenCV.OpenCV_Error => null;
+   end ECC_Expect_Error;
+
+   --  The Ada preflight must reject before any native call. A rejection raised by the
+   --  shim carries the "Video.Estimate_ECC_Translation:" prefix added by C_API.Check, so
+   --  its presence means the Ada validation layer was bypassed.
+   procedure ECC_Expect_Preflight_Error
+     (Template, Moving : OpenCV.Core.Mat; Message : String)
+   is
+      Unused : ECC_Translation_Result;
+   begin
+      Unused := Estimate_ECC_Translation (Template, Moving);
+      Assert (False, Message & ": request accepted");
+   exception
+      when Error : OpenCV.OpenCV_Error =>
+         declare
+            Text   : constant String := Ada.Exceptions.Exception_Message (Error);
+            Marker : constant String := "Video.Estimate_ECC_Translation";
+         begin
+            Assert (Text'Length < Marker'Length
+                    or else Text (Text'First .. Text'First + Marker'Length - 1) /= Marker,
+                    Message & ": rejected by the native layer, not the Ada preflight");
+         end;
+   end ECC_Expect_Preflight_Error;
+
+   procedure ECC_Default_Options (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Defaults : constant ECC_Translation_Options := (others => <>);
+      Zero : constant ECC_Translation_Result := (others => <>);
+   begin
+      Assert (Defaults.Maximum_Iterations = 50 and then Defaults.Epsilon = 0.0001,
+              "ECC default options");
+      Assert (Zero.Displacement = (X => 0.0, Y => 0.0) and then Zero.Correlation = 0.0,
+              "ECC default result");
+   end ECC_Default_Options;
+
+   procedure ECC_Translation_Directions (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Template : constant OpenCV.Core.Mat := ECC_Template;
+      Before : constant Long_Long_Integer := EF.Checksum (Template);
+      type Shift is record DX, DY : Integer; end record;
+      Cases : constant array (1 .. 5) of Shift :=
+        [(0, 0), (2, 1), (-2, -1), (3, 0), (0, 3)];
+   begin
+      for Item of Cases loop
+         declare
+            Moving : constant OpenCV.Core.Mat := EF.Texture (128, 128, Item.DX, Item.DY);
+            Moving_Before : constant Long_Long_Integer := EF.Checksum (Moving);
+            Forward : constant ECC_Translation_Result := Estimate_ECC_Translation (Template, Moving);
+            Backward : constant ECC_Translation_Result := Estimate_ECC_Translation (Moving, Template);
+         begin
+            Assert (ECC_Near (Forward, Item.DX, Item.DY), "ECC displacement sign/order/magnitude");
+            Assert (ECC_Near (Backward, -Item.DX, -Item.DY), "ECC reversed roles are not negated");
+            Assert (Forward.Correlation > 0.99 and then Forward.Correlation < 1.0001,
+                    "ECC correlation range");
+            Assert (EF.Checksum (Template) = Before and then EF.Checksum (Moving) = Moving_Before,
+                    "ECC modified an input");
+         end;
+      end loop;
+      --  X and Y are distinct: a horizontal shift must not produce vertical motion.
+      declare
+         H : constant ECC_Translation_Result :=
+           Estimate_ECC_Translation (Template, EF.Texture (128, 128, 3, 0));
+         V : constant ECC_Translation_Result :=
+           Estimate_ECC_Translation (Template, EF.Texture (128, 128, 0, 3));
+      begin
+         Assert (H.Displacement.X > 2.5 and then abs (H.Displacement.Y) < 0.1, "ECC horizontal axis");
+         Assert (V.Displacement.Y > 2.5 and then abs (V.Displacement.X) < 0.1, "ECC vertical axis");
+      end;
+   end ECC_Translation_Directions;
+
+   procedure ECC_Options_And_Repeatability (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Template : constant OpenCV.Core.Mat := ECC_Template;
+      Moving : constant OpenCV.Core.Mat := EF.Texture (128, 128, 2, 1);
+      Default_1 : constant ECC_Translation_Result := Estimate_ECC_Translation (Template, Moving);
+      Default_2 : constant ECC_Translation_Result := Estimate_ECC_Translation (Template, Moving);
+      One : constant ECC_Translation_Result := Estimate_ECC_Translation
+        (Template, Moving, (Maximum_Iterations => 1, Epsilon => 0.0001));
+      Two : constant ECC_Translation_Result := Estimate_ECC_Translation
+        (Template, Moving, (Maximum_Iterations => 2, Epsilon => 0.0001));
+      Fine : constant ECC_Translation_Result := Estimate_ECC_Translation
+        (Template, Moving, (Maximum_Iterations => 100, Epsilon => 1.0E-8));
+      Coarse : constant ECC_Translation_Result := Estimate_ECC_Translation
+        (Template, Moving, (Maximum_Iterations => 100, Epsilon => 0.1));
+   begin
+      Assert (Default_1 = Default_2, "ECC repeated calls differ");
+      --  One iteration cannot reach the minimum: a binding that ignores the count fails.
+      Assert (abs (One.Displacement.X - 2.0) > 0.1 and then One.Correlation < 0.95,
+              "ECC one-iteration option had no distinguishing effect");
+      Assert (One.Displacement /= Default_1.Displacement, "ECC iteration option ignored");
+      Assert (ECC_Near (Two, 2, 1) and then ECC_Near (Fine, 2, 1) and then ECC_Near (Coarse, 2, 1),
+              "ECC valid nondefault options lost accuracy");
+   end ECC_Options_And_Repeatability;
+
+   procedure ECC_Epsilon_Sensitivity (T : in out Fixture) is
+      pragma Unreferenced (T);
+      --  Shift (4,2) is still inside the basin but does not converge within 1e-1 in the
+      --  same step count as 1e-8, so the epsilon option measurably changes the result.
+      Template : constant OpenCV.Core.Mat := ECC_Template;
+      Moving : constant OpenCV.Core.Mat := EF.Texture (128, 128, 4, 2);
+      Coarse : constant ECC_Translation_Result := Estimate_ECC_Translation
+        (Template, Moving, (Maximum_Iterations => 100, Epsilon => 0.1));
+      Fine : constant ECC_Translation_Result := Estimate_ECC_Translation
+        (Template, Moving, (Maximum_Iterations => 100, Epsilon => 1.0E-8));
+   begin
+      Assert (ECC_Near (Coarse, 4, 2) and then ECC_Near (Fine, 4, 2), "ECC (4,2) accuracy");
+      Assert (Fine.Correlation - Coarse.Correlation > 1.0E-4, "ECC epsilon option ignored");
+   end ECC_Epsilon_Sensitivity;
+
+   procedure ECC_Photometric (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Template : constant OpenCV.Core.Mat := ECC_Template;
+      Shifted : constant OpenCV.Core.Mat := EF.Texture (128, 128, 2, 1);
+      Dimmer : constant OpenCV.Core.Mat := EF.Affine (Shifted, 4, 5, 20);
+      Brighter : constant OpenCV.Core.Mat := EF.Affine (Shifted, 13, 10, -10);
+   begin
+      Assert (ECC_Near (Estimate_ECC_Translation (Template, Dimmer), 2, 1), "ECC contrast 0.8x+20");
+      Assert (ECC_Near (Estimate_ECC_Translation (Template, Brighter), 2, 1), "ECC contrast 1.3x-10");
+   end ECC_Photometric;
+
+   procedure ECC_Regions_Lifetime (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Window : constant OpenCV.Rect := (16, 16, 128, 128);
+      Saved : ECC_Translation_Result;
+      Parent_A_Before, Parent_B_Before : Long_Long_Integer;
+      Contiguous : ECC_Translation_Result;
+   begin
+      declare
+         Parent_A : constant OpenCV.Core.Mat := EF.Texture (160, 160);
+         Parent_B : constant OpenCV.Core.Mat := EF.Texture (160, 160, 2, 1);
+         Region_A : constant OpenCV.Core.Mat := Parent_A.Region (Window);
+         Region_B : constant OpenCV.Core.Mat := Parent_B.Region (Window);
+         Region_A_Before : constant Long_Long_Integer := EF.Checksum (Region_A);
+         Region_B_Before : constant Long_Long_Integer := EF.Checksum (Region_B);
+      begin
+         Assert (not Region_A.Is_Continuous and then not Region_B.Is_Continuous,
+                 "ECC fixture Regions are contiguous");
+         Parent_A_Before := EF.Checksum (Parent_A);
+         Parent_B_Before := EF.Checksum (Parent_B);
+         Saved := Estimate_ECC_Translation (Region_A, Region_B);
+         Contiguous := Estimate_ECC_Translation (Region_A.Clone, Region_B.Clone);
+         declare
+            Template_Only : constant ECC_Translation_Result :=
+              Estimate_ECC_Translation (Region_A, Region_B.Clone);
+            Moving_Only : constant ECC_Translation_Result :=
+              Estimate_ECC_Translation (Region_A.Clone, Region_B);
+         begin
+            Assert (ECC_Near (Saved, 2, 1), "ECC Region displacement");
+            Assert (ECC_Close (Template_Only, Saved, 1.0E-6) and then ECC_Close (Moving_Only, Saved, 1.0E-6),
+                    "ECC template-only/moving-only Region differs from both-Region result");
+         end;
+         Assert (ECC_Close (Contiguous, Saved, 1.0E-6),
+                 "ECC Region result differs from the contiguous clone");
+         Assert (EF.Checksum (Region_A) = Region_A_Before and then EF.Checksum (Region_B) = Region_B_Before
+                 and then EF.Checksum (Parent_A) = Parent_A_Before
+                 and then EF.Checksum (Parent_B) = Parent_B_Before,
+                 "ECC modified a Region or its parent");
+      end;
+      --  Regions and parents are finalized; the value result is still usable.
+      Assert (ECC_Near (Saved, 2, 1) and then Saved.Correlation > 0.99, "ECC result after finalization");
+   end ECC_Regions_Lifetime;
+
+   procedure ECC_Image_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Good : constant OpenCV.Core.Mat := ECC_Template;
+      Empty : OpenCV.Core.Mat;
+      Float_Image : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (128, 128, (Depth => OpenCV.Core.Float32, Channels => 1));
+      Color : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (128, 128, (Depth => OpenCV.Core.UInt8, Channels => 3));
+      Other_Columns : constant OpenCV.Core.Mat := EF.Texture (128, 129);
+      Other_Rows : constant OpenCV.Core.Mat := EF.Texture (129, 128);
+      Parent : constant OpenCV.Core.Mat := EF.Texture (160, 160);
+   begin
+      ECC_Expect_Error (Empty, Good, Message => "empty template");
+      ECC_Expect_Error (Good, Empty, Message => "empty moving");
+      ECC_Expect_Error (Float_Image, Float_Image, Message => "Float32 images");
+      ECC_Expect_Preflight_Error (Float_Image, Float_Image, "Float32 images");
+      ECC_Expect_Preflight_Error (Color, Color, "three-channel images");
+      ECC_Expect_Preflight_Error (Good, Other_Columns, "different columns");
+      ECC_Expect_Error (Good, Float_Image, Message => "Float32 moving");
+      ECC_Expect_Error (Color, Color, Message => "three-channel images");
+      ECC_Expect_Error (Good, Color, Message => "three-channel moving");
+      ECC_Expect_Error (Good, Other_Columns, Message => "different columns");
+      ECC_Expect_Error (Other_Rows, Good, Message => "different rows");
+      ECC_Expect_Error (EF.Texture (31, 128), EF.Texture (31, 128), Message => "31 rows");
+      ECC_Expect_Error (EF.Texture (128, 31), EF.Texture (128, 31), Message => "31 columns");
+      ECC_Expect_Error (Parent.Region ((0, 0, 31, 31)), Parent.Region ((0, 0, 31, 31)),
+                        Message => "31x31 Regions");
+      --  Upper geometry limits are rejected by validation before any native work, so
+      --  no ECC temporaries are allocated: columns/rows 16385, and area 2**24 + 4096.
+      declare
+         Wide_A : constant OpenCV.Core.Mat := OpenCV.Core.Create
+           (32, 16_385, (Depth => OpenCV.Core.UInt8, Channels => 1));
+         Tall_A : constant OpenCV.Core.Mat := OpenCV.Core.Create
+           (16_385, 32, (Depth => OpenCV.Core.UInt8, Channels => 1));
+         Area_A : constant OpenCV.Core.Mat := OpenCV.Core.Create
+           (4_097, 4_096, (Depth => OpenCV.Core.UInt8, Channels => 1));
+         Area_B : constant OpenCV.Core.Mat := OpenCV.Core.Create
+           (16_384, 1_025, (Depth => OpenCV.Core.UInt8, Channels => 1));
+      begin
+         ECC_Expect_Error (Wide_A, Wide_A, Message => "16385 columns");
+         ECC_Expect_Error (Tall_A, Tall_A, Message => "16385 rows");
+         ECC_Expect_Error (Area_A, Area_A, Message => "4097 x 4096 pixels");
+         ECC_Expect_Error (Area_B, Area_B, Message => "16384 x 1025 pixels");
+      end;
+      --  Minimum accepted geometry (32 x 32) must reach native code and be valid.
+      declare
+         Smallest : constant ECC_Translation_Result := Estimate_ECC_Translation
+           (EF.Texture (32, 32), EF.Texture (32, 32, 1, 0));
+      begin
+         Assert (Smallest.Displacement.X > 0.9 and then Smallest.Displacement.X < 1.1
+                 and then abs (Smallest.Displacement.Y) < 0.1, "ECC 32x32 minimum geometry");
+      end;
+   end ECC_Image_Validation;
+
+   procedure ECC_Option_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Template : constant OpenCV.Core.Mat := ECC_Template;
+      Moving : constant OpenCV.Core.Mat := EF.Texture (128, 128, 2, 1);
+      function From_Bits is new Ada.Unchecked_Conversion (Interfaces.Unsigned_64, OpenCV.Float64_Value);
+      Bad_Epsilons : constant array (Positive range <>) of OpenCV.Float64_Value :=
+        [0.0, -1.0E-4, 9.0E-9, 0.1000001, 1.0,
+         From_Bits (16#7FF0_0000_0000_0000#),   --  +Inf
+         From_Bits (16#FFF0_0000_0000_0000#),   --  -Inf
+         From_Bits (16#7FF8_0000_0000_0000#)];  --  quiet NaN
+   begin
+      ECC_Expect_Error (Template, Moving, (Maximum_Iterations => 101, Epsilon => 0.0001),
+                        "101 iterations");
+      ECC_Expect_Error (Template, Moving, (Maximum_Iterations => Positive'Last, Epsilon => 0.0001),
+                        "Positive'Last iterations");
+      for Epsilon of Bad_Epsilons loop
+         ECC_Expect_Error (Template, Moving, (Maximum_Iterations => 50, Epsilon => Epsilon),
+                           "invalid epsilon");
+      end loop;
+      --  Inclusive bounds are accepted and never clamped: one iteration is a valid
+      --  request and its (deliberately unconverged) result differs from the default.
+      declare
+         Lower : constant ECC_Translation_Result := Estimate_ECC_Translation
+           (Template, Moving, (Maximum_Iterations => 1, Epsilon => 1.0E-8));
+         Default : constant ECC_Translation_Result := Estimate_ECC_Translation (Template, Moving);
+      begin
+         Assert (Lower.Displacement /= Default.Displacement, "ECC lower option bound was clamped");
+      end;
+      declare
+         Upper : constant ECC_Translation_Result := Estimate_ECC_Translation
+           (Template, Moving, (Maximum_Iterations => 100, Epsilon => 0.1));
+      begin
+         Assert (ECC_Near (Upper, 2, 1), "ECC upper option bounds");
+      end;
+   end ECC_Option_Validation;
+
+   --  One oracle line: the same-build direct OpenCV outcome for a named fixture.
+   type ECC_Oracle_Entry is record
+      Name       : String (1 .. 24) := [others => ' '];
+      Length     : Natural := 0;
+      Iterations : Positive := 1;
+      Epsilon    : OpenCV.Float64_Value := 0.0;
+      Converged  : Boolean := False;
+      DX, DY, Rho : OpenCV.Float64_Value := 0.0;
+      Template_Sum, Moving_Sum : Long_Long_Integer := 0;
+   end record;
+
+   package ECC_Integers is new Ada.Text_IO.Integer_IO (Integer);
+   package ECC_Longs is new Ada.Text_IO.Integer_IO (Long_Long_Integer);
+   package ECC_Floats is new Ada.Text_IO.Float_IO (OpenCV.Float64_Value);
+
+   Max_ECC_Oracle_Entries : constant := 64;
+   type ECC_Oracle_Table is array (1 .. Max_ECC_Oracle_Entries) of ECC_Oracle_Entry;
+
+   --  Strict parser: a missing, truncated, stale-versioned or malformed file raises
+   --  (the test then fails); nothing is silently skipped.
+   procedure Load_ECC_Oracle
+     (Table : out ECC_Oracle_Table; Count : out Natural; Version : out String; Version_Length : out Natural)
+   is
+      File : Ada.Text_IO.File_Type;
+      Magic : constant String :=
+        Ada.Environment_Variables.Value
+          ("VIDEO_ECC_TRANSLATION_ORACLE", "../obj/oracle/ecc-translation.txt");
+
+      function Word return String is
+         Result : String (1 .. 64);
+         Last : Natural := 0;
+         Ch : Character;
+         Eol : Boolean;
+      begin
+         loop
+            Ada.Text_IO.Look_Ahead (File, Ch, Eol);
+            exit when Eol or else Ch /= ' ';
+            Ada.Text_IO.Get (File, Ch);
+         end loop;
+         loop
+            Ada.Text_IO.Look_Ahead (File, Ch, Eol);
+            exit when Eol or else Ch = ' ';
+            Ada.Text_IO.Get (File, Ch);
+            Last := Last + 1;
+            Result (Last) := Ch;
+         end loop;
+         return Result (1 .. Last);
+      end Word;
+
+      procedure Next_Line is
+      begin
+         Ada.Text_IO.Skip_Line (File);
+      end Next_Line;
+   begin
+      Count := 0;
+      Version := [others => ' '];
+      Version_Length := 0;
+      Table := [others => <>];
+      Ada.Text_IO.Open (File, Ada.Text_IO.In_File, Magic);
+      Assert (Word = "ecc-oracle", "ECC oracle magic");
+      Assert (Word = "1", "ECC oracle format version");
+      Next_Line;
+      Assert (Word = "version", "ECC oracle version line");
+      declare
+         V : constant String := Word;
+      begin
+         Assert (V'Length <= Version'Length, "ECC oracle version too long");
+         Version (Version'First .. Version'First + V'Length - 1) := V;
+         Version_Length := V'Length;
+      end;
+      Next_Line;
+      loop
+         declare
+            Tag : constant String := Word;
+         begin
+            if Tag = "end" then
+               declare
+                  Declared : Integer;
+               begin
+                  ECC_Integers.Get (File, Declared);
+                  Assert (Declared = Count, "ECC oracle truncated or inconsistent");
+               end;
+               exit;
+            end if;
+            Assert (Tag = "fixture" and then Count < Max_ECC_Oracle_Entries, "ECC oracle fixture line");
+            Count := Count + 1;
+            declare
+               E : ECC_Oracle_Entry renames Table (Count);
+               Name : constant String := Word;
+            begin
+               Assert (Name'Length <= E.Name'Length, "ECC oracle name too long");
+               E.Name (1 .. Name'Length) := Name;
+               E.Length := Name'Length;
+               ECC_Integers.Get (File, E.Iterations);
+               ECC_Floats.Get (File, E.Epsilon);
+               declare
+                  Outcome : constant String := Word;
+               begin
+                  Assert (Outcome = "OK" or else Outcome = "EXC", "ECC oracle outcome");
+                  E.Converged := Outcome = "OK";
+               end;
+               ECC_Floats.Get (File, E.DX);
+               ECC_Floats.Get (File, E.DY);
+               ECC_Floats.Get (File, E.Rho);
+               ECC_Longs.Get (File, E.Template_Sum);
+               ECC_Longs.Get (File, E.Moving_Sum);
+            end;
+            Next_Line;
+         end;
+      end loop;
+      Ada.Text_IO.Close (File);
+   exception
+      when others =>
+         if Ada.Text_IO.Is_Open (File) then
+            Ada.Text_IO.Close (File);
+         end if;
+         raise;
+   end Load_ECC_Oracle;
+
+   type ECC_Pair is record
+      Template, Moving : OpenCV.Core.Mat;
+   end record;
+
+   --  Rebuilds the oracle's fixture by name. Unknown names fail the test.
+   function ECC_Build (Name : String) return ECC_Pair is
+      Window : constant OpenCV.Rect := (16, 16, 128, 128);
+      function Tex (DX, DY : Integer) return OpenCV.Core.Mat is (EF.Texture (128, 128, DX, DY));
+      function Pair (DX, DY : Integer) return ECC_Pair is (Template => Tex (0, 0), Moving => Tex (DX, DY));
+   begin
+      if Name = "identity" then return Pair (0, 0);
+      elsif Name = "positive" or else Name = "positive-it1" or else Name = "positive-it2"
+        or else Name = "positive-it100-e8" or else Name = "positive-e0.1" then return Pair (2, 1);
+      elsif Name = "negative" then return Pair (-2, -1);
+      elsif Name = "horizontal" then return Pair (3, 0);
+      elsif Name = "vertical" then return Pair (0, 3);
+      elsif Name = "contrast-0.8+20" then
+         return (Tex (0, 0), EF.Affine (Tex (2, 1), 4, 5, 20));
+      elsif Name = "contrast-1.3-10" then
+         return (Tex (0, 0), EF.Affine (Tex (2, 1), 13, 10, -10));
+      elsif Name = "low-variance" then
+         return (EF.Affine (Tex (0, 0), 1, 40, 126), EF.Affine (Tex (2, 1), 1, 40, 126));
+      elsif Name = "constant" then
+         return (EF.Constant_Image (128, 128, 128), EF.Constant_Image (128, 128, 128));
+      elsif Name = "constant-vs-texture" then
+         return (EF.Constant_Image (128, 128, 128), Tex (0, 0));
+      elsif Name = "noise-vs-noise" then return (EF.Noise (128, 128, 3), EF.Noise (128, 128, 9));
+      elsif Name = "noise-vs-texture" then return (Tex (0, 0), EF.Noise (128, 128, 7));
+      elsif Name = "stripes-shift3" then return (EF.Stripes (128, 128, 0), EF.Stripes (128, 128, 3));
+      elsif Name = "large-12-7" then return Pair (12, 7);
+      elsif Name = "large-6-4" then return Pair (6, 4);
+      elsif Name = "large-40-30" then return Pair (40, 30);
+      elsif Name = "region-both" then
+         return (EF.Texture (160, 160).Region (Window), EF.Texture (160, 160, 2, 1).Region (Window));
+      elsif Name = "region-template" then
+         return (EF.Texture (160, 160).Region (Window), EF.Texture (160, 160, 2, 1).Region (Window).Clone);
+      elsif Name = "region-moving" then
+         return (EF.Texture (160, 160).Region (Window).Clone, EF.Texture (160, 160, 2, 1).Region (Window));
+      elsif Name = "shift42-e0.1" or else Name = "shift42-e1e-8" then return Pair (4, 2);
+      elsif Name = "shift43-e0.1" or else Name = "shift43-e1e-8" then return Pair (4, 3);
+      end if;
+      Assert (False, "unknown ECC oracle fixture " & Name);
+      return Pair (0, 0);
+   end ECC_Build;
+
+   Expected_ECC_Oracle_Fixtures : constant := 27;
+
+   procedure ECC_Direct_Oracle (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Table : ECC_Oracle_Table;
+      Count, Version_Length : Natural;
+      Version : String (1 .. 32);
+      Largest : OpenCV.Float64_Value := 0.0;
+      Succeeded, Raised : Natural := 0;
+   begin
+      Load_ECC_Oracle (Table, Count, Version, Version_Length);
+      Assert (Version_Length > 0, "ECC oracle records no native version");
+      Assert (Count = Expected_ECC_Oracle_Fixtures, "ECC oracle fixture count is stale");
+      for Index in 1 .. Count loop
+         declare
+            E : ECC_Oracle_Entry renames Table (Index);
+            Name : constant String := E.Name (1 .. E.Length);
+            Pair : constant ECC_Pair := ECC_Build (Name);
+            Options : constant ECC_Translation_Options :=
+              (Maximum_Iterations => E.Iterations, Epsilon => E.Epsilon);
+         begin
+            Assert (EF.Checksum (Pair.Template) = E.Template_Sum
+                    and then EF.Checksum (Pair.Moving) = E.Moving_Sum,
+                    "ECC oracle fixture " & Name & " differs from the Ada fixture (stale oracle)");
+            if E.Converged then
+               declare
+                  R : constant ECC_Translation_Result :=
+                    Estimate_ECC_Translation (Pair.Template, Pair.Moving, Options);
+                  EX : constant OpenCV.Float64_Value := abs (OpenCV.Float64_Value (R.Displacement.X) - E.DX);
+                  EY : constant OpenCV.Float64_Value := abs (OpenCV.Float64_Value (R.Displacement.Y) - E.DY);
+                  ER : constant OpenCV.Float64_Value := abs (R.Correlation - E.Rho);
+               begin
+                  Succeeded := Succeeded + 1;
+                  Largest := OpenCV.Float64_Value'Max (Largest, OpenCV.Float64_Value'Max (EX, OpenCV.Float64_Value'Max (EY, ER)));
+                  Assert (EX <= 1.0E-5 and then EY <= 1.0E-5 and then ER <= 1.0E-6,
+                          "ECC binding differs from direct native for " & Name);
+               end;
+            else
+               begin
+                  declare
+                     R : constant ECC_Translation_Result :=
+                       Estimate_ECC_Translation (Pair.Template, Pair.Moving, Options);
+                     pragma Unreferenced (R);
+                  begin
+                     Assert (False, "ECC binding succeeded where native raised: " & Name);
+                  end;
+               exception
+                  when OpenCV.OpenCV_Error => Raised := Raised + 1;
+               end;
+            end if;
+         end;
+      end loop;
+      Assert (Succeeded > 0 and then Raised > 0, "ECC oracle did not cover both outcomes");
+      Assert (Succeeded + Raised = Count, "ECC oracle outcome accounting");
+   end ECC_Direct_Oracle;
+
+   procedure ECC_Degenerate_And_Nonconvergence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Flat : constant OpenCV.Core.Mat := EF.Constant_Image (128, 128, 128);
+      Texture_Image : constant OpenCV.Core.Mat := ECC_Template;
+   begin
+      --  A constant image has zero variance; native ECC cannot normalize and raises.
+      ECC_Expect_Error (Flat, Flat, Message => "constant images");
+      ECC_Expect_Error (Flat, Texture_Image, Message => "constant template");
+      ECC_Expect_Error (Texture_Image, Flat, Message => "constant moving");
+      --  Outcome for noise is version-defined: compare two runs, not a fixed claim.
+      declare
+         A : constant OpenCV.Core.Mat := EF.Noise (128, 128, 3);
+         B : constant OpenCV.Core.Mat := EF.Noise (128, 128, 9);
+         First, Second : ECC_Translation_Result;
+         First_Raised, Second_Raised : Boolean := False;
+      begin
+         begin First := Estimate_ECC_Translation (A, B); exception
+            when OpenCV.OpenCV_Error => First_Raised := True; end;
+         begin Second := Estimate_ECC_Translation (A, B); exception
+            when OpenCV.OpenCV_Error => Second_Raised := True; end;
+         Assert (First_Raised = Second_Raised and then (First_Raised or else First = Second),
+                 "ECC noise outcome is not repeatable");
+      end;
+      --  A finite result is not alignment proof: stripes carry no vertical information.
+      declare
+         R : constant ECC_Translation_Result :=
+           Estimate_ECC_Translation (EF.Stripes (128, 128, 0), EF.Stripes (128, 128, 0));
+      begin
+         Assert (abs (R.Displacement.X) < 1.0E-3 and then abs (R.Displacement.Y) < 1.0E-3,
+                 "ECC identical stripes");
+      end;
+   end ECC_Degenerate_And_Nonconvergence;
+
+   procedure ECC_Aspect_Ratios (T : in out Fixture) is
+      pragma Unreferenced (T);
+      type Geometry is record Rows, Columns : Positive; end record;
+      Shapes : constant array (1 .. 6) of Geometry :=
+        [(64, 256), (256, 64), (96, 96), (32, 512), (32, 16_384), (16_384, 32)];
+   begin
+      for Shape of Shapes loop
+         declare
+            R : constant ECC_Translation_Result := Estimate_ECC_Translation
+              (EF.Texture (Shape.Rows, Shape.Columns), EF.Texture (Shape.Rows, Shape.Columns, 2, 1));
+         begin
+            Assert (abs (R.Displacement.X - 2.0) < 0.1 and then abs (R.Displacement.Y - 1.0) < 0.1,
+                    "ECC aspect ratio displacement (incl. 32 x 16384 and 16384 x 32 limits)");
+         end;
+      end loop;
+   end ECC_Aspect_Ratios;
+
    function Suite return AUnit.Test_Suites.Access_Test_Suite is
       Result : constant AUnit.Test_Suites.Access_Test_Suite := AUnit.Test_Suites.New_Suite;
    begin
@@ -3499,6 +4054,17 @@ package body Video_Tests is
       Result.Add_Test (Caller.Create ("Seeded_Regions_Lifetime", Seeded_Regions_Lifetime'Access));
       Result.Add_Test (Caller.Create ("Seeded_Validation", Seeded_Validation'Access));
       Result.Add_Test (Caller.Create ("Seeded_Direct_Oracle", Seeded_Direct_Oracle'Access));
+      Result.Add_Test (Caller.Create ("ECC_Default_Options", ECC_Default_Options'Access));
+      Result.Add_Test (Caller.Create ("ECC_Translation_Directions", ECC_Translation_Directions'Access));
+      Result.Add_Test (Caller.Create ("ECC_Options_And_Repeatability", ECC_Options_And_Repeatability'Access));
+      Result.Add_Test (Caller.Create ("ECC_Epsilon_Sensitivity", ECC_Epsilon_Sensitivity'Access));
+      Result.Add_Test (Caller.Create ("ECC_Photometric", ECC_Photometric'Access));
+      Result.Add_Test (Caller.Create ("ECC_Regions_Lifetime", ECC_Regions_Lifetime'Access));
+      Result.Add_Test (Caller.Create ("ECC_Image_Validation", ECC_Image_Validation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Option_Validation", ECC_Option_Validation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Direct_Oracle", ECC_Direct_Oracle'Access));
+      Result.Add_Test (Caller.Create ("ECC_Degenerate_And_Nonconvergence", ECC_Degenerate_And_Nonconvergence'Access));
+      Result.Add_Test (Caller.Create ("ECC_Aspect_Ratios", ECC_Aspect_Ratios'Access));
       return Result;
    end Suite;
 end Video_Tests;
