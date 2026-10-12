@@ -167,4 +167,3 @@ int main(int argc, char **argv) {
     std::printf("PASS: ECC affine seeded oracle OpenCV %s, %d fixtures\n", CV_VERSION, count);
     return 0;
 }
-

@@ -2222,6 +2222,248 @@ void run_ecc_affine() {
 }  // namespace
 
 
+// ECC affine seeded (Task 015): the new export versus a direct seeded findTransformECC.
+namespace {
+opencv_video_status seeded_call(const opencv_core_mat_handle *a, const opencv_core_mat_handle *b,
+                                const float s[6], opencv_video_ecc_affine_result *r,
+                                int iterations = 50, double epsilon = 1e-4) {
+    return opencv_video_estimate_ecc_affine_seeded(a, b, iterations, epsilon, s[0], s[1], s[2],
+                                                   s[3], s[4], s[5], r);
+}
+
+// Direct native call with the six seed values in native storage order; ok=false on cv::Exception.
+bool seeded_direct(const cv::Mat &a, const cv::Mat &b, const float s[6], AffDirect &d,
+                   int iterations = 50, double epsilon = 1e-4) {
+    cv::Mat warp(2, 3, CV_32F);
+    for (int i = 0; i < 6; ++i) warp.ptr<float>()[i] = s[i];
+    try {
+        d.rho = cv::findTransformECC(a, b, warp, cv::MOTION_AFFINE,
+            cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, iterations, epsilon),
+            cv::noArray(), 5);
+    } catch (const cv::Exception &) { return false; }
+    for (int i = 0; i < 6; ++i) d.w[i] = warp.ptr<float>()[i];
+    return true;
+}
+
+void run_ecc_affine_seeded() {
+    const int n = 128;
+    const cv::Mat base_image = ecc_fixture::texture(n, n);
+    auto base = ecc_handle(base_image);
+    const cv::Mat before_base = base_image.clone();
+    const float identity[6] = {1, 0, 0, 0, 1, 0};
+
+    struct Case { const char *name; double t[6]; float seed[6]; bool identity_fails; };
+    // t = a b tx c d ty; seed in storage order m00 m01 m02 m10 m11 m12.
+    const Case cases[] = {
+        {"moderate shear", {1.00, 0.12, 1, -0.05, 1.00, -1}, {1.00f, 0.10f, 0.5f, -0.04f, 1.00f, -0.7f}, true},
+        {"nonuniform scale", {1.12, 0.02, 2, -0.01, 0.88, 1}, {1.10f, 0.01f, 1.5f, 0.0f, 0.90f, 0.8f}, true},
+        {"combined", {1.08, 0.08, 2, -0.04, 0.94, -1}, {1.06f, 0.07f, 1.7f, -0.03f, 0.95f, -0.8f}, true},
+        {"strong", {1.2, 0.1, 5, -0.1, 0.8, -3}, {1.18f, 0.09f, 4.5f, -0.09f, 0.82f, -2.7f}, true},
+        {"shear 0.2", {1, 0.2, 0, 0, 1, 0}, {1.0f, 0.18f, 0.0f, 0.0f, 1.0f, 0.0f}, true},
+        {"small", {1.01, 0.012, 2, -0.008, 0.99, 1}, {1.0f, 0.01f, 1.5f, -0.005f, 1.0f, 0.5f}, false},
+    };
+    for (const auto &c : cases) {
+        const cv::Mat moving_image =
+            aff_moving(n, n, c.t[0], c.t[1], c.t[3], c.t[4], c.t[2], c.t[5]);
+        auto moving = ecc_handle(moving_image);
+        AffDirect direct{};
+        check(seeded_direct(base_image, moving_image, c.seed, direct), c.name);
+        opencv_video_ecc_affine_result r = kAffSentinel;
+        check(seeded_call(base.get(), moving.get(), c.seed, &r) == OPENCV_VIDEO_OK, c.name);
+        aff_matches_direct(r, direct, "seeded export differs from the direct seeded native call");
+        const double truth[6] = {c.t[0], c.t[1], c.t[2], c.t[3], c.t[4], c.t[5]};
+        const float got[6] = {r.m00, r.m01, r.m02, r.m10, r.m11, r.m12};
+        for (int i = 0; i < 6; ++i)
+            check(std::fabs(got[i] - truth[i]) < (i == 2 || i == 5 ? 0.1 : 0.003),
+                  "seeded coefficient position, sign or magnitude");
+        check(std::memcmp(got, c.seed, sizeof got) != 0, "seeded result equals the seed");
+        check(std::isfinite(r.correlation) && r.correlation > 0.9, "seeded correlation");
+        opencv_video_ecc_affine_result again = kAffSentinel;
+        check(seeded_call(base.get(), moving.get(), c.seed, &again) == OPENCV_VIDEO_OK &&
+              std::memcmp(&again, &r, sizeof r) == 0, "seeded repeatability");
+        opencv_video_ecc_affine_result plain = kAffSentinel;
+        const auto plain_code = aff_call(base.get(), moving.get(), &plain);
+        if (c.identity_fails) {
+            check(plain_code == OPENCV_VIDEO_ERROR_OPENCV, "identity initialization unexpectedly converged");
+            aff_unchanged(plain, "identity failure changed result");
+        }
+        // Permuting storage order must give a different outcome (six-coefficient ordering).
+        float swapped[6] = {c.seed[0], c.seed[3], c.seed[2], c.seed[1], c.seed[4], c.seed[5]};
+        opencv_video_ecc_affine_result s = kAffSentinel;
+        const auto sc = seeded_call(base.get(), moving.get(), swapped, &s, 1);
+        opencv_video_ecc_affine_result o = kAffSentinel;
+        const auto oc = seeded_call(base.get(), moving.get(), c.seed, &o, 1);
+        check(oc == OPENCV_VIDEO_OK, "one-iteration seeded call");
+        check(sc != OPENCV_VIDEO_OK || std::memcmp(&s, &o, sizeof s) != 0, "M01/M10 order not observable");
+    }
+
+    // Identity seed equals the identity-initialized export byte for byte, success and failure.
+    {
+        const Case id_cases[] = {
+            {"identity", {1, 0, 0, 0, 1, 0}, {}, false}, {"translation", {1, 0, 2, 0, 1, 1}, {}, false},
+            {"small", {1.01, 0.012, 2, -0.008, 0.99, 1}, {}, false}, {"shear02", {1, 0.2, 0, 0, 1, 0}, {}, true},
+            {"reflect", {-1, 0, 127, 0, 1, 0}, {}, true}, {"strong", {1.2, 0.1, 5, -0.1, 0.8, -3}, {}, true},
+        };
+        for (const auto &c : id_cases) {
+            auto moving = ecc_handle(aff_moving(n, n, c.t[0], c.t[1], c.t[3], c.t[4], c.t[2], c.t[5]));
+            opencv_video_ecc_affine_result a = kAffSentinel, b = kAffSentinel;
+            const auto ca = aff_call(base.get(), moving.get(), &a);
+            const auto cb = seeded_call(base.get(), moving.get(), identity, &b);
+            check(ca == cb, "identity seed status differs");
+            check(std::memcmp(&a, &b, sizeof a) == 0, "identity seed result bytes differ");
+        }
+    }
+
+    // Argument validation and byte-for-byte result preservation.
+    {
+        const float near_seed[6] = {1.06f, 0.07f, 1.7f, -0.03f, 0.95f, -0.8f};
+        auto moving = ecc_handle(aff_moving(n, n, 1.08, 0.08, -0.04, 0.94, 2, -1));
+        opencv_video_ecc_affine_result r = kAffSentinel;
+        check(seeded_call(nullptr, moving.get(), near_seed, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null template");
+        aff_unchanged(r, "null template changed result");
+        check(seeded_call(base.get(), nullptr, near_seed, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null moving");
+        aff_unchanged(r, "null moving changed result");
+        check(seeded_call(base.get(), moving.get(), near_seed, nullptr) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+              "null result accepted");
+        for (int iterations : {0, -1, 101})
+            check(seeded_call(base.get(), moving.get(), near_seed, &r, iterations) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                  "bad iterations accepted");
+        for (double epsilon : {0.0, -1e-4, 9e-9, 0.1000001, std::numeric_limits<double>::quiet_NaN(),
+                               std::numeric_limits<double>::infinity()})
+            check(seeded_call(base.get(), moving.get(), near_seed, &r, 50, epsilon) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                  "bad epsilon accepted");
+        aff_unchanged(r, "invalid options changed result");
+        auto float_image = matrix(n, n, OPENCV_CORE_DEPTH_FLOAT32, 1);
+        auto color = matrix(n, n, OPENCV_CORE_DEPTH_UINT8, 3);
+        auto narrow = ecc_handle(ecc_fixture::texture(n, n + 1));
+        auto tiny = ecc_handle(ecc_fixture::texture(31, 128));
+        check(seeded_call(float_image.get(), float_image.get(), near_seed, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "float");
+        check(seeded_call(color.get(), color.get(), near_seed, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "color");
+        check(seeded_call(base.get(), narrow.get(), near_seed, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "geometry");
+        check(seeded_call(tiny.get(), tiny.get(), near_seed, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "tiny");
+        aff_unchanged(r, "invalid images changed result");
+
+        // Seed domain: nonfinite and out-of-range coefficients are rejected, bytes untouched.
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const float inf = std::numeric_limits<float>::infinity();
+        for (int slot = 0; slot < 6; ++slot) {
+            const float just_beyond = (slot == 2 || slot == 5) ? 1048577.0f : 4.0000005f;
+            for (float bad : {nan, inf, -inf, just_beyond, -just_beyond, std::numeric_limits<float>::max()}) {
+                float s[6];
+                std::memcpy(s, near_seed, sizeof s);
+                s[slot] = bad;
+                check(seeded_call(base.get(), moving.get(), s, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                      "invalid seed coefficient accepted");
+                aff_unchanged(r, "invalid seed changed result");
+            }
+        }
+        const float at_limits[6] = {4, -4, 1048576.0f, -4, 4, -1048576.0f};
+        const auto limit_code = seeded_call(base.get(), moving.get(), at_limits, &r);
+        check(limit_code == OPENCV_VIDEO_OK || limit_code == OPENCV_VIDEO_ERROR_OPENCV, "limit seed status");
+        if (limit_code != OPENCV_VIDEO_OK) aff_unchanged(r, "limit seed failure changed result");
+        // Singular and reflected seeds pass validation; native outcome equals the direct call.
+        const float odd[][6] = {{0, 0, 0, 0, 0, 0}, {1, 1, 0, 1, 1, 0}, {-1, 0, 0, 0, 1, 0},
+                                {4, 0, 0, 0, 0.01f, 0}, {1, 0, 100000.0f, 0, 1, 100000.0f}};
+        for (const auto &s : odd) {
+            AffDirect direct{};
+            const bool ok = seeded_direct(base_image, output(moving.get()), s, direct);
+            opencv_video_ecc_affine_result q = kAffSentinel;
+            const auto code = seeded_call(base.get(), moving.get(), s, &q);
+            check(code == (ok ? OPENCV_VIDEO_OK : OPENCV_VIDEO_ERROR_OPENCV), "odd seed status differs from direct");
+            if (ok) aff_matches_direct(q, direct, "odd seed differs from direct");
+            else aff_unchanged(q, "odd seed failure changed result");
+        }
+        auto flat = ecc_handle(ecc_fixture::constant(n, n, 128));
+        opencv_video_ecc_affine_result f = kAffSentinel;
+        check(seeded_call(flat.get(), flat.get(), near_seed, &f) == OPENCV_VIDEO_ERROR_OPENCV, "constant seeded");
+        aff_unchanged(f, "constant failure changed result");
+        const float wrong[6] = {0.8f, -0.2f, 6.0f, 0.2f, 1.25f, -5.0f};
+        check(seeded_call(base.get(), moving.get(), wrong, &f) == OPENCV_VIDEO_ERROR_OPENCV, "wrong seed accepted");
+        aff_unchanged(f, "wrong seed failure changed result");
+        check(std::strlen(opencv_video_last_error()) > 0, "no diagnostic after seeded nonconvergence");
+    }
+
+    // Same handle twice, shared allocation, and genuine non-contiguous Regions.
+    {
+        const float s[6] = {1.0f, 0.01f, 1.5f, 0.0f, 1.0f, 0.5f};
+        opencv_video_ecc_affine_result r = kAffSentinel;
+        check(seeded_call(base.get(), base.get(), s, &r) == OPENCV_VIDEO_OK, "same-handle seeded call");
+        AffDirect same{};
+        check(seeded_direct(base_image, base_image, s, same), "direct same-image");
+        aff_matches_direct(r, same, "same-handle seeded call differs from direct");
+        auto alias = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(alias.get()) = output(base.get());
+        opencv_video_ecc_affine_result a = kAffSentinel;
+        check(seeded_call(base.get(), alias.get(), s, &a) == OPENCV_VIDEO_OK && std::memcmp(&a, &r, sizeof a) == 0,
+              "shared-allocation seeded headers");
+        const cv::Mat parent_a = ecc_fixture::texture(160, 160);
+        const cv::Mat parent_b = aff_moving(160, 160, 1.01, 0.012, -0.008, 0.99, 2, 1);
+        const cv::Rect roi(16, 16, n, n);
+        auto h_a = ecc_handle(parent_a);
+        auto h_b = ecc_handle(parent_b);
+        auto region_a = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto region_b = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(region_a.get()) = output(h_a.get())(roi);
+        output(region_b.get()) = output(h_b.get())(roi);
+        check(!output(region_a.get()).isContinuous() && !output(region_b.get()).isContinuous(),
+              "fixture Region is contiguous");
+        opencv_video_ecc_affine_result g = kAffSentinel;
+        check(seeded_call(region_a.get(), region_b.get(), s, &g) == OPENCV_VIDEO_OK, "seeded Region call failed");
+        AffDirect dr{};
+        check(seeded_direct(parent_a(roi), parent_b(roi), s, dr), "direct Region");
+        aff_matches_direct(g, dr, "seeded Region differs from direct native Region call");
+        check(cv::norm(output(h_a.get()), parent_a, cv::NORM_INF) == 0 &&
+              cv::norm(output(h_b.get()), parent_b, cv::NORM_INF) == 0, "seeded call changed Region parents");
+    }
+    check(cv::norm(output(base.get()), before_base, cv::NORM_INF) == 0, "seeded call changed an input");
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    {
+        const float s[6] = {1.0f, 0.01f, 1.5f, 0.0f, 1.0f, 0.5f};
+        auto moving = ecc_handle(aff_moving(n, n, 1.01, 0.012, -0.008, 0.99, 2, 1));
+        // All eight exception injections (before and after native execution).
+        for (int stage : {1, 2}) for (int kind : {1, 2, 3, 4}) {
+            fault_stage = stage; fault_kind = kind;
+            opencv_video_ecc_affine_result r = kAffSentinel;
+            const auto code = seeded_call(base.get(), moving.get(), s, &r);
+            fault_stage = 0;
+            check(code == (kind == 2 ? OPENCV_VIDEO_ERROR_OPENCV
+                           : kind == 3 ? OPENCV_VIDEO_ERROR_UNKNOWN : OPENCV_VIDEO_ERROR_STANDARD),
+                  "seeded ECC affine injected exception mapped to the wrong status");
+            aff_unchanged(r, "seeded ECC affine injected failure changed result");
+        }
+        // Post-native corruption: nonfinite coefficients and correlation are rejected.
+        for (int mode : {1, 2, 3, 4, 9, 21, 22, 23, 24, 25, 26}) {
+            ecc_corrupt_mode = mode;
+            opencv_video_ecc_affine_result r = kAffSentinel;
+            const auto code = seeded_call(base.get(), moving.get(), s, &r);
+            ecc_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_ERROR_OPENCV, "seeded ECC affine nonfinite native output accepted");
+            aff_unchanged(r, "seeded ECC affine nonfinite output was partially published");
+        }
+        // Finite non-rigid outputs remain legitimate (no Euclidean policy on the seeded path).
+        for (int mode : {5, 6, 7, 8, 10, 11, 12, 13, 30, 31, 32, 33}) {
+            ecc_corrupt_mode = mode;
+            opencv_video_ecc_affine_result r = kAffSentinel;
+            const auto code = seeded_call(base.get(), moving.get(), s, &r);
+            ecc_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_OK, "seeded ECC affine rejected a finite non-rigid matrix");
+            check(std::memcmp(&r, &kAffSentinel, sizeof r) != 0, "seeded ECC affine finite output not published");
+        }
+    }
+#endif
+    {
+        const float s[6] = {1.0f, 0.01f, 1.5f, 0.0f, 1.0f, 0.5f};
+        auto moving = ecc_handle(aff_moving(n, n, 1.01, 0.012, -0.008, 0.99, 2, 1));
+        opencv_video_ecc_affine_result r = kAffSentinel;
+        check(seeded_call(base.get(), moving.get(), s, &r) == OPENCV_VIDEO_OK, "post-fault seeded affine call failed");
+    }
+    std::cout << "PASS: ECC affine seeded shim vs direct seeded findTransformECC, six coefficients, identity equivalence, "
+                 "seed domain, nonconvergence, Regions, atomicity, faults, corruption\n";
+}
+}  // namespace
+
+
 int main() {
     try {
         run();
@@ -2240,6 +2482,7 @@ int main() {
         run_ecc_euclidean();
         run_ecc_euclidean_seeded();
         run_ecc_affine();
+        run_ecc_affine_seeded();
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "FAIL: " << error.what() << '\n';
