@@ -6310,7 +6310,9 @@ package body Video_Tests is
             Assert (Refined.Warp /= Item.Seed.Warp, "seeded result is the unmodified seed");
             Assert (Sd_Residual (Pair, Refined.Warp, True) < Before * 0.5,
                     "refinement did not reduce the image residual");
-            Assert (Refined.Correlation > 0.9 and then Refined.Correlation <= 1.0,
+            --  Native correlation is not clamped: Float32 rounding can exceed 1.0 slightly
+            --  (measured 1.000000085 for the exact reflection).
+            Assert (Refined.Correlation > 0.9 and then Refined.Correlation <= 1.000001,
                     "seeded correlation");
             if Item.Coef_Improves then
                Assert (Sd_Coef_Error (Refined.Warp, Item.Truth)
