@@ -1,5 +1,55 @@
 # OpenCV Video for Ada
 
+### Caller-seeded ECC Euclidean alignment (Task 013)
+
+```ada
+Refined : constant ECC_Euclidean_Result :=
+  OpenCV.Video.Estimate_ECC_Euclidean
+    (Template_Image    => Previous_Image,
+     Moving_Image      => Current_Image,
+     Initial_Transform => Predicted_Transform);
+```
+
+One new overload: the private native 2x3 Float32 warp starts from `Initial_Transform` instead
+of the identity, and native `cv::findTransformECC` (`MOTION_EUCLIDEAN`, same criteria, no mask,
+Gaussian size 5) refines it. Options still precede the seed and default. The Task 012
+identity-initialized function and Task 011's translation API are unchanged.
+
+* **Only `Displacement` and `Rotation_Radians` are used.** `Initial_Transform.Correlation` is
+  ignored: it is not an input, not a threshold, never validated and never propagated, so a
+  previous `ECC_Euclidean_Result` can be passed back directly. The seed is never modified.
+* **Direction and origin.** The seed is a template-to-moving matrix with the Task 012 convention
+  (`moving = R(t) * template + Displacement`, X right, Y down), rotating about the image origin
+  `(0,0)`, not the centre. A centred rotation needs the compensating matrix translation
+  (`tx = cx - (cos t * cx - sin t * cy) + dx`, `ty = cy - (sin t * cx + cos t * cy) + dy`);
+  `Displacement` is never reinterpreted as the centre displacement. No transforms are composed,
+  and the matrix is applied with `WARP_INVERSE_MAP` without negating anything.
+* **Seed domain (binding policy, not an OpenCV limit).** Displacement components finite with
+  absolute value `<= 2**20`; rotation finite with absolute value `<= 1.0` radian. OpenCV's update
+  decodes the previous angle with `asin`, which only represents `[-Pi/2, Pi/2]`, so the angle bound
+  keeps the seed in the principal branch. Violations raise `OpenCV_Error`; nothing is clamped. The
+  returned angle is still decoded with `atan2`, in `[-Pi, Pi]`.
+* **A seed is a prediction.** `Predicted_Transform` must describe the transformation for the
+  current image pair; a previous pair's result may be a useful prediction but is not
+  automatically correct for the next pair. An accepted seed can still end in native
+  nonconvergence (`OpenCV_Error`, no fabricated identity) or in a wrong finite optimum, and a
+  finite rigid result does not prove alignment. `Correlation` remains the native value computed
+  before the final update.
+* **Evidence that the seed is consumed.** On the same 128x128 texture, identity initialization
+  throws for +8 and +12 degrees and returns a wrong finite warp for +10 degrees on every
+  supported OpenCV version; a near-correct seed recovers all three, and a seed with the wrong
+  rotation sign throws (`docs/ecc-euclidean-seeded-source-contract.md`).
+* **Limits unchanged from Task 012.** Same image envelope (2-D UInt8 C1, 32 .. 16,384 per side,
+  at most 2**24 pixels), the same 1 .. 100 iterations and `1.0E-8 .. 0.1` epsilon, about 1.3 GB
+  at the pixel limit, and Core Regions accepted. Supported OpenCV: 4.1 - 4.x and 5.0.
+* The production C ABI is now **19 exports** (one added:
+  `opencv_video_estimate_ecc_euclidean_seeded`) and AUnit has 140 registrations. See
+  [task note](docs/tasks/013-seeded-ecc-euclidean.md),
+  [source contract](docs/ecc-euclidean-seeded-source-contract.md) and
+  [qualification](docs/task013-qualification.md). Task 012's pinned and post-merge CI all
+  succeeded (recorded there), and the separately accepted Farnebäck upstream pointer-formation
+  limitation is untouched. Windows remains push-to-main only.
+
 ### ECC Euclidean translation and rotation alignment (Task 012)
 
 ```ada
