@@ -132,4 +132,19 @@ package OpenCV.Video.Internal.C_API is
       Levels, Window_Size, Iterations, Poly_Neighborhood : Interfaces.Integer_32;
       Poly_Sigma                 : Interfaces.C.double) return Status
      with Import, Convention => C, External_Name => "opencv_video_calc_farneback_flow_seeded";
+
+   --  Mirrors opencv_video_ecc_translation_result exactly (float, float, double).
+   type ECC_Translation_Result is record
+      Displacement_X : Interfaces.C.C_float := 0.0;
+      Displacement_Y : Interfaces.C.C_float := 0.0;
+      Correlation    : Interfaces.C.double := 0.0;
+   end record
+     with Convention => C;
+
+   function Estimate_ECC_Translation
+     (Template_Image, Moving_Image : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Maximum_Iterations           : Interfaces.Integer_32;
+      Epsilon                      : Interfaces.C.double;
+      Result                       : access ECC_Translation_Result) return Status
+     with Import, Convention => C, External_Name => "opencv_video_estimate_ecc_translation";
 end OpenCV.Video.Internal.C_API;
