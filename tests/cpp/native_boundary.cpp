@@ -1302,6 +1302,27 @@ void run_ecc() {
     const cv::Mat base_image = ecc_fixture::texture(n, n);
     auto base = ecc_handle(base_image);
     run_ecc_values(base_image, base);
+
+    // Two distinct Core headers sharing one allocation: a valid identity request, and
+    // the shared pixels are unchanged afterwards.
+    {
+        auto first = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto second = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(first.get()) = output(base.get());
+        output(second.get()) = output(base.get());
+        check(&output(first.get()) != &output(second.get()) &&
+              output(first.get()).data == output(second.get()).data &&
+              output(first.get()).data == output(base.get()).data, "fixture headers do not share storage");
+        opencv_video_ecc_translation_result r = kEccSentinel;
+        check(ecc_call(first.get(), second.get(), &r) == OPENCV_VIDEO_OK, "shared-storage identity failed");
+        check(std::fabs(r.displacement_x) < 1e-4 && std::fabs(r.displacement_y) < 1e-4 &&
+              std::fabs(r.correlation - 1.0) < 1e-6, "shared-storage identity value");
+        check(cv::norm(output(first.get()), base_image, cv::NORM_INF) == 0, "shared storage modified");
+        // Repeatable.
+        opencv_video_ecc_translation_result again = kEccSentinel;
+        check(ecc_call(first.get(), second.get(), &again) == OPENCV_VIDEO_OK &&
+              std::memcmp(&r, &again, sizeof r) == 0, "ECC call is not repeatable");
+    }
     run_ecc_arguments(base, n);
     run_ecc_nonconvergence(base, n);
 
