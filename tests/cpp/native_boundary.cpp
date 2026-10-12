@@ -1659,6 +1659,277 @@ void run_ecc_euclidean() {
 
 
 
+// Seeded ECC Euclidean (Task 013): actual shim versus a direct cv::findTransformECC call
+// started from an independently constructed nonidentity warp.
+namespace {
+opencv_video_status seeded_call(const opencv_core_mat_handle *a, const opencv_core_mat_handle *b,
+                                double theta, float tx, float ty,
+                                opencv_video_ecc_euclidean_result *r, int iterations = 50,
+                                double epsilon = 1e-4) {
+    return opencv_video_estimate_ecc_euclidean_seeded(a, b, iterations, epsilon, tx, ty, theta, r);
+}
+
+struct SeededDirect { bool ok; double rho; float w[6]; double theta; };
+
+SeededDirect seeded_direct(const cv::Mat &a, const cv::Mat &b, double theta, float tx, float ty,
+                           int iterations = 50, double eps = 1e-4) {
+    cv::Mat warp(2, 3, CV_32F);
+    const double c = std::cos(theta), s = std::sin(theta);
+    warp.at<float>(0, 0) = float(c);  warp.at<float>(0, 1) = float(-s);  warp.at<float>(0, 2) = tx;
+    warp.at<float>(1, 0) = float(s);  warp.at<float>(1, 1) = float(c);   warp.at<float>(1, 2) = ty;
+    SeededDirect d{};
+    try {
+        d.rho = cv::findTransformECC(a, b, warp, cv::MOTION_EUCLIDEAN,
+            cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, iterations, eps),
+            cv::noArray(), 5);
+        d.ok = true;
+    } catch (const cv::Exception &) { d.ok = false; return d; }
+    for (int i = 0; i < 6; ++i) d.w[i] = warp.ptr<float>()[i];
+    d.theta = std::atan2(double(d.w[3]), double(d.w[0]));
+    return d;
+}
+
+void seeded_matches(const opencv_video_ecc_euclidean_result &r, const SeededDirect &d, const char *m) {
+    check(d.ok && r.displacement_x == d.w[2] && r.displacement_y == d.w[5] &&
+          r.rotation_radians == d.theta && r.correlation == d.rho, m);
+}
+
+void run_ecc_euclidean_seeded() {
+    const int n = 128;
+    const double d2r = kPi / 180.0;
+    const cv::Mat base_image = ecc_fixture::texture(n, n);
+    auto base = ecc_handle(base_image);
+
+    // Native initialization is the supplied nonzero warp: shim == direct seeded call, and the
+    // distinguishing fixtures differ from identity initialization.
+    struct Case { double deg, tx, ty, sdeg, sx, sy; bool distinguishing; } cases[] = {
+        {3, 2, 1, 2.5, 2.3, 0.8, false}, {-3, 2, -1, -2.5, 2.3, -0.8, false},
+        {8, 0, 0, 7.5, 0.3, -0.2, true}, {-8, 0, 0, -8.5, 0.3, -0.2, true},
+        {10, 2, 1, 9.5, 2.3, 0.8, true}, {12, 0, 0, 11.5, 0.3, -0.2, true}};
+    for (const auto &c : cases) {
+        const cv::Mat mv = ecc_fixture::rigid_texture(n, n, c.deg, c.tx, c.ty);
+        auto moving = ecc_handle(mv);
+        const double st = c.sdeg * d2r;
+        opencv_video_ecc_euclidean_result r = kEucSentinel;
+        check(seeded_call(base.get(), moving.get(), st, float(c.sx), float(c.sy), &r) == OPENCV_VIDEO_OK,
+              "seeded valid call failed");
+        seeded_matches(r, seeded_direct(base_image, mv, st, float(c.sx), float(c.sy)),
+                       "seeded shim differs from direct seeded native call");
+        check(std::fabs(r.rotation_radians - c.deg * d2r) < 0.005 &&
+              std::fabs(r.displacement_x - c.tx) < 0.1 && std::fabs(r.displacement_y - c.ty) < 0.1,
+              "seeded result did not recover the transform");
+        opencv_video_ecc_euclidean_result again = kEucSentinel;
+        check(seeded_call(base.get(), moving.get(), st, float(c.sx), float(c.sy), &again) == OPENCV_VIDEO_OK &&
+              std::memcmp(&r, &again, sizeof r) == 0, "seeded call is not repeatable");
+        if (c.distinguishing) {
+            opencv_video_ecc_euclidean_result plain = kEucSentinel;
+            const auto code = euc_call(base.get(), moving.get(), &plain);
+            check(code != OPENCV_VIDEO_OK || std::memcmp(&plain, &r, sizeof r) != 0,
+                  "identity initialization matched the seeded result on a distinguishing fixture");
+        }
+    }
+
+    // Zero seed == identity-initialized export, byte for byte, including failures.
+    {
+        struct Z { double deg, tx, ty; } zeros[] = {{0, 0, 0}, {0, 2, 1}, {3, 0, 0}, {3, 2, 1}, {10, 2, 1}, {12, 0, 0}};
+        for (const auto &z : zeros) {
+            auto moving = ecc_handle(ecc_fixture::rigid_texture(n, n, z.deg, z.tx, z.ty));
+            opencv_video_ecc_euclidean_result plain = kEucSentinel, seeded = kEucSentinel;
+            const auto a = euc_call(base.get(), moving.get(), &plain);
+            const auto b = seeded_call(base.get(), moving.get(), 0.0, 0.0f, 0.0f, &seeded);
+            check(a == b, "zero seed changed the status");
+            check(std::memcmp(&plain, &seeded, sizeof plain) == 0, "zero seed changed the result bytes");
+        }
+    }
+
+    // Two different valid seeds on the same images give different results.
+    {
+        const cv::Mat mv = ecc_fixture::rigid_texture(n, n, 10, 0, 0);
+        auto moving = ecc_handle(mv);
+        opencv_video_ecc_euclidean_result good = kEucSentinel, far = kEucSentinel;
+        check(seeded_call(base.get(), moving.get(), 9.5 * d2r, 0.3f, -0.2f, &good) == OPENCV_VIDEO_OK, "good seed");
+        check(seeded_call(base.get(), moving.get(), 10 * d2r, 25.0f, -25.0f, &far) == OPENCV_VIDEO_OK, "far seed");
+        check(std::memcmp(&good, &far, sizeof good) != 0, "two different seeds produced the same result");
+        seeded_matches(far, seeded_direct(base_image, mv, 10 * d2r, 25.0f, -25.0f), "far seed differs from direct");
+        check(far.correlation < 0.9 && good.correlation > 0.98, "wrong-but-finite seed result");
+    }
+
+    // Exact accepted bounds reach native code; values just beyond them do not.
+    {
+        auto moving = ecc_handle(ecc_fixture::rigid_texture(n, n, 3, 2, 1));
+        const float limit = 1048576.0f;
+        const double bound_angles[] = {1.0, -1.0};
+        for (double angle : bound_angles) {
+            opencv_video_ecc_euclidean_result r = kEucSentinel;
+            const auto code = seeded_call(base.get(), moving.get(), angle, 0.0f, 0.0f, &r);
+            check(code == OPENCV_VIDEO_OK || code == OPENCV_VIDEO_ERROR_OPENCV, "angle bound rejected by preflight");
+            if (code != OPENCV_VIDEO_OK) euc_unchanged(r, "native failure at the angle bound changed the result");
+        }
+        for (float sign : {1.0f, -1.0f}) {
+            opencv_video_ecc_euclidean_result r = kEucSentinel;
+            const auto code = seeded_call(base.get(), moving.get(), 0.0, sign * limit, -sign * limit, &r);
+            check(code == OPENCV_VIDEO_OK || code == OPENCV_VIDEO_ERROR_OPENCV, "translation bound rejected by preflight");
+            if (code != OPENCV_VIDEO_OK) euc_unchanged(r, "native failure at the translation bound changed the result");
+        }
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        const double inf = std::numeric_limits<double>::infinity();
+        const float fnan = std::numeric_limits<float>::quiet_NaN();
+        const float finf = std::numeric_limits<float>::infinity();
+        struct Bad { double theta; float tx, ty; const char *what; } bad[] = {
+            {nan, 0, 0, "NaN angle"}, {inf, 0, 0, "+Inf angle"}, {-inf, 0, 0, "-Inf angle"},
+            {1.0000000000000002, 0, 0, "angle just above +1"}, {-1.0000000000000002, 0, 0, "angle just below -1"},
+            {3.0, 0, 0, "angle outside the asin branch"}, {1e300, 0, 0, "huge angle"},
+            {0, fnan, 0, "NaN tx"}, {0, 0, fnan, "NaN ty"}, {0, finf, 0, "+Inf tx"}, {0, 0, -finf, "-Inf ty"},
+            {0, 1048576.125f, 0, "tx just above 2^20"}, {0, 0, -1048576.125f, "ty just below -2^20"},
+            {0, 3.0e38f, 0, "huge tx"}};
+        for (const auto &b : bad) {
+            opencv_video_ecc_euclidean_result r = kEucSentinel;
+            check(seeded_call(base.get(), moving.get(), b.theta, b.tx, b.ty, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, b.what);
+            euc_unchanged(r, b.what);
+        }
+    }
+
+    // Argument, option and image failures leave the result bytes unchanged.
+    {
+        const cv::Mat mv = ecc_fixture::rigid_texture(n, n, 3, 2, 1);
+        auto moving = ecc_handle(mv);
+        opencv_video_ecc_euclidean_result r = kEucSentinel;
+        check(seeded_call(nullptr, moving.get(), 0.04, 2.0f, 1.0f, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null template");
+        check(seeded_call(base.get(), nullptr, 0.04, 2.0f, 1.0f, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null moving");
+        check(seeded_call(base.get(), moving.get(), 0.04, 2.0f, 1.0f, nullptr) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null output");
+        euc_unchanged(r, "null argument changed the result");
+        for (int it : {0, -1, 101}) {
+            check(seeded_call(base.get(), moving.get(), 0.04, 2.0f, 1.0f, &r, it) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "iterations");
+            euc_unchanged(r, "invalid iterations changed the result");
+        }
+        for (double eps : {0.0, 1e-9, 0.11, std::numeric_limits<double>::quiet_NaN()}) {
+            check(seeded_call(base.get(), moving.get(), 0.04, 2.0f, 1.0f, &r, 50, eps) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "epsilon");
+            euc_unchanged(r, "invalid epsilon changed the result");
+        }
+        auto flt = matrix(n, n, OPENCV_CORE_DEPTH_FLOAT32, 1);
+        auto other = matrix(n, n + 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        for (const opencv_core_mat_handle *bad : {flt.get(), other.get()}) {
+            check(seeded_call(base.get(), bad, 0.04, 2.0f, 1.0f, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "bad moving");
+            check(seeded_call(bad, base.get(), 0.04, 2.0f, 1.0f, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "bad template");
+            euc_unchanged(r, "bad image changed the result");
+        }
+        // Iteration and epsilon options reach the seeded native call.
+        r = kEucSentinel;
+        check(seeded_call(base.get(), moving.get(), 2.5 * d2r, 2.3f, 0.8f, &r, 1) == OPENCV_VIDEO_OK, "one iteration");
+        seeded_matches(r, seeded_direct(base_image, mv, 2.5 * d2r, 2.3f, 0.8f, 1), "iteration option not forwarded");
+        opencv_video_ecc_euclidean_result tight = kEucSentinel;
+        check(seeded_call(base.get(), moving.get(), 2.5 * d2r, 2.3f, 0.8f, &tight, 50, 1e-8) == OPENCV_VIDEO_OK, "tight");
+        seeded_matches(tight, seeded_direct(base_image, mv, 2.5 * d2r, 2.3f, 0.8f, 50, 1e-8), "epsilon option not forwarded");
+        check(std::memcmp(&r, &tight, sizeof r) != 0, "iteration count had no effect");
+    }
+
+    // Nonconvergence with a nonzero seed: error, result untouched.
+    {
+        auto constant = ecc_handle(ecc_fixture::constant(n, n, 128));
+        opencv_video_ecc_euclidean_result r = kEucSentinel;
+        check(seeded_call(constant.get(), constant.get(), 0.02, 1.0f, 1.0f, &r) == OPENCV_VIDEO_ERROR_OPENCV, "constant");
+        euc_unchanged(r, "nonconvergence changed the result");
+        auto noise_a = ecc_handle(ecc_fixture::noise(n, n, 3));
+        auto noise_b = ecc_handle(ecc_fixture::noise(n, n, 9));
+        check(seeded_call(noise_a.get(), noise_b.get(), 0.02, 1.0f, 1.0f, &r) == OPENCV_VIDEO_ERROR_OPENCV, "noise");
+        euc_unchanged(r, "noise failure changed the result");
+        auto rot12 = ecc_handle(ecc_fixture::rigid_texture(n, n, 12, 0, 0));
+        check(seeded_call(base.get(), rot12.get(), -12 * d2r, 0.0f, 0.0f, &r) == OPENCV_VIDEO_ERROR_OPENCV, "wrong-sign seed");
+        euc_unchanged(r, "wrong-sign seed failure changed the result");
+    }
+
+    // Same handle, shared storage, centred rotation, Regions.
+    {
+        opencv_video_ecc_euclidean_result r = kEucSentinel;
+        check(seeded_call(base.get(), base.get(), 0.02, 0.5f, -0.5f, &r) == OPENCV_VIDEO_OK &&
+              std::fabs(r.rotation_radians) < 1e-4 && std::fabs(r.displacement_x) < 0.02 &&
+              std::fabs(r.displacement_y) < 0.02, "same-handle seeded identity (seed moved by 0.5 px; residual is epsilon-limited)");
+        auto first = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto second = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(first.get()) = output(base.get());
+        output(second.get()) = output(base.get());
+        r = kEucSentinel;
+        check(seeded_call(first.get(), second.get(), 0.02, 0.5f, -0.5f, &r) == OPENCV_VIDEO_OK &&
+              std::fabs(r.rotation_radians) < 1e-4, "shared-storage seeded identity");
+        check(cv::norm(output(base.get()), base_image, cv::NORM_INF) == 0, "seeded call modified a shared input");
+
+        const double t = 3 * d2r, cx = (n - 1) / 2.0, cy = (n - 1) / 2.0;
+        const double tx = cx - (std::cos(t) * cx - std::sin(t) * cy) + 1.5;
+        const double ty = cy - (std::sin(t) * cx + std::cos(t) * cy) - 1.0;
+        auto centred = ecc_handle(ecc_fixture::rigid_texture(n, n, 3, tx, ty));
+        r = kEucSentinel;
+        check(seeded_call(base.get(), centred.get(), 2.6 * d2r, float(tx + 0.4), float(ty - 0.3), &r) == OPENCV_VIDEO_OK,
+              "centred seeded call");
+        check(std::fabs(r.displacement_x - tx) < 0.1 && std::fabs(r.displacement_y - ty) < 0.1 &&
+              std::fabs(r.rotation_radians - t) < 0.005 && std::fabs(r.displacement_x - 1.5) > 1.0,
+              "centred rotation matrix translation");
+
+        const cv::Mat parent_a = ecc_fixture::texture(160, 160);
+        const cv::Mat parent_b = ecc_fixture::rigid_texture(160, 160, 3, 2, 1);
+        const cv::Rect roi(16, 16, n, n);
+        auto h_a = ecc_handle(parent_a);
+        auto h_b = ecc_handle(parent_b);
+        auto region_a = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto region_b = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(region_a.get()) = output(h_a.get())(roi);
+        output(region_b.get()) = output(h_b.get())(roi);
+        check(!output(region_a.get()).isContinuous(), "fixture Region is contiguous");
+        r = kEucSentinel;
+        check(seeded_call(region_a.get(), region_b.get(), 2.5 * d2r, 2.3f, 0.8f, &r) == OPENCV_VIDEO_OK, "Region seeded call");
+        seeded_matches(r, seeded_direct(parent_a(roi), parent_b(roi), 2.5 * d2r, 2.3f, 0.8f), "Region differs from direct");
+        check(cv::norm(output(h_a.get()), parent_a, cv::NORM_INF) == 0 &&
+              cv::norm(output(h_b.get()), parent_b, cv::NORM_INF) == 0, "seeded call changed Region parents");
+    }
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    {
+        auto moving = ecc_handle(ecc_fixture::rigid_texture(n, n, 3, 2, 1));
+        for (int stage : {1, 2}) for (int kind : {1, 2, 3, 4}) {
+            fault_stage = stage; fault_kind = kind;
+            opencv_video_ecc_euclidean_result r = kEucSentinel;
+            const auto code = seeded_call(base.get(), moving.get(), 2.5 * d2r, 2.3f, 0.8f, &r);
+            fault_stage = 0;
+            check(code == (kind == 2 ? OPENCV_VIDEO_ERROR_OPENCV
+                           : kind == 3 ? OPENCV_VIDEO_ERROR_UNKNOWN : OPENCV_VIDEO_ERROR_STANDARD),
+                  "seeded injected exception mapped to the wrong status");
+            euc_unchanged(r, "seeded injected failure changed the result");
+        }
+        for (int mode : {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13}) {
+            ecc_corrupt_mode = mode;
+            opencv_video_ecc_euclidean_result r = kEucSentinel;
+            const auto code = seeded_call(base.get(), moving.get(), 2.5 * d2r, 2.3f, 0.8f, &r);
+            ecc_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_ERROR_OPENCV, "seeded corrupted native output accepted");
+            euc_unchanged(r, "seeded corrupted native output was partially published");
+        }
+        // Valid large-angle OUTPUT warps are decoded with atan2; this does not authorize such seeds.
+        for (int mode : {11, 12}) {
+            ecc_corrupt_mode = mode;
+            opencv_video_ecc_euclidean_result r = kEucSentinel;
+            const auto code = seeded_call(base.get(), moving.get(), 2.5 * d2r, 2.3f, 0.8f, &r);
+            ecc_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_OK, "seeded valid large-angle output warp rejected");
+            const double expected = (mode == 11 ? 120.0 : -150.0) * kPi / 180.0;
+            check(std::fabs(r.rotation_radians - expected) < 1e-6 && r.displacement_x == 3.0f &&
+                  r.displacement_y == -4.0f, "seeded large-angle output decoded wrongly");
+        }
+        // Seed validation precedes native execution: a rejected seed never reaches a fault hook.
+        fault_stage = 1; fault_kind = 1;
+        opencv_video_ecc_euclidean_result r = kEucSentinel;
+        check(seeded_call(base.get(), moving.get(), 3.0, 0.0f, 0.0f, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+              "invalid seed must be rejected before native execution");
+        fault_stage = 0;
+        euc_unchanged(r, "rejected seed changed the result");
+    }
+#endif
+    auto moving = ecc_handle(ecc_fixture::rigid_texture(n, n, 3, 2, 1));
+    opencv_video_ecc_euclidean_result r = kEucSentinel;
+    check(seeded_call(base.get(), moving.get(), 2.5 * d2r, 2.3f, 0.8f, &r) == OPENCV_VIDEO_OK, "post-fault seeded call failed");
+    std::cout << "PASS: seeded ECC Euclidean shim vs direct nonidentity findTransformECC, zero seed, bounds, signs, atomicity, aliases, Regions, faults, corruption\n";
+}
+}  // namespace
+
+
 int main() {
     try {
         run();
@@ -1675,6 +1946,7 @@ int main() {
         run_farneback_seeded();
         run_ecc();
         run_ecc_euclidean();
+        run_ecc_euclidean_seeded();
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "FAIL: " << error.what() << '\n';

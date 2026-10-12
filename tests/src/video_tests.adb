@@ -4545,6 +4545,685 @@ package body Video_Tests is
       Assert (Succeeded + Raised = Count, "Euclidean oracle outcome accounting");
    end ECC_Euclidean_Direct_Oracle;
 
+   ---------------------------------------------------------------------
+   --  Task 013: caller-seeded ECC Euclidean alignment
+   ---------------------------------------------------------------------
+   function Seed
+     (Degrees, TX, TY : Long_Float; Correlation : Long_Float := 0.0) return ECC_Euclidean_Result is
+     (Displacement     => (X => OpenCV.Float32_Value (TX), Y => OpenCV.Float32_Value (TY)),
+      Rotation_Radians => OpenCV.Float64_Value (Degrees * Degrees_To_Radians),
+      Correlation      => OpenCV.Float64_Value (Correlation));
+
+   procedure Run_Seeded
+     (Pair : ECC_Pair; Initial : ECC_Euclidean_Result;
+      Result : out ECC_Euclidean_Result; Raised : out Boolean;
+      Options : ECC_Euclidean_Options := (others => <>)) is
+   begin
+      Result := Estimate_ECC_Euclidean (Pair.Template, Pair.Moving, Options, Initial);
+      Raised := False;
+   exception
+      when OpenCV.OpenCV_Error => Result := (others => <>); Raised := True;
+   end Run_Seeded;
+
+   procedure Run_Unseeded
+     (Pair : ECC_Pair; Result : out ECC_Euclidean_Result; Raised : out Boolean;
+      Options : ECC_Euclidean_Options := (others => <>)) is
+   begin
+      Result := Estimate_ECC_Euclidean (Pair.Template, Pair.Moving, Options);
+      Raised := False;
+   exception
+      when OpenCV.OpenCV_Error => Result := (others => <>); Raised := True;
+   end Run_Unseeded;
+
+   type Seed_Outcome is (Accepted, Preflight_Rejected, Native_Failed);
+
+   --  Native-layer failures carry the "Video.Estimate_ECC_Euclidean" prefix (C.Check);
+   --  Ada preflight rejections do not.
+   function Seed_Outcome_Of
+     (Pair : ECC_Pair; Initial : ECC_Euclidean_Result;
+      Options : ECC_Euclidean_Options := (others => <>)) return Seed_Outcome
+   is
+      Marker : constant String := "Video.Estimate_ECC_Euclidean";
+      Unused : ECC_Euclidean_Result;
+   begin
+      Unused := Estimate_ECC_Euclidean (Pair.Template, Pair.Moving, Options, Initial);
+      return Accepted;
+   exception
+      when Error : OpenCV.OpenCV_Error =>
+         declare
+            Text : constant String := Ada.Exceptions.Exception_Message (Error);
+         begin
+            return (if Text'Length >= Marker'Length
+                      and then Text (Text'First .. Text'First + Marker'Length - 1) = Marker
+                    then Native_Failed else Preflight_Rejected);
+         end;
+   end Seed_Outcome_Of;
+
+   procedure ECC_Seeded_Zero_Equivalence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      type Zero_Case is record Degrees, TX, TY : Long_Float; end record;
+      Cases : constant array (1 .. 7) of Zero_Case :=
+        [(0.0, 0.0, 0.0), (0.0, 2.0, 1.0), (3.0, 0.0, 0.0), (3.0, 2.0, 1.0),
+         (-3.0, 2.0, -1.0), (10.0, 2.0, 1.0), (12.0, 0.0, 0.0)];
+      Zero : constant ECC_Euclidean_Result := (others => <>);
+      Failures, Successes : Natural := 0;
+   begin
+      for Item of Cases loop
+         declare
+            Pair : constant ECC_Pair := Euc_Pair (Item.Degrees, Item.TX, Item.TY);
+            Plain, Seeded, Defaulted : ECC_Euclidean_Result;
+            Plain_Raised, Seeded_Raised, Defaulted_Raised : Boolean;
+         begin
+            Run_Unseeded (Pair, Plain, Plain_Raised);
+            Run_Seeded (Pair, Zero, Seeded, Seeded_Raised);
+            --  Options omitted: the defaulted parameter precedes the required seed.
+            begin
+               Defaulted := Estimate_ECC_Euclidean
+                 (Template_Image => Pair.Template, Moving_Image => Pair.Moving,
+                  Initial_Transform => Zero);
+               Defaulted_Raised := False;
+            exception
+               when OpenCV.OpenCV_Error => Defaulted := (others => <>); Defaulted_Raised := True;
+            end;
+            Assert (Plain_Raised = Seeded_Raised and then Seeded_Raised = Defaulted_Raised,
+                    "zero seed changed the success/failure classification");
+            Assert (Plain = Seeded and then Seeded = Defaulted,
+                    "zero seed differs from the identity-initialized result");
+            if Plain_Raised then Failures := Failures + 1; else Successes := Successes + 1; end if;
+         end;
+      end loop;
+      Assert (Failures > 0 and then Successes > 0, "zero-seed cases must cover both outcomes");
+   end ECC_Seeded_Zero_Equivalence;
+
+   procedure ECC_Seeded_Signs_And_Translation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      type Signed_Case is record Degrees, TX, TY, Seed_Degrees, Seed_TX, Seed_TY : Long_Float; end record;
+      Cases : constant array (1 .. 8) of Signed_Case :=
+        [(3.0, 0.0, 0.0, 2.6, 0.2, -0.2), (-3.0, 0.0, 0.0, -2.6, 0.2, -0.2),
+         (3.0, 2.0, 1.0, 2.5, 2.3, 0.8), (3.0, -2.0, -1.0, 2.5, -2.3, -0.8),
+         (-3.0, 2.0, -1.0, -2.5, 2.3, -0.8), (-3.0, -2.0, 1.0, -2.5, -2.3, 1.2),
+         (8.0, 0.0, 0.0, 7.5, 0.3, -0.2), (-8.0, 0.0, 0.0, -8.5, 0.3, -0.2)];
+   begin
+      for Item of Cases loop
+         declare
+            Pair : constant ECC_Pair := Euc_Pair (Item.Degrees, Item.TX, Item.TY);
+            R : ECC_Euclidean_Result;
+            Raised : Boolean;
+         begin
+            Run_Seeded (Pair, Seed (Item.Seed_Degrees, Item.Seed_TX, Item.Seed_TY), R, Raised);
+            Assert (not Raised, "near-correct seed failed in native ECC");
+            Assert (Euc_Near (R, Item.Degrees, Item.TX, Item.TY), "seeded ECC did not recover the transform");
+            Assert ((R.Rotation_Radians > 0.0) = (Item.Degrees > 0.0), "seeded rotation sign");
+            Assert (R.Correlation > 0.98 and then R.Correlation <= 1.000001, "seeded correlation range");
+         end;
+      end loop;
+   end ECC_Seeded_Signs_And_Translation;
+
+
+   procedure ECC_Seeded_Consumption (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Rot12      : constant ECC_Pair := Euc_Pair (12.0, 0.0, 0.0);
+      Rot10_T    : constant ECC_Pair := Euc_Pair (10.0, 2.0, 1.0);
+      Rot10      : constant ECC_Pair := Euc_Pair (10.0, 0.0, 0.0);
+      Plain, Near_R, Wrong_R, Other_R : ECC_Euclidean_Result;
+      Plain_Raised, Near_Raised, Wrong_Raised, Other_Raised : Boolean;
+      Near_Seed  : constant ECC_Euclidean_Result := Seed (9.5, 0.3, -0.2);
+   begin
+      --  12 degrees: identity initialization raises on every supported OpenCV version, a
+      --  near-correct seed recovers it, and a seed with the wrong rotation sign does not.
+      Run_Unseeded (Rot12, Plain, Plain_Raised);
+      Run_Seeded (Rot12, Seed (11.5, 0.3, -0.2), Near_R, Near_Raised);
+      Run_Seeded (Rot12, Seed (-11.5, 0.3, -0.2), Wrong_R, Wrong_Raised);
+      Assert (Plain_Raised, "identity initialization unexpectedly solved 12 degrees");
+      Assert (not Near_Raised and then Euc_Near (Near_R, 12.0, 0.0, 0.0),
+              "seed was not consumed (12 degrees)");
+      Assert (Wrong_Raised, "a seed with the wrong rotation sign was not distinguished");
+      --  10 degrees + (2,1): identity initialization returns a WRONG finite optimum.
+      Run_Unseeded (Rot10_T, Plain, Plain_Raised);
+      Run_Seeded (Rot10_T, Seed (9.5, 2.3, 0.8), Near_R, Near_Raised);
+      Assert (not Plain_Raised and then not Euc_Near (Plain, 10.0, 2.0, 1.0)
+              and then Plain.Correlation < 0.7, "identity result is not a wrong finite optimum");
+      Assert (not Near_Raised and then Euc_Near (Near_R, 10.0, 2.0, 1.0)
+              and then Near_R.Correlation > 0.98, "seed was not consumed (10 degrees + translation)");
+      --  Different valid seeds give meaningfully different results for the same images.
+      Run_Seeded (Rot10, Near_Seed, Near_R, Near_Raised);
+      Run_Seeded (Rot10, Seed (10.0, 25.0, -25.0), Wrong_R, Wrong_Raised);
+      Run_Unseeded (Rot10, Plain, Plain_Raised);
+      Assert (not Near_Raised and then Euc_Near (Near_R, 10.0, 0.0, 0.0), "near seed result");
+      Assert (not Wrong_Raised and then not Euc_Near (Wrong_R, 10.0, 0.0, 0.0)
+              and then abs (LF (Wrong_R.Displacement.X) - LF (Near_R.Displacement.X)) > 10.0
+              and then Wrong_R.Correlation < 0.9,
+              "inaccurate seed did not produce a different finite result");
+      --  The seed is refined, never returned unchanged.
+      Assert (Near_R.Displacement /= Near_Seed.Displacement
+              and then Near_R.Rotation_Radians /= Near_Seed.Rotation_Radians,
+              "near seed was returned without native refinement");
+      --  A zero seed is the identity start: it reproduces the unseeded outcome exactly.
+      Run_Seeded (Rot10, (others => <>), Other_R, Other_Raised);
+      Assert (Other_Raised = Plain_Raised and then (Other_Raised or else Other_R = Plain),
+              "zero seed differs from identity initialization");
+      Assert (Other_Raised or else Other_R /= Near_R, "zero seed matched the near-seed result");
+   end ECC_Seeded_Consumption;
+
+   procedure ECC_Seeded_Refinement_And_Residual (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pair    : constant ECC_Pair := Euc_Pair (3.0, 2.0, 1.0);
+      Initial : constant ECC_Euclidean_Result := Seed (2.5, 2.3, 0.8);
+      R, One, Two, Full : ECC_Euclidean_Result;
+      Raised, Dummy     : Boolean;
+   begin
+      Run_Seeded (Pair, Initial, R, Raised);
+      Assert (not Raised and then Euc_Near (R, 3.0, 2.0, 1.0), "imperfect seed was not refined");
+      --  The refined transform is closer to the truth than the seed, in every component.
+      Assert (abs (Long_Float (R.Rotation_Radians) - 3.0 * Degrees_To_Radians)
+              < abs (Long_Float (Initial.Rotation_Radians) - 3.0 * Degrees_To_Radians),
+              "rotation error did not improve over the seed");
+      Assert (abs (LF (R.Displacement.X) - 2.0) < abs (LF (Initial.Displacement.X) - 2.0)
+              and then abs (LF (R.Displacement.Y) - 1.0) < abs (LF (Initial.Displacement.Y) - 1.0),
+              "translation error did not improve over the seed");
+      --  Inverse-map residual (moving resampled at W * p): seed < unaligned, refined < seed.
+      declare
+         Before  : constant Long_Float := Euc_Residual (Pair, (others => <>), Aligned => False);
+         At_Seed : constant Long_Float := Euc_Residual (Pair, Initial, Aligned => True);
+         After   : constant Long_Float := Euc_Residual (Pair, R, Aligned => True);
+      begin
+         Assert (Before > 10.0 and then At_Seed < Before, "seed does not reduce the residual");
+         Assert (After < At_Seed, "refined residual did not improve over the seed residual");
+      end;
+      --  Iteration and epsilon options reach the seeded call.
+      Run_Seeded (Pair, Initial, One, Dummy, (Maximum_Iterations => 1, Epsilon => 0.0001));
+      Run_Seeded (Pair, Initial, Two, Dummy, (Maximum_Iterations => 2, Epsilon => 0.0001));
+      Run_Seeded (Pair, Initial, Full, Dummy, (Maximum_Iterations => 50, Epsilon => 1.0E-8));
+      Assert (One /= R and then Two /= R and then One /= Two, "seeded iteration option ignored");
+      Assert (Full /= R, "seeded epsilon option ignored");
+      Assert (One.Correlation < R.Correlation, "one iteration scored like the full run");
+   end ECC_Seeded_Refinement_And_Residual;
+
+
+   procedure ECC_Seeded_Input_Independence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pair     : constant ECC_Pair := Euc_Pair (3.0, 2.0, 1.0);
+      Before_T : constant Long_Long_Integer := EF.Checksum (Pair.Template);
+      Before_M : constant Long_Long_Integer := EF.Checksum (Pair.Moving);
+      Initial  : constant ECC_Euclidean_Result := Seed (2.5, 2.3, 0.8, Correlation => 0.25);
+      Saved    : constant ECC_Euclidean_Result := Initial;
+      Correlations : constant array (1 .. 5) of OpenCV.Float64_Value :=
+        [0.0, 0.25, 0.999, -1.0, 1.0E300];
+      First, Second, Third : ECC_Euclidean_Result;
+      Dummy : Boolean;
+   begin
+      Run_Seeded (Pair, Initial, First, Dummy);
+      Assert (Initial = Saved, "the initial transform was modified");
+      --  Only the correlation differs: the result is unchanged, so it is not an input.
+      for Correlation of Correlations loop
+         Run_Seeded (Pair, (Initial with delta Correlation => Correlation), Second, Dummy);
+         Assert (Second = First, "initial correlation influenced the result");
+      end loop;
+      Assert (First.Correlation /= Initial.Correlation, "initial correlation was propagated");
+      --  Reuse: the previous result is a valid seed for the next call and is not consumed.
+      Run_Seeded (Pair, First, Second, Dummy);
+      Assert (Second.Correlation > 0.98 and then Euc_Near (Second, 3.0, 2.0, 1.0),
+              "reusing a previous result as a seed");
+      Run_Seeded (Pair, First, Third, Dummy);
+      Assert (Third = Second, "repeated calls with the same seed differ");
+      --  A rejected request leaves the seed intact and a later call still works.
+      Assert (Seed_Outcome_Of (Pair, Initial, (Maximum_Iterations => 101, Epsilon => 0.0001))
+              = Preflight_Rejected, "invalid options were not rejected by the preflight");
+      Assert (Initial = Saved, "the initial transform changed after a rejected request");
+      Run_Seeded (Pair, Initial, Third, Dummy);
+      Assert (Third = First, "seeded call after a rejection differs");
+      Assert (EF.Checksum (Pair.Template) = Before_T and then EF.Checksum (Pair.Moving) = Before_M,
+              "seeded ECC modified an image");
+   end ECC_Seeded_Input_Independence;
+
+   procedure ECC_Seeded_Centered_Rotation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Theta : constant Long_Float := 3.0 * Degrees_To_Radians;
+      CX    : constant Long_Float := 63.5;
+      CY    : constant Long_Float := 63.5;
+      TX    : constant Long_Float := CX - (LM.Cos (Theta) * CX - LM.Sin (Theta) * CY) + 1.5;
+      TY    : constant Long_Float := CY - (LM.Sin (Theta) * CX + LM.Cos (Theta) * CY) - 1.0;
+      Pair  : constant ECC_Pair := Euc_Pair (3.0, TX, TY);
+      Initial : constant ECC_Euclidean_Result :=
+        (Displacement     => (X => OpenCV.Float32_Value (TX + 0.4), Y => OpenCV.Float32_Value (TY - 0.3)),
+         Rotation_Radians => OpenCV.Float64_Value (2.6 * Degrees_To_Radians), Correlation => 0.0);
+      Center_Seed : constant ECC_Euclidean_Result :=
+        (Displacement => (X => 1.5, Y => -1.0), Rotation_Radians => OpenCV.Float64_Value (Theta),
+         Correlation => 0.0);
+      R, Misread : ECC_Euclidean_Result;
+      Raised, Misread_Raised : Boolean;
+      MX, MY : Long_Float;
+   begin
+      Run_Seeded (Pair, Initial, R, Raised);
+      Assert (not Raised and then Euc_Near (R, 3.0, TX, TY), "centred rotation seed was not refined");
+      Euc_Map (R, CX, CY, MX, MY);
+      Assert (abs (MX - (CX + 1.5)) < 0.15 and then abs (MY - (CY - 1.0)) < 0.15, "centre point mapping");
+      Euc_Map (R, 10.0, 100.0, MX, MY);
+      Assert (abs (MX - (LM.Cos (Theta) * 10.0 - LM.Sin (Theta) * 100.0 + TX)) < 0.15
+              and then abs (MY - (LM.Sin (Theta) * 10.0 + LM.Cos (Theta) * 100.0 + TY)) < 0.15,
+              "off-centre point mapping");
+      --  Displacement is the matrix column, not the centre displacement: a seed made of the
+      --  centre displacement is wrong by the compensation terms and is not silently corrected.
+      Run_Seeded (Pair, Center_Seed, Misread, Misread_Raised);
+      Assert (Misread_Raised or else Misread /= R, "centre displacement was reinterpreted as the matrix column");
+   end ECC_Seeded_Centered_Rotation;
+
+   procedure ECC_Seeded_Regions_Lifetime (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Window  : constant OpenCV.Rect := (16, 16, 128, 128);
+      Initial : constant ECC_Euclidean_Result := Seed (2.5, 2.3, 0.8);
+      Saved, Contiguous : ECC_Euclidean_Result;
+      Dummy : Boolean;
+      Before_A, Before_B : Long_Long_Integer;
+   begin
+      declare
+         Parent_A : constant OpenCV.Core.Mat := EF.Texture (160, 160);
+         Parent_B : constant OpenCV.Core.Mat := EF.Rigid_Texture (160, 160, 3.0, 2.0, 1.0);
+         Region_A : constant OpenCV.Core.Mat := Parent_A.Region (Window);
+         Region_B : constant OpenCV.Core.Mat := Parent_B.Region (Window);
+      begin
+         Before_A := EF.Checksum (Parent_A);
+         Before_B := EF.Checksum (Parent_B);
+         Assert (not Region_A.Is_Continuous and then not Region_B.Is_Continuous, "Regions are contiguous");
+         Run_Seeded ((Region_A, Region_B), Initial, Saved, Dummy);
+         Run_Seeded ((Region_A.Clone, Region_B.Clone), Initial, Contiguous, Dummy);
+         Assert (Saved = Contiguous, "seeded Region differs from the contiguous clone");
+         Assert (EF.Checksum (Parent_A) = Before_A and then EF.Checksum (Parent_B) = Before_B,
+                 "seeded ECC modified a Region parent");
+      end;
+      Assert (abs (Long_Float (Saved.Rotation_Radians) - 3.0 * Degrees_To_Radians) < Euc_Angle_Tolerance
+              and then Saved.Correlation > 0.98, "seeded result after parent finalization");
+   end ECC_Seeded_Regions_Lifetime;
+
+
+   procedure ECC_Seeded_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      --  NaN/Infinity bit patterns are the inputs under test; do not validity-check them.
+      pragma Validity_Checks (Off);
+      Pair  : constant ECC_Pair := Euc_Pair (3.0, 2.0, 1.0);
+      function F32 is new Ada.Unchecked_Conversion (Interfaces.Unsigned_32, OpenCV.Float32_Value);
+      function F64 is new Ada.Unchecked_Conversion (Interfaces.Unsigned_64, OpenCV.Float64_Value);
+      NaN32 : constant OpenCV.Float32_Value := F32 (16#7FC0_0000#);
+      Inf32 : constant OpenCV.Float32_Value := F32 (16#7F80_0000#);
+      NaN64 : constant OpenCV.Float64_Value := F64 (16#7FF8_0000_0000_0000#);
+      Inf64 : constant OpenCV.Float64_Value := F64 (16#7FF0_0000_0000_0000#);
+      Limit : constant OpenCV.Float32_Value := 1_048_576.0;
+      Base  : constant ECC_Euclidean_Result := Seed (2.5, 2.3, 0.8);
+
+      procedure Rejected (Initial : ECC_Euclidean_Result; Message : String) is
+      begin
+         Assert (Seed_Outcome_Of (Pair, Initial) = Preflight_Rejected, Message);
+      end Rejected;
+
+      procedure Accepted_By_Preflight (Initial : ECC_Euclidean_Result; Message : String) is
+      begin
+         Assert (Seed_Outcome_Of (Pair, Initial) /= Preflight_Rejected, Message);
+      end Accepted_By_Preflight;
+   begin
+      --  Non-finite and out-of-range seed components are rejected, never clamped.
+      Rejected ((Base with delta Displacement => (X => NaN32, Y => 0.8)), "NaN displacement X");
+      Rejected ((Base with delta Displacement => (X => 2.3, Y => NaN32)), "NaN displacement Y");
+      Rejected ((Base with delta Displacement => (X => Inf32, Y => 0.8)), "+Inf displacement X");
+      Rejected ((Base with delta Displacement => (X => 2.3, Y => -Inf32)), "-Inf displacement Y");
+      Rejected ((Base with delta Rotation_Radians => NaN64), "NaN rotation");
+      Rejected ((Base with delta Rotation_Radians => Inf64), "+Inf rotation");
+      Rejected ((Base with delta Rotation_Radians => -Inf64), "-Inf rotation");
+      Rejected ((Base with delta Displacement => (X => Limit * 2.0, Y => 0.0)), "X far beyond 2**20");
+      Rejected ((Base with delta Displacement => (X => 0.0, Y => -Limit * 2.0)), "Y far beyond -2**20");
+      Rejected ((Base with delta Displacement => (X => OpenCV.Float32_Value'Last, Y => 0.0)),
+                "X at Float32'Last");
+      Rejected ((Base with delta Displacement => (X => Limit + 0.125, Y => 0.0)), "X just beyond 2**20");
+      Rejected ((Base with delta Displacement => (X => 0.0, Y => -(Limit + 0.125))),
+                "Y just beyond -2**20");
+      Rejected ((Base with delta Rotation_Radians => 1.0000000001), "angle just beyond +1 radian");
+      Rejected ((Base with delta Rotation_Radians => -1.0000000001), "angle just beyond -1 radian");
+      Rejected ((Base with delta Rotation_Radians => 3.0), "angle beyond the principal asin branch");
+      Rejected ((Base with delta Rotation_Radians => OpenCV.Float64_Value'Last), "angle at Float64'Last");
+      --  A bad correlation is not a seed component: it is ignored, never validated.
+      Assert (Seed_Outcome_Of (Pair, (Base with delta Correlation => NaN64)) = Accepted,
+              "NaN initial correlation was treated as an input");
+      Assert (Seed_Outcome_Of (Pair, (Base with delta Correlation => Inf64)) = Accepted,
+              "infinite initial correlation was treated as an input");
+      --  Exactly at the bounds the Ada preflight accepts the seed; native ECC decides the rest.
+      Accepted_By_Preflight ((Seed (0.0, 0.0, 0.0) with delta Rotation_Radians => 1.0), "angle +1 rad");
+      Accepted_By_Preflight ((Seed (0.0, 0.0, 0.0) with delta Rotation_Radians => -1.0), "angle -1 rad");
+      Accepted_By_Preflight
+        ((Seed (0.0, 0.0, 0.0) with delta Displacement => (X => Limit, Y => -Limit)), "translation +/-2**20");
+      Accepted_By_Preflight
+        ((Seed (0.0, 0.0, 0.0) with delta Displacement => (X => -Limit, Y => Limit)), "translation -/+2**20");
+   end ECC_Seeded_Validation;
+
+
+   procedure ECC_Seeded_Image_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Good  : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+      Empty : OpenCV.Core.Mat;
+      Float_Image : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (128, 128, (Depth => OpenCV.Core.Float32, Channels => 1));
+      Color : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (128, 128, (Depth => OpenCV.Core.UInt8, Channels => 3));
+      Base  : constant ECC_Euclidean_Result := Seed (2.5, 2.3, 0.8);
+      Bad_Epsilons : constant array (1 .. 5) of OpenCV.Float64_Value :=
+        [0.0, -1.0E-4, 9.0E-9, 0.1000001, 1.0];
+
+      procedure Image_Rejected (Template, Moving : OpenCV.Core.Mat; Message : String) is
+         Unused : ECC_Euclidean_Result;
+      begin
+         Unused := Estimate_ECC_Euclidean (Template, Moving, (others => <>), Base);
+         Assert (False, Message & ": request accepted");
+      exception
+         when OpenCV.OpenCV_Error => null;
+      end Image_Rejected;
+   begin
+      Image_Rejected (Empty, Good, "empty template");
+      Image_Rejected (Good, Empty, "empty moving");
+      Image_Rejected (Float_Image, Float_Image, "Float32 images");
+      Image_Rejected (Color, Color, "three-channel images");
+      Image_Rejected (Good, EF.Texture (128, 129), "different columns");
+      Image_Rejected (EF.Texture (129, 128), Good, "different rows");
+      Image_Rejected (EF.Texture (31, 128), EF.Texture (31, 128), "31 rows");
+      Image_Rejected (EF.Texture (128, 31), EF.Texture (128, 31), "31 columns");
+      declare
+         Pair : constant ECC_Pair := Euc_Pair (3.0, 2.0, 1.0);
+      begin
+         Assert (Seed_Outcome_Of (Pair, Base, (Maximum_Iterations => 101, Epsilon => 0.0001))
+                 = Preflight_Rejected, "101 iterations");
+         Assert (Seed_Outcome_Of (Pair, Base, (Maximum_Iterations => Positive'Last, Epsilon => 0.0001))
+                 = Preflight_Rejected, "Positive'Last iterations");
+         for Epsilon of Bad_Epsilons loop
+            Assert (Seed_Outcome_Of (Pair, Base, (Maximum_Iterations => 50, Epsilon => Epsilon))
+                    = Preflight_Rejected, "invalid epsilon");
+         end loop;
+         Assert (Seed_Outcome_Of (Pair, Base, (Maximum_Iterations => 1, Epsilon => 1.0E-8)) = Accepted
+                 and then Seed_Outcome_Of (Pair, Base, (Maximum_Iterations => 100, Epsilon => 0.1)) = Accepted,
+                 "option bounds are accepted");
+      end;
+   end ECC_Seeded_Image_Validation;
+
+   procedure ECC_Seeded_Nonconvergence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Flat          : constant OpenCV.Core.Mat := EF.Constant_Image (128, 128, 128);
+      Texture_Image : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+      Initial       : constant ECC_Euclidean_Result := Seed (1.0, 1.0, 1.0);
+      Pair_12       : constant ECC_Pair := Euc_Pair (12.0, 0.0, 0.0);
+      Pair_Far      : constant ECC_Pair := Euc_Pair (12.0, 2.0, 1.0);
+      Wrong         : ECC_Euclidean_Result;
+      Raised        : Boolean;
+   begin
+      --  Native failures carry the shim prefix; they are not Ada preflight rejections.
+      Assert (Seed_Outcome_Of ((Flat, Flat), Initial) = Native_Failed, "constant images");
+      Assert (Seed_Outcome_Of ((Flat, Texture_Image), Initial) = Native_Failed, "constant template");
+      Assert (Seed_Outcome_Of ((Texture_Image, Flat), Initial) = Native_Failed, "constant moving");
+      Assert (Seed_Outcome_Of ((EF.Noise (128, 128, 3), EF.Noise (128, 128, 9)), Initial) = Native_Failed,
+              "independent noise");
+      --  Valid but badly inaccurate seeds fail natively, and succeed with a near seed.
+      Assert (Seed_Outcome_Of (Pair_12, Seed (-12.0, 0.0, 0.0)) = Native_Failed, "wrong-sign rotation seed");
+      Assert (Seed_Outcome_Of (Pair_Far, Seed (12.0, 25.0, -25.0)) = Native_Failed, "far translation seed");
+      Assert (Seed_Outcome_Of (Pair_12, Seed (11.5, 0.3, -0.2)) = Accepted, "near seed on the same images");
+      --  Wrong-but-finite results are returned as values, never turned into errors.
+      Run_Seeded (Euc_Pair (10.0, 0.0, 0.0), Seed (10.0, 25.0, -25.0), Wrong, Raised);
+      Assert (not Raised and then Wrong.Correlation < 0.9, "wrong finite optimum was suppressed");
+   end ECC_Seeded_Nonconvergence;
+
+
+   --  Seeded Euclidean oracle (Task 013): same-build direct OpenCV outcome for a named
+   --  fixture and an explicit initial warp.
+   type Seeded_Oracle_Entry is record
+      Entry_Data : Euc_Oracle_Entry;
+      Seed_Theta, Seed_TX, Seed_TY : Long_Float := 0.0;
+   end record;
+
+   type Seeded_Oracle_Table is array (1 .. 64) of Seeded_Oracle_Entry;
+
+   --  Strict parser: a missing, truncated, stale-versioned or malformed file raises.
+   procedure Load_Seeded_Oracle
+     (Table : out Seeded_Oracle_Table; Count : out Natural;
+      Version : out String; Version_Length : out Natural)
+   is
+      File : Ada.Text_IO.File_Type;
+      Path : constant String :=
+        Ada.Environment_Variables.Value
+          ("VIDEO_ECC_EUCLIDEAN_SEEDED_ORACLE", "../obj/oracle/ecc-euclidean-seeded.txt");
+
+      function Word return String is
+         Result : String (1 .. 64);
+         Last   : Natural := 0;
+         Ch     : Character;
+         Eol    : Boolean;
+      begin
+         loop
+            Ada.Text_IO.Look_Ahead (File, Ch, Eol);
+            exit when Eol or else Ch /= ' ';
+            Ada.Text_IO.Get (File, Ch);
+         end loop;
+         loop
+            Ada.Text_IO.Look_Ahead (File, Ch, Eol);
+            exit when Eol or else Ch = ' ';
+            Ada.Text_IO.Get (File, Ch);
+            Last := Last + 1;
+            Result (Last) := Ch;
+         end loop;
+         return Result (1 .. Last);
+      end Word;
+
+      procedure Get_Float (Value : out Long_Float) is
+      begin
+         Euc_Floats.Get (File, Value);
+      end Get_Float;
+      procedure Require (Condition : Boolean; Message : String) is
+      begin
+         if not Condition then
+            raise Program_Error with Message;
+         end if;
+      end Require;
+   begin
+      Count := 0;
+      Version := [others => ' '];
+      Version_Length := 0;
+      Table := [others => <>];
+      Ada.Text_IO.Open (File, Ada.Text_IO.In_File, Path);
+      Require (Word = "ecc-euclidean-seeded-oracle", "seeded oracle magic");
+      Require (Word = "1", "seeded oracle format version");
+      Ada.Text_IO.Skip_Line (File);
+      Require (Word = "version", "seeded oracle version line");
+      declare
+         V : constant String := Word;
+      begin
+         Require (V'Length <= Version'Length, "seeded oracle version too long");
+         Version (Version'First .. Version'First + V'Length - 1) := V;
+         Version_Length := V'Length;
+      end;
+      Ada.Text_IO.Skip_Line (File);
+      loop
+         declare
+            Tag : constant String := Word;
+         begin
+            if Tag = "end" then
+               declare
+                  Declared : Integer;
+               begin
+                  ECC_Integers.Get (File, Declared);
+                  Require (Declared = Count, "seeded oracle truncated or inconsistent");
+               end;
+               exit;
+            end if;
+            Require (Tag = "fixture" and then Count < Table'Last, "seeded oracle fixture line");
+            Count := Count + 1;
+            declare
+               S    : Seeded_Oracle_Entry renames Table (Count);
+               E    : Euc_Oracle_Entry renames S.Entry_Data;
+               Name : constant String := Word;
+            begin
+               Require (Name'Length <= E.Name'Length, "seeded oracle name too long");
+               E.Name (1 .. Name'Length) := Name;
+               E.Length := Name'Length;
+               ECC_Integers.Get (File, E.Iterations);
+               Get_Float (E.Epsilon);
+               Get_Float (S.Seed_Theta);
+               Get_Float (S.Seed_TX);
+               Get_Float (S.Seed_TY);
+               declare
+                  Outcome : constant String := Word;
+               begin
+                  Require (Outcome = "OK" or else Outcome = "EXC", "seeded oracle outcome");
+                  E.Converged := Outcome = "OK";
+               end;
+               for I in E.W'Range loop
+                  Get_Float (E.W (I));
+               end loop;
+               Get_Float (E.TX);
+               Get_Float (E.TY);
+               Get_Float (E.Theta);
+               Get_Float (E.Rho);
+               ECC_Longs.Get (File, E.Template_Sum);
+               ECC_Longs.Get (File, E.Moving_Sum);
+            end;
+            Ada.Text_IO.Skip_Line (File);
+         end;
+      end loop;
+      Ada.Text_IO.Close (File);
+   exception
+      when others =>
+         if Ada.Text_IO.Is_Open (File) then
+            Ada.Text_IO.Close (File);
+         end if;
+         raise;
+   end Load_Seeded_Oracle;
+
+
+   --  Rebuilds each seeded-oracle fixture by name, independently of the C++ code.
+   function Seeded_Build (Name : String) return ECC_Pair is
+      Window : constant OpenCV.Rect := (16, 16, 128, 128);
+      Theta3 : constant Long_Float := 3.0 * Degrees_To_Radians;
+      Centre_TX : constant Long_Float :=
+        63.5 - (LM.Cos (Theta3) * 63.5 - LM.Sin (Theta3) * 63.5) + 1.5;
+      Centre_TY : constant Long_Float :=
+        63.5 - (LM.Sin (Theta3) * 63.5 + LM.Cos (Theta3) * 63.5) - 1.0;
+      function Tex return OpenCV.Core.Mat is (EF.Texture (128, 128));
+      function P (D, X, Y : Long_Float) return ECC_Pair is (Tex, EF.Rigid_Texture (128, 128, D, X, Y));
+      function Starts (Prefix : String) return Boolean is
+        (Name'Length >= Prefix'Length and then Name (Name'First .. Name'First + Prefix'Length - 1) = Prefix);
+   begin
+      if Name = "zero-identity" then return (Tex, Tex);
+      elsif Name = "zero-translation-2-1" then return P (0.0, 2.0, 1.0);
+      elsif Name = "zero-rot+3" then return P (3.0, 0.0, 0.0);
+      elsif Name = "zero-rot+3-t+2+1" or else Name = "imperfect-rot+3-t+2+1" or else Name = "imperfect-it1"
+        or else Name = "imperfect-it2" or else Name = "imperfect-it100-e8" or else Name = "imperfect-e0.1"
+        or else Name = "bound-angle+1rad" or else Name = "bound-angle-1rad" or else Name = "bound-translation"
+      then return P (3.0, 2.0, 1.0);
+      elsif Name = "zero-rot+12-nonconv" or else Name = "near-rot+12" or else Name = "wrong-rot-rot+12"
+      then return P (12.0, 0.0, 0.0);
+      elsif Name = "zero-rot+10-t+2+1" or else Name = "near-rot+10-t+2+1" or else Name = "wrong-rot-rot+10-t+2+1"
+      then return P (10.0, 2.0, 1.0);
+      elsif Name = "near-rot+8" then return P (8.0, 0.0, 0.0);
+      elsif Name = "near-rot-8" then return P (-8.0, 0.0, 0.0);
+      elsif Name = "near-rot+10" or else Name = "wrong-trans-rot+10" or else Name = "asym-rot+10"
+        or else Name = "asym-rot+10-b" then return P (10.0, 0.0, 0.0);
+      elsif Name = "near-rot+12-t+2+1" or else Name = "wrong-trans-rot+12-t+2+1" then return P (12.0, 2.0, 1.0);
+      elsif Name = "exact-rot-3-t+2-1" then return P (-3.0, 2.0, -1.0);
+      elsif Name = "exact-rot+3-t-2-1" then return P (3.0, -2.0, -1.0);
+      elsif Name = "exact-rot-3-t-2+1" then return P (-3.0, -2.0, 1.0);
+      elsif Name = "centred-exact" or else Name = "centred-near" then return P (3.0, Centre_TX, Centre_TY);
+      elsif Name = "wrong-rot-rot+15" then return P (15.0, 0.0, 0.0);
+      elsif Name = "seed-constant" then
+         return (EF.Constant_Image (128, 128, 128), EF.Constant_Image (128, 128, 128));
+      elsif Name = "seed-noise-vs-noise" then return (EF.Noise (128, 128, 3), EF.Noise (128, 128, 9));
+      elsif Name = "seed-noise-vs-texture" then return (Tex, EF.Noise (128, 128, 7));
+      elsif Starts ("region-") then
+         return (EF.Texture (160, 160).Region (Window),
+                 EF.Rigid_Texture (160, 160, 3.0, 2.0, 1.0).Region (Window));
+      end if;
+      Assert (False, "unknown seeded oracle fixture " & Name);
+      return (Tex, Tex);
+   end Seeded_Build;
+
+   Expected_Seeded_Oracle_Fixtures : constant := 37;
+
+
+   procedure ECC_Seeded_Direct_Oracle (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Table : Seeded_Oracle_Table;
+      Count, Version_Length : Natural;
+      Version : String (1 .. 32);
+      Succeeded, Raised, Nonzero_Seed, Distinguishing : Natural := 0;
+   begin
+      Load_Seeded_Oracle (Table, Count, Version, Version_Length);
+      Assert (Version_Length > 0, "seeded oracle records no native version");
+      Assert (Count = Expected_Seeded_Oracle_Fixtures, "seeded oracle fixture count is stale");
+      for Index in 1 .. Count loop
+         declare
+            S    : Seeded_Oracle_Entry renames Table (Index);
+            E    : Euc_Oracle_Entry renames S.Entry_Data;
+            Name : constant String := E.Name (1 .. E.Length);
+            Pair : constant ECC_Pair := Seeded_Build (Name);
+            Options : constant ECC_Euclidean_Options :=
+              (Maximum_Iterations => E.Iterations, Epsilon => OpenCV.Float64_Value (E.Epsilon));
+            Initial : constant ECC_Euclidean_Result :=
+              (Displacement     =>
+                 (X => OpenCV.Float32_Value (S.Seed_TX), Y => OpenCV.Float32_Value (S.Seed_TY)),
+               Rotation_Radians => OpenCV.Float64_Value (S.Seed_Theta),
+               Correlation      => 0.0);
+         begin
+            Assert (EF.Checksum (Pair.Template) = E.Template_Sum
+                    and then EF.Checksum (Pair.Moving) = E.Moving_Sum,
+                    "seeded oracle fixture " & Name & " differs from the Ada fixture (stale oracle)");
+            --  The seed identity recorded by the oracle is exactly the value Ada passes.
+            Assert (Long_Float (Initial.Displacement.X) = S.Seed_TX
+                    and then Long_Float (Initial.Displacement.Y) = S.Seed_TY,
+                    "seeded oracle seed identity for " & Name);
+            if S.Seed_Theta /= 0.0 or else S.Seed_TX /= 0.0 or else S.Seed_TY /= 0.0 then
+               Nonzero_Seed := Nonzero_Seed + 1;
+            end if;
+            if E.Converged then
+               declare
+                  R : constant ECC_Euclidean_Result :=
+                    Estimate_ECC_Euclidean (Pair.Template, Pair.Moving, Options, Initial);
+                  Theta : constant Long_Float := Long_Float (R.Rotation_Radians);
+                  C  : constant Long_Float := LM.Cos (Theta);
+                  Sn : constant Long_Float := LM.Sin (Theta);
+                  Plain : ECC_Euclidean_Result;
+                  Plain_Raised : Boolean;
+               begin
+                  Succeeded := Succeeded + 1;
+                  Assert (abs (C - E.W (0)) < 1.0E-6 and then abs (-Sn - E.W (1)) < 1.0E-6
+                          and then abs (Sn - E.W (3)) < 1.0E-6 and then abs (C - E.W (4)) < 1.0E-6
+                          and then abs (LF (R.Displacement.X) - E.W (2)) < 1.0E-5
+                          and then abs (LF (R.Displacement.Y) - E.W (5)) < 1.0E-5,
+                          "seeded matrix reconstruction differs from the native warp for " & Name);
+                  Assert (Angle_Difference (Theta, E.Theta) < 1.0E-6,
+                          "seeded angle differs from native for " & Name);
+                  Assert (abs (LF (R.Displacement.X) - E.TX) < 1.0E-5
+                          and then abs (LF (R.Displacement.Y) - E.TY) < 1.0E-5
+                          and then abs (Long_Float (R.Correlation) - E.Rho) < 1.0E-6,
+                          "seeded translation/correlation differs from native for " & Name);
+                  --  The seed is distinguishing when identity initialization gives another outcome.
+                  Run_Unseeded (Pair, Plain, Plain_Raised, Options);
+                  if Plain_Raised or else Plain /= R then
+                     Distinguishing := Distinguishing + 1;
+                  end if;
+               end;
+            else
+               begin
+                  declare
+                     R : constant ECC_Euclidean_Result :=
+                       Estimate_ECC_Euclidean (Pair.Template, Pair.Moving, Options, Initial);
+                     pragma Unreferenced (R);
+                  begin
+                     Assert (False, "seeded binding succeeded where native raised: " & Name);
+                  end;
+               exception
+                  when OpenCV.OpenCV_Error => Raised := Raised + 1;
+               end;
+            end if;
+         end;
+      end loop;
+      Assert (Succeeded > 0 and then Raised > 0, "seeded oracle did not cover both outcomes");
+      Assert (Succeeded + Raised = Count, "seeded oracle outcome accounting");
+      Assert (Nonzero_Seed >= 20, "seeded oracle needs genuinely nonzero native initializations");
+      Assert (Distinguishing >= 4, "seeded oracle has too few seed-distinguishing fixtures");
+   end ECC_Seeded_Direct_Oracle;
+
+
    function Suite return AUnit.Test_Suites.Access_Test_Suite is
       Result : constant AUnit.Test_Suites.Access_Test_Suite := AUnit.Test_Suites.New_Suite;
    begin
@@ -4677,6 +5356,17 @@ package body Video_Tests is
       Result.Add_Test (Caller.Create ("ECC_Euclidean_Validation", ECC_Euclidean_Validation'Access));
       Result.Add_Test (Caller.Create ("ECC_Euclidean_Degenerate_And_Limits", ECC_Euclidean_Degenerate_And_Limits'Access));
       Result.Add_Test (Caller.Create ("ECC_Euclidean_Direct_Oracle", ECC_Euclidean_Direct_Oracle'Access));
+      Result.Add_Test (Caller.Create ("ECC_Seeded_Zero_Equivalence", ECC_Seeded_Zero_Equivalence'Access));
+      Result.Add_Test (Caller.Create ("ECC_Seeded_Signs_And_Translation", ECC_Seeded_Signs_And_Translation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Seeded_Consumption", ECC_Seeded_Consumption'Access));
+      Result.Add_Test (Caller.Create ("ECC_Seeded_Refinement_And_Residual", ECC_Seeded_Refinement_And_Residual'Access));
+      Result.Add_Test (Caller.Create ("ECC_Seeded_Input_Independence", ECC_Seeded_Input_Independence'Access));
+      Result.Add_Test (Caller.Create ("ECC_Seeded_Centered_Rotation", ECC_Seeded_Centered_Rotation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Seeded_Regions_Lifetime", ECC_Seeded_Regions_Lifetime'Access));
+      Result.Add_Test (Caller.Create ("ECC_Seeded_Validation", ECC_Seeded_Validation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Seeded_Image_Validation", ECC_Seeded_Image_Validation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Seeded_Nonconvergence", ECC_Seeded_Nonconvergence'Access));
+      Result.Add_Test (Caller.Create ("ECC_Seeded_Direct_Oracle", ECC_Seeded_Direct_Oracle'Access));
       return Result;
    end Suite;
 end Video_Tests;
