@@ -138,3 +138,64 @@ Gaps the campaign found and fixed in the tests:
   rewritten and re-run.
 
 
+## Per-version local campaign
+
+Run on independent `git clone --no-local` copies of code head
+`af1279b988aba49eeb35367d33b111eb74b8f766` (later commits are documentation only). Each
+version ran `scripts/test.sh` (build, every oracle including the retained translation
+oracle and the new Euclidean oracle, full AUnit, native boundary), the ASan/UBSan/leak
+driver, and the retained `lk_synthetic` example. The configured `Native_Version` in
+`config/opencv_video_install.gpr` matched each version. 4.1.0 and 5.0.0 used private
+prefixes (`PKG_CONFIG_PATH`/`LD_LIBRARY_PATH`; 5.0.0 resolves `opencv5.pc`); 4.6.0 ran in
+the Debian 12 container with distro `libopencv-dev`, and `ldd` showed
+`/lib/x86_64-linux-gnu/libopencv_video.so.406`.
+
+| OpenCV | AUnit registered / run / passed / failed assertions / errors | test.sh | ASan+UBSan+leak | Sanitizer findings | Example |
+| --- | --- | --- | --- | --- | --- |
+| 4.1.0 | 129 / 129 / 129 / 0 / 0 | exit 0 | exit 0 | 0 | exit 0 |
+| 4.6.0 (Debian 12 container) | 129 / 129 / 129 / 0 / 0 | exit 0 | exit 0 | 0 | exit 0 |
+| 4.10.0 (system) | 129 / 129 / 129 / 0 / 0 | exit 0 | exit 0 | 0 | exit 0 |
+| 5.0.0 | 129 / 129 / 129 / 0 / 0 | exit 0 | exit 0 | 0 | exit 0 |
+
+Each run's oracles recorded their own version (`PASS: ECC Euclidean oracle OpenCV <v>, 24
+fixtures`). The AUnit comparison is against the same-build native result; no
+cross-version numerical equality is claimed. In the Euclidean oracle, 20 fixtures
+converge and four (`constant`, `noise-vs-noise`, `rot+15-limit`, `rot+25-outside`) raise on
+each of 4.1.0, 4.10.0 and 5.0.0; those counts were read from the generated files for those
+three versions only, not for 4.6.0.
+
+A first 4.1.0 run failed (`FAIL: Euclidean correlation`): the boundary check required
+`correlation <= 1 + 1e-9`, and native ECC returned 1.0000000850 for an identity fit on
+4.1.0 (4.10.0: 0.99999999288). That is Float32 rounding in the native correlation, not a
+binding fault, so the bound was relaxed to `1 + 1e-6` and the campaign re-run from the
+start on every version. The AUnit test already used 1.000001.
+
+## Sanitizers
+
+The Video shim, the Core shim and the test drivers are compiled with
+`-fsanitize=address,undefined`; the OpenCV libraries are prebuilt and **not
+instrumented**, so a clean result says nothing about undefined behaviour inside OpenCV.
+All retained campaigns (PyrLK, pyramids, forward/backward, trackability, Farneback,
+seeded Farneback, ECC translation) plus the Euclidean boundary, fault build and oracle
+ran under the same driver on all four versions with **no finding**. There is no ECC
+sanitizer finding and no ECC waiver. `KNOWN_UPSTREAM_UB_ACCEPTED` (Farneback) is a
+separate, narrow, previously approved limitation and does not extend to ECC.
+
+## Other gates
+
+Repository checker (18 ABI declarations/imports, 129 registrations, Core pin
+`4da9d35ea21e` in all three roots, version `0.1.0-dev`), 12 configuration tests, a C11
+`_Static_assert` build of the header with `-Wall -Wextra -Wpedantic -Werror`
+(`sizeof == 24`, offsets 8 and 16), shell syntax of every script, `git diff --check`.
+Development, Validation and Release `alr build` and the tests project under Validation
+all exited 0 with no warning lines; these four builds ran on `ec360b1`-era sources, before
+the later test-only commits, and were not repeated. 4.10.0 only for those builds.
+
+## Not claimed
+
+* Real Windows behaviour of any Task 012 code (push-to-main only).
+* That 4.1.0, 4.6.0 or 5.0.0 are ASan/UBSan-clean inside OpenCV itself.
+* Mutation results on 4.1.0, 4.6.0, 5.0.0.
+* Recovery of arbitrary rotations; correctness of any finite result.
+* That the largest geometry allocates on every machine (about 1.3 GB measured here).
+* Hosted CI results, which are recorded in the pull request.
