@@ -26,6 +26,22 @@ void opencv_video_test_fault(int stage) {
     if (fault_kind == 4) throw std::runtime_error("qualification standard exception");
     throw 42;
 }
+// ECC: which post-native value to corrupt before validation (test builds only).
+// 1 warp[2]=NaN, 2 warp[5]=+Inf, 3 correlation=NaN, 4 correlation=-Inf, 5 warp[0]=1.5
+// (linear part no longer identity), 6 warp[1]=0.25.
+int ecc_corrupt_mode = 0;
+void opencv_video_test_corrupt_ecc(float *warp, double *correlation) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    switch (ecc_corrupt_mode) {
+        case 1: warp[2] = nan; break;
+        case 2: warp[5] = std::numeric_limits<float>::infinity(); break;
+        case 3: *correlation = std::numeric_limits<double>::quiet_NaN(); break;
+        case 4: *correlation = -std::numeric_limits<double>::infinity(); break;
+        case 5: warp[0] = 1.5f; break;
+        case 6: warp[1] = 0.25f; break;
+        default: break;
+    }
+}
 int corrupt_mode = 0;  // 1 NaN, 2 +Inf, 3 -Inf written into one private component
 void opencv_video_test_corrupt_flow(float *values, size_t count) {
     if (corrupt_mode == 0 || count == 0) return;
@@ -1325,6 +1341,15 @@ void run_ecc() {
                            : kind == 3 ? OPENCV_VIDEO_ERROR_UNKNOWN : OPENCV_VIDEO_ERROR_STANDARD),
                   "ECC injected exception mapped to the wrong status");
             ecc_unchanged(r, "ECC injected failure changed result");
+        }
+        // Post-native corruption must be rejected with the caller's result untouched.
+        for (int mode = 1; mode <= 6; ++mode) {
+            ecc_corrupt_mode = mode;
+            opencv_video_ecc_translation_result r = kEccSentinel;
+            const auto code = ecc_call(base.get(), moving.get(), &r);
+            ecc_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_ERROR_OPENCV, "ECC corrupted native output accepted");
+            ecc_unchanged(r, "ECC corrupted native output was partially published");
         }
     }
 #endif

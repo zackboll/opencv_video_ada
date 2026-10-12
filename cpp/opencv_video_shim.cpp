@@ -24,6 +24,7 @@ struct opencv_video_pyramid_handle {
 #ifdef OPENCV_VIDEO_TEST_FAULTS
 void opencv_video_test_fault(int);
 void opencv_video_test_corrupt_flow(float *values, size_t count);
+void opencv_video_test_corrupt_ecc(float *warp, double *correlation);
 #endif
 
 namespace {
@@ -668,13 +669,14 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_translation(
 #ifdef OPENCV_VIDEO_TEST_FAULTS
         opencv_video_test_fault(1);
 #endif
-        const double correlation = cv::findTransformECC(
+        double correlation = cv::findTransformECC(
             *tmpl, *moving, warp, cv::MOTION_TRANSLATION,
             cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS,
                              maximum_iterations, epsilon),
             cv::noArray(), 5);
 #ifdef OPENCV_VIDEO_TEST_FAULTS
         opencv_video_test_fault(2);
+        opencv_video_test_corrupt_ecc(warp.ptr<float>(), &correlation);
 #endif
         if (warp.data != storage || warp.dims != 2 || warp.rows != 2 || warp.cols != 3 ||
             warp.type() != CV_32FC1 || !warp.isContinuous())

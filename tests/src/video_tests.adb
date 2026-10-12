@@ -3585,6 +3585,23 @@ package body Video_Tests is
       ECC_Expect_Error (EF.Texture (128, 31), EF.Texture (128, 31), Message => "31 columns");
       ECC_Expect_Error (Parent.Region ((0, 0, 31, 31)), Parent.Region ((0, 0, 31, 31)),
                         Message => "31x31 Regions");
+      --  Upper geometry limits are rejected by validation before any native work, so
+      --  no ECC temporaries are allocated: columns/rows 16385, and area 2**24 + 4096.
+      declare
+         Wide_A : constant OpenCV.Core.Mat := OpenCV.Core.Create
+           (32, 16_385, (Depth => OpenCV.Core.UInt8, Channels => 1));
+         Tall_A : constant OpenCV.Core.Mat := OpenCV.Core.Create
+           (16_385, 32, (Depth => OpenCV.Core.UInt8, Channels => 1));
+         Area_A : constant OpenCV.Core.Mat := OpenCV.Core.Create
+           (4_097, 4_096, (Depth => OpenCV.Core.UInt8, Channels => 1));
+         Area_B : constant OpenCV.Core.Mat := OpenCV.Core.Create
+           (16_384, 1_025, (Depth => OpenCV.Core.UInt8, Channels => 1));
+      begin
+         ECC_Expect_Error (Wide_A, Wide_A, Message => "16385 columns");
+         ECC_Expect_Error (Tall_A, Tall_A, Message => "16385 rows");
+         ECC_Expect_Error (Area_A, Area_A, Message => "4097 x 4096 pixels");
+         ECC_Expect_Error (Area_B, Area_B, Message => "16384 x 1025 pixels");
+      end;
       --  Minimum accepted geometry (32 x 32) must reach native code and be valid.
       declare
          Smallest : constant ECC_Translation_Result := Estimate_ECC_Translation
@@ -3887,7 +3904,8 @@ package body Video_Tests is
    procedure ECC_Aspect_Ratios (T : in out Fixture) is
       pragma Unreferenced (T);
       type Geometry is record Rows, Columns : Positive; end record;
-      Shapes : constant array (1 .. 4) of Geometry := [(64, 256), (256, 64), (96, 96), (32, 512)];
+      Shapes : constant array (1 .. 6) of Geometry :=
+        [(64, 256), (256, 64), (96, 96), (32, 512), (32, 16_384), (16_384, 32)];
    begin
       for Shape of Shapes loop
          declare
@@ -3895,7 +3913,7 @@ package body Video_Tests is
               (EF.Texture (Shape.Rows, Shape.Columns), EF.Texture (Shape.Rows, Shape.Columns, 2, 1));
          begin
             Assert (abs (R.Displacement.X - 2.0) < 0.1 and then abs (R.Displacement.Y - 1.0) < 0.1,
-                    "ECC aspect ratio displacement");
+                    "ECC aspect ratio displacement (incl. 32 x 16384 and 16384 x 32 limits)");
          end;
       end loop;
    end ECC_Aspect_Ratios;
