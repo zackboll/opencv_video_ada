@@ -1,5 +1,41 @@
 # OpenCV Video for Ada
 
+### ECC Euclidean translation and rotation alignment (Task 012)
+
+```ada
+Alignment : constant ECC_Euclidean_Result :=
+  OpenCV.Video.Estimate_ECC_Euclidean
+    (Template_Image => Previous_Image,
+     Moving_Image   => Current_Image);
+```
+
+Native `cv::findTransformECC` with `MOTION_EUCLIDEAN`; same images and options as the
+translation API (`ECC_Euclidean_Options` is a subtype of `ECC_Translation_Options`).
+The returned values describe the native 2x3 warp that maps **template coordinates to
+moving coordinates** (X right, Y down):
+
+```text
+moving_x = cos(t) * template_x - sin(t) * template_y + Displacement.X
+moving_y = sin(t) * template_x + cos(t) * template_y + Displacement.Y     t = Rotation_Radians
+```
+
+`Rotation_Radians` is in radians and is extracted from the final warp with `atan2`, in
+`[-Pi, Pi]`. Rotation is about the coordinate origin (top-left), so `Displacement` is the
+matrix translation: for a rotation about the image centre `(cx,cy)` it contains the
+compensating terms `cx - (cos t * cx - sin t * cy)` and `cy - (sin t * cx + cos t * cy)`,
+not the displacement of the centre. Resample the moving image into the template frame by
+applying the same matrix with `WARP_INVERSE_MAP`; do not negate it. This is an image
+alignment angle, not a heading or attitude. OpenCV's update decodes the previous angle
+with `asin`, so large rotations are not recoverable; measured reliable range is a few
+degrees, beyond which ECC throws or returns a wrong finite warp (see the source contract).
+A finite rigid result does not prove alignment. Native nonconvergence raises
+`OpenCV_Error`; the result is a plain value and inputs are never modified. ECC with this
+model needs about 1.3 GB at the 2**24-pixel limit (translation about 1.0 GB). The
+production ABI is 18 exports. Task 011's `Estimate_ECC_Translation` is unchanged.
+See the [source contract](docs/ecc-euclidean-source-contract.md) and
+[qualification](docs/task012-qualification.md). The Task 011 post-merge Windows result and
+the separate Farnebäck upstream UB limitation are recorded there.
+
 ### ECC translation alignment (Task 011)
 
 ```ada
@@ -25,7 +61,7 @@ convergence basin and can finish at a wrong optimum). Inputs are never modified.
 is not a navigation solution. No masks, seeded transforms or other motion models yet.
 The Task 010 Windows MSYS2 installer now uses `pacman -Syu`; its real effect is
 confirmed only by the post-merge Windows run. The accepted Farnebäck upstream UB
-limitation does not apply to, or extend to, ECC. The production ABI is 17 exports.
+limitation does not apply to, or extend to, ECC. The production ABI was 17 exports in Task 011 (18 with Task 012).
 See the [source contract](docs/ecc-source-contract.md) and
 [qualification](docs/task011-qualification.md).
 
