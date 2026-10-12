@@ -79,3 +79,11 @@ UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
     "obj/sanitizers/ecc-euclidean-seeded-oracle$suffix" "obj/sanitizers/ecc-euclidean-seeded$suffix.txt"
+
+# Independent ECC affine oracle (Task 014) under the same sanitizers.
+"$compiler" "$@" -std=c++17 -Wall -Wextra -Wpedantic -Werror \
+    $flags -Itests/cpp $opencv_cflags tests/cpp/ecc_affine_oracle.cpp \
+    $(pkg-config --libs "$package") -o "obj/sanitizers/ecc-affine-oracle$suffix"
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+    "obj/sanitizers/ecc-affine-oracle$suffix" "obj/sanitizers/ecc-affine$suffix.txt"

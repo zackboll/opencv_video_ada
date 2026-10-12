@@ -863,3 +863,66 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_euclidean_seeded(
                                true, initial_translation_x, initial_translation_y,
                                initial_rotation_radians, result);
 }
+
+extern "C" opencv_video_status opencv_video_estimate_ecc_affine(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations, double epsilon,
+    opencv_video_ecc_affine_result *result) {
+    try {
+        clear_error();
+        if (result == nullptr)
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Null ECC result");
+        const cv::Mat *tmpl = nullptr;
+        const cv::Mat *moving = nullptr;
+        auto status = validate_ecc_inputs(template_image, moving_image, maximum_iterations,
+                                          epsilon, &tmpl, &moving);
+        if (status != OPENCV_VIDEO_OK) return status;
+
+        // Private identity warp: native code may mutate it; the caller's result is untouched.
+        cv::Mat warp = cv::Mat::eye(2, 3, CV_32F);
+        const auto *storage = warp.data;
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+        opencv_video_test_fault(1);
+#endif
+        double correlation = cv::findTransformECC(
+            *tmpl, *moving, warp, cv::MOTION_AFFINE,
+            cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS,
+                             maximum_iterations, epsilon),
+            cv::noArray(), 5);
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+        opencv_video_test_fault(2);
+        opencv_video_test_corrupt_ecc(warp.ptr<float>(), &correlation);
+#endif
+        if (warp.data != storage || warp.dims != 2 || warp.rows != 2 || warp.cols != 3 ||
+            warp.type() != CV_32FC1 || !warp.isContinuous())
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "OpenCV returned an unexpected ECC warp schema");
+        const float *w = warp.ptr<float>();
+        for (int i = 0; i < 6; ++i)
+            if (!std::isfinite(w[i]))
+                return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite warp entry");
+        if (!std::isfinite(correlation))
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite correlation");
+        // Deliberately no rotation/determinant/orthogonality policy: the affine model
+        // legitimately yields scale, shear and reflection (docs/ecc-affine-source-contract.md).
+
+        opencv_video_ecc_affine_result computed;
+        computed.m00 = w[0];
+        computed.m01 = w[1];
+        computed.m02 = w[2];
+        computed.m10 = w[3];
+        computed.m11 = w[4];
+        computed.m12 = w[5];
+        computed.correlation = correlation;
+        *result = computed;
+        clear_error();
+        return OPENCV_VIDEO_OK;
+    } catch (const cv::Exception &e) {
+        return fail(OPENCV_VIDEO_ERROR_OPENCV, e.what());
+    } catch (const std::exception &e) {
+        return fail(OPENCV_VIDEO_ERROR_STANDARD, e.what());
+    } catch (...) {
+        return fail(OPENCV_VIDEO_ERROR_UNKNOWN, "Unknown ECC exception");
+    }
+}

@@ -59,6 +59,26 @@ void opencv_video_test_corrupt_ecc(float *warp, double *correlation) {
             warp[2] = 3.0f; warp[5] = -4.0f;
             break;
         }
+        // Affine-only modes (Task 014). 21..26 write one nonfinite coefficient each
+        // (warp[1]=+Inf, warp[3]=-Inf, warp[4]=NaN, warp[2]=-Inf, warp[5]=NaN,
+        // warp[0]=+Inf); the affine entry point must reject all of them.
+        case 21: warp[1] = std::numeric_limits<float>::infinity(); break;
+        case 22: warp[3] = -std::numeric_limits<float>::infinity(); break;
+        case 23: warp[4] = nan; break;
+        case 24: warp[2] = -std::numeric_limits<float>::infinity(); break;
+        case 25: warp[5] = nan; break;
+        case 26: warp[0] = std::numeric_limits<float>::infinity(); break;
+        // 30..33 replace the warp with FINITE matrices that are not rigid; the affine entry
+        // point must publish them unchanged (no Euclidean-style policy): 30 anisotropic
+        // scale + shear, 31 reflection, 32 singular (det 0), 33 large finite values.
+        case 30: warp[0] = 1.3f; warp[1] = 0.4f; warp[2] = 5.0f;
+                 warp[3] = -0.2f; warp[4] = 0.7f; warp[5] = -3.0f; break;
+        case 31: warp[0] = -1.0f; warp[1] = 0.0f; warp[2] = 0.0f;
+                 warp[3] = 0.0f; warp[4] = 1.0f; warp[5] = 0.0f; break;
+        case 32: warp[0] = 1.0f; warp[1] = 2.0f; warp[2] = 0.5f;
+                 warp[3] = 0.5f; warp[4] = 1.0f; warp[5] = -0.5f; break;
+        case 33: warp[0] = 3.0e38f; warp[1] = -3.0e38f; warp[2] = 1.0e30f;
+                 warp[3] = 1.0e-30f; warp[4] = -2.0e38f; warp[5] = 3.0e38f; break;
         default: break;
     }
 }
@@ -1929,6 +1949,278 @@ void run_ecc_euclidean_seeded() {
 }
 }  // namespace
 
+// ECC affine (Task 014): actual shim versus a direct cv::findTransformECC(MOTION_AFFINE)
+// call, with byte-exact failure atomicity on a fixed 32-byte sentinel.
+namespace {
+static_assert(sizeof(opencv_video_ecc_affine_result) == 32 &&
+              alignof(opencv_video_ecc_affine_result) == 8 &&
+              offsetof(opencv_video_ecc_affine_result, m00) == 0 &&
+              offsetof(opencv_video_ecc_affine_result, m01) == 4 &&
+              offsetof(opencv_video_ecc_affine_result, m02) == 8 &&
+              offsetof(opencv_video_ecc_affine_result, m10) == 12 &&
+              offsetof(opencv_video_ecc_affine_result, m11) == 16 &&
+              offsetof(opencv_video_ecc_affine_result, m12) == 20 &&
+              offsetof(opencv_video_ecc_affine_result, correlation) == 24,
+              "ECC affine result layout");
+
+const opencv_video_ecc_affine_result kAffSentinel = {11.5f, -22.25f, 33.125f, -44.0625f, 55.03125f, -66.5f, 77.75};
+
+opencv_video_status aff_call(const opencv_core_mat_handle *a, const opencv_core_mat_handle *b,
+                             opencv_video_ecc_affine_result *r, int iterations = 50,
+                             double epsilon = 1e-4) {
+    return opencv_video_estimate_ecc_affine(a, b, iterations, epsilon, r);
+}
+
+void aff_unchanged(const opencv_video_ecc_affine_result &r, const char *message) {
+    check(std::memcmp(&r, &kAffSentinel, sizeof r) == 0, message);
+}
+
+struct AffDirect {
+    float w[6];
+    double rho;
+};
+
+AffDirect aff_direct(const cv::Mat &a, const cv::Mat &b, int iterations = 50, double epsilon = 1e-4) {
+    AffDirect d{};
+    cv::Mat warp = cv::Mat::eye(2, 3, CV_32F);
+    d.rho = cv::findTransformECC(a, b, warp, cv::MOTION_AFFINE,
+        cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, iterations, epsilon),
+        cv::noArray(), 5);
+    for (int i = 0; i < 6; ++i) d.w[i] = warp.ptr<float>()[i];
+    return d;
+}
+
+void aff_matches_direct(const opencv_video_ecc_affine_result &r, const AffDirect &d, const char *message) {
+    // Bitwise: same library, same inputs, deterministic CPU path.
+    check(std::memcmp(&r.m00, &d.w[0], 4) == 0 && std::memcmp(&r.m01, &d.w[1], 4) == 0 &&
+          std::memcmp(&r.m02, &d.w[2], 4) == 0 && std::memcmp(&r.m10, &d.w[3], 4) == 0 &&
+          std::memcmp(&r.m11, &d.w[4], 4) == 0 && std::memcmp(&r.m12, &d.w[5], 4) == 0 &&
+          r.correlation == d.rho, message);
+}
+
+cv::Mat aff_moving(int rows, int cols, double a, double b, double c, double d, double tx, double ty) {
+    return ecc_fixture::affine_texture(rows, cols, a, b, c, d, tx, ty);
+}
+
+void run_ecc_affine() {
+    const int n = 128;
+    const double d2r = 3.14159265358979323846 / 180.0;
+    const cv::Mat base_image = ecc_fixture::texture(n, n);
+    auto base = ecc_handle(base_image);
+    const cv::Mat before_base = base_image.clone();
+
+    struct Case {
+        const char *name;
+        double a, b, c, d, tx, ty;
+    };
+    const Case cases[] = {
+        {"identity", 1, 0, 0, 1, 0, 0},
+        {"translation", 1, 0, 0, 1, 2, 1},
+        {"negative translation", 1, 0, 0, 1, -2, -1},
+        {"rotation +3", std::cos(3 * d2r), -std::sin(3 * d2r), std::sin(3 * d2r), std::cos(3 * d2r), 0, 0},
+        {"rotation -3", std::cos(-3 * d2r), -std::sin(-3 * d2r), std::sin(-3 * d2r), std::cos(-3 * d2r), 0, 0},
+        {"anisotropic scale", 1.03, 0, 0, 0.97, 0, 0},
+        {"x shear", 1, 0.03, 0, 1, 0, 0},
+        {"y shear", 1, 0, -0.008, 1, 0, 0},
+        {"combined", 1.01, 0.012, -0.008, 0.99, 2, 1},
+    };
+    for (const auto &c : cases) {
+        const cv::Mat moving_image = aff_moving(n, n, c.a, c.b, c.c, c.d, c.tx, c.ty);
+        auto moving = ecc_handle(moving_image);
+        opencv_video_ecc_affine_result r = kAffSentinel;
+        check(aff_call(base.get(), moving.get(), &r) == OPENCV_VIDEO_OK, c.name);
+        aff_matches_direct(r, aff_direct(base_image, moving_image), c.name);
+        const double truth[6] = {c.a, c.b, c.tx, c.c, c.d, c.ty};
+        const float got[6] = {r.m00, r.m01, r.m02, r.m10, r.m11, r.m12};
+        for (int i = 0; i < 6; ++i)
+            check(std::fabs(got[i] - truth[i]) < (i == 2 || i == 5 ? 0.1 : 0.003),
+                  "affine coefficient position, sign or magnitude");
+        check(std::isfinite(r.correlation) && r.correlation > 0.98, "affine correlation");
+        opencv_video_ecc_affine_result again = kAffSentinel;
+        check(aff_call(base.get(), moving.get(), &again) == OPENCV_VIDEO_OK &&
+              std::memcmp(&again, &r, sizeof r) == 0, "affine repeatability");
+    }
+    // The same handle in both roles is the identity; reversing roles approximately inverts.
+    {
+        opencv_video_ecc_affine_result r = kAffSentinel;
+        check(aff_call(base.get(), base.get(), &r) == OPENCV_VIDEO_OK, "same-handle affine call");
+        check(std::fabs(r.m00 - 1) < 1e-5 && std::fabs(r.m11 - 1) < 1e-5 && std::fabs(r.m01) < 1e-5 &&
+              std::fabs(r.m10) < 1e-5 && std::fabs(r.m02) < 1e-4 && std::fabs(r.m12) < 1e-4 &&
+              std::fabs(r.correlation - 1.0) < 1e-6, "same-handle affine identity");
+        const cv::Mat mv = aff_moving(n, n, 1.01, 0.012, -0.008, 0.99, 2, 1);
+        auto moving = ecc_handle(mv);
+        opencv_video_ecc_affine_result fwd = kAffSentinel, rev = kAffSentinel;
+        check(aff_call(base.get(), moving.get(), &fwd) == OPENCV_VIDEO_OK &&
+              aff_call(moving.get(), base.get(), &rev) == OPENCV_VIDEO_OK, "role reversal");
+        check(rev.m00 < 1.0f && rev.m02 < 0.0f && fwd.m02 > 0.0f, "reversed roles did not invert the transform");
+        // Two different headers sharing one allocation behave like one image.
+        auto alias = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(alias.get()) = output(base.get());
+        opencv_video_ecc_affine_result a = kAffSentinel;
+        check(aff_call(base.get(), alias.get(), &a) == OPENCV_VIDEO_OK &&
+              std::fabs(a.correlation - 1.0) < 1e-6, "shared-allocation headers");
+    }
+
+    // Argument validation and byte-for-byte result preservation.
+    {
+        auto moving = ecc_handle(aff_moving(n, n, 1.01, 0.012, -0.008, 0.99, 2, 1));
+        opencv_video_ecc_affine_result r = kAffSentinel;
+        check(aff_call(nullptr, moving.get(), &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null template");
+        aff_unchanged(r, "null template changed result");
+        check(aff_call(base.get(), nullptr, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null moving");
+        aff_unchanged(r, "null moving changed result");
+        check(aff_call(base.get(), moving.get(), nullptr) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+              "null result accepted");
+        for (int iterations : {0, -1, 101})
+            check(aff_call(base.get(), moving.get(), &r, iterations) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                  "bad iterations accepted");
+        for (double epsilon : {0.0, -1e-4, 9e-9, 0.1000001, std::numeric_limits<double>::quiet_NaN(),
+                               std::numeric_limits<double>::infinity()})
+            check(aff_call(base.get(), moving.get(), &r, 50, epsilon) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                  "bad epsilon accepted");
+        aff_unchanged(r, "invalid options changed result");
+        check(aff_call(base.get(), moving.get(), &r, 1, 1e-8) == OPENCV_VIDEO_OK, "options lower bound");
+        r = kAffSentinel;
+        check(aff_call(base.get(), moving.get(), &r, 100, 0.1) == OPENCV_VIDEO_OK, "options upper bound");
+        r = kAffSentinel;
+        auto wrong_depth = matrix(n, n, OPENCV_CORE_DEPTH_FLOAT32, 1);
+        auto wrong_channels = matrix(n, n, OPENCV_CORE_DEPTH_UINT8, 3);
+        auto other_size = matrix(n, n + 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        for (auto *bad : {wrong_depth.get(), wrong_channels.get(), other_size.get()}) {
+            check(aff_call(base.get(), bad, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "bad moving accepted");
+            check(aff_call(bad, base.get(), &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "bad template accepted");
+        }
+        auto small = matrix(31, 128, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto small_peer = matrix(31, 128, OPENCV_CORE_DEPTH_UINT8, 1);
+        check(aff_call(small.get(), small_peer.get(), &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+              "below minimum dimension accepted");
+        auto empty = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(empty.get()) = cv::Mat();
+        check(aff_call(empty.get(), base.get(), &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "empty accepted");
+        auto wide = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto wide_peer = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(wide.get()) = cv::Mat(32, 16385, CV_8UC1, cv::Scalar(0));
+        output(wide_peer.get()) = cv::Mat(32, 16385, CV_8UC1, cv::Scalar(0));
+        check(aff_call(wide.get(), wide_peer.get(), &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+              "above maximum dimension accepted");
+        // Area bound: 4097 x 4096 exceeds 2^24 pixels. Header-only Mats with shared 1-row
+        // storage would be invalid, so use real zero-filled storage (about 16 MiB each).
+        auto area = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto area_peer = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(area.get()) = cv::Mat(4097, 4096, CV_8UC1, cv::Scalar(0));
+        output(area_peer.get()) = cv::Mat(4097, 4096, CV_8UC1, cv::Scalar(0));
+        check(aff_call(area.get(), area_peer.get(), &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+              "above maximum area accepted");
+        aff_unchanged(r, "invalid input changed result");
+    }
+
+    // Native nonconvergence is a failure that leaves the caller's bytes unchanged.
+    {
+        auto flat = ecc_handle(ecc_fixture::constant(n, n, 128));
+        auto noise_a = ecc_handle(ecc_fixture::noise(n, n, 3));
+        auto noise_b = ecc_handle(ecc_fixture::noise(n, n, 9));
+        auto reflected = ecc_handle(aff_moving(n, n, -1, 0, 0, 1, 0, 0));
+        auto strong = ecc_handle(aff_moving(n, n, 1.2, 0.1, -0.1, 0.8, 5, -3));
+        opencv_video_ecc_affine_result r = kAffSentinel;
+        check(aff_call(flat.get(), flat.get(), &r) == OPENCV_VIDEO_ERROR_OPENCV, "constant images accepted");
+        aff_unchanged(r, "constant failure changed result");
+        check(aff_call(noise_a.get(), noise_b.get(), &r) == OPENCV_VIDEO_ERROR_OPENCV, "noise accepted");
+        aff_unchanged(r, "noise failure changed result");
+        check(aff_call(base.get(), reflected.get(), &r) == OPENCV_VIDEO_ERROR_OPENCV, "reflection accepted");
+        aff_unchanged(r, "reflection failure changed result");
+        check(aff_call(base.get(), strong.get(), &r) == OPENCV_VIDEO_ERROR_OPENCV, "strong deformation accepted");
+        aff_unchanged(r, "strong deformation failure changed result");
+        check(std::strlen(opencv_video_last_error()) > 0, "no diagnostic after nonconvergence");
+    }
+
+    // Genuine non-contiguous Regions equal the direct call on the same Regions.
+    {
+        const cv::Mat parent_a = ecc_fixture::texture(160, 160);
+        const cv::Mat parent_b = aff_moving(160, 160, 1.01, 0.012, -0.008, 0.99, 2, 1);
+        const cv::Rect roi(16, 16, n, n);
+        auto h_a = ecc_handle(parent_a);
+        auto h_b = ecc_handle(parent_b);
+        auto region_a = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto region_b = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(region_a.get()) = output(h_a.get())(roi);
+        output(region_b.get()) = output(h_b.get())(roi);
+        check(!output(region_a.get()).isContinuous() && !output(region_b.get()).isContinuous(),
+              "fixture Region is contiguous");
+        opencv_video_ecc_affine_result r = kAffSentinel;
+        check(aff_call(region_a.get(), region_b.get(), &r) == OPENCV_VIDEO_OK, "affine Region call failed");
+        aff_matches_direct(r, aff_direct(parent_a(roi), parent_b(roi)),
+                           "affine Region differs from direct native Region call");
+        check(cv::norm(output(h_a.get()), parent_a, cv::NORM_INF) == 0 &&
+              cv::norm(output(h_b.get()), parent_b, cv::NORM_INF) == 0, "affine changed Region parents");
+    }
+    check(cv::norm(output(base.get()), before_base, cv::NORM_INF) == 0, "affine changed an input");
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    {
+        const cv::Mat mv = aff_moving(n, n, 1.01, 0.012, -0.008, 0.99, 2, 1);
+        auto moving = ecc_handle(mv);
+        // All eight exception injections (before and after native execution).
+        for (int stage : {1, 2}) for (int kind : {1, 2, 3, 4}) {
+            fault_stage = stage; fault_kind = kind;
+            opencv_video_ecc_affine_result r = kAffSentinel;
+            const auto code = aff_call(base.get(), moving.get(), &r);
+            fault_stage = 0;
+            check(code == (kind == 2 ? OPENCV_VIDEO_ERROR_OPENCV
+                           : kind == 3 ? OPENCV_VIDEO_ERROR_UNKNOWN : OPENCV_VIDEO_ERROR_STANDARD),
+                  "ECC affine injected exception mapped to the wrong status");
+            aff_unchanged(r, "ECC affine injected failure changed result");
+        }
+        // Post-native nonfinite corruption: NaN/+Inf/-Inf in each of the six coefficients and
+        // in the correlation must be rejected with the caller's 32 bytes untouched.
+        for (int mode : {1, 2, 3, 4, 9, 21, 22, 23, 24, 25, 26}) {
+            ecc_corrupt_mode = mode;
+            opencv_video_ecc_affine_result r = kAffSentinel;
+            const auto code = aff_call(base.get(), moving.get(), &r);
+            ecc_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_ERROR_OPENCV, "ECC affine nonfinite native output accepted");
+            aff_unchanged(r, "ECC affine nonfinite native output was partially published");
+            check(std::strlen(opencv_video_last_error()) > 0, "no diagnostic after rejected affine output");
+        }
+        // Finite non-rigid output is legitimate affine output and must be published: the
+        // Euclidean rotation/determinant policy is NOT applied to the affine entry point.
+        // Modes 5/6/7/8/10/13 perturb the linear part of a real fit (not identity, scaled,
+        // reflected, asymmetric); 11/12 are rigid beyond the Euclidean angle range.
+        for (int mode : {5, 6, 7, 8, 10, 11, 12, 13}) {
+            ecc_corrupt_mode = mode;
+            opencv_video_ecc_affine_result r = kAffSentinel;
+            const auto code = aff_call(base.get(), moving.get(), &r);
+            ecc_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_OK, "ECC affine rejected a finite non-rigid matrix");
+            check(std::isfinite(r.m00) && std::isfinite(r.m01) && std::isfinite(r.m02) &&
+                  std::isfinite(r.m10) && std::isfinite(r.m11) && std::isfinite(r.m12) &&
+                  std::memcmp(&r, &kAffSentinel, sizeof r) != 0, "ECC affine finite output not published");
+        }
+        struct Exact { int mode; float w[6]; };
+        const Exact exact[] = {
+            {30, {1.3f, 0.4f, 5.0f, -0.2f, 0.7f, -3.0f}},       // anisotropic scale + shear
+            {31, {-1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f}},       // reflection, det = -1
+            {32, {1.0f, 2.0f, 0.5f, 0.5f, 1.0f, -0.5f}},       // singular, det = 0
+            {33, {3.0e38f, -3.0e38f, 1.0e30f, 1.0e-30f, -2.0e38f, 3.0e38f}},  // extreme finite
+        };
+        for (const auto &e : exact) {
+            ecc_corrupt_mode = e.mode;
+            opencv_video_ecc_affine_result r = kAffSentinel;
+            const auto code = aff_call(base.get(), moving.get(), &r);
+            ecc_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_OK, "ECC affine rejected an injected finite matrix");
+            const float got[6] = {r.m00, r.m01, r.m02, r.m10, r.m11, r.m12};
+            check(std::memcmp(got, e.w, sizeof got) == 0, "ECC affine altered an injected finite matrix");
+            check(std::isfinite(r.correlation), "ECC affine injected-matrix correlation");
+        }
+    }
+#endif
+    auto moving = ecc_handle(aff_moving(n, n, 1.01, 0.012, -0.008, 0.99, 2, 1));
+    opencv_video_ecc_affine_result r = kAffSentinel;
+    check(aff_call(base.get(), moving.get(), &r) == OPENCV_VIDEO_OK, "post-fault affine call failed");
+    std::cout << "PASS: ECC affine shim vs direct MOTION_AFFINE findTransformECC, six coefficients, roles, options, schema, nonconvergence, Regions, atomicity, faults, corruption\n";
+}
+}  // namespace
+
 
 int main() {
     try {
@@ -1947,6 +2239,7 @@ int main() {
         run_ecc();
         run_ecc_euclidean();
         run_ecc_euclidean_seeded();
+        run_ecc_affine();
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "FAIL: " << error.what() << '\n';

@@ -11,6 +11,12 @@ package ECC_Fixtures is
    --  same expression order as ecc_fixture::rigid_texture in C++.
    function Rigid_Texture
      (Rows, Columns : Positive; Degrees, TX, TY : Long_Float) return OpenCV.Core.Mat;
+   --  Task 014 affine template-to-moving warp: moving = A * template + (TX, TY) with
+   --  A = [[A, B], [C, D]], evaluated analytically as signal (A**-1 (p - t)) with the same
+   --  explicit 2 x 2 inverse and expression order as ecc_fixture::affine_texture in C++.
+   --  A must be invertible.
+   function Affine_Texture
+     (Rows, Columns : Positive; A, B, C, D, TX, TY : Long_Float) return OpenCV.Core.Mat;
    --  sat((v * Num + Den / 2) / Den + Beta), exact integer arithmetic.
    function Affine (Source : OpenCV.Core.Mat; Num, Den, Beta : Integer) return OpenCV.Core.Mat;
    function Constant_Image (Rows, Columns : Positive; Value : Natural) return OpenCV.Core.Mat;
