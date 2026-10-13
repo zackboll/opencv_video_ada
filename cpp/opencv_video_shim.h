@@ -296,6 +296,26 @@ opencv_video_status opencv_video_estimate_ecc_affine(
     double epsilon,
     opencv_video_ecc_affine_result *result);
 
+/* Caller-seeded affine ECC (Task 015). Identical to opencv_video_estimate_ecc_affine
+ * except the private 2x3 Float32 warp starts from the six row-major coefficients
+ * (native matrix storage order, NOT the native update-vector order). Each coefficient
+ * must be finite; m00,m01,m10,m11 have magnitude <= 4 and m02,m12 magnitude <= 2^20
+ * (binding policy, docs/ecc-affine-seeded-source-contract.md). Violations return
+ * OPENCV_VIDEO_ERROR_INVALID_ARGUMENT before any native call. The seed is never
+ * transposed, negated, inverted or composed. *result is unchanged on every failure. */
+opencv_video_status opencv_video_estimate_ecc_affine_seeded(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations,
+    double epsilon,
+    float initial_m00,
+    float initial_m01,
+    float initial_m02,
+    float initial_m10,
+    float initial_m11,
+    float initial_m12,
+    opencv_video_ecc_affine_result *result);
+
 #ifdef __cplusplus
 }
 #endif

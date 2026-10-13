@@ -1,5 +1,49 @@
 # OpenCV Video for Ada
 
+### Caller-seeded ECC affine alignment (Task 015)
+
+```ada
+Refined : constant ECC_Affine_Result :=
+  OpenCV.Video.Estimate_ECC_Affine
+    (Template_Image    => Previous_Image,
+     Moving_Image      => Current_Image,
+     Initial_Transform => Predicted_Affine);
+```
+
+The same native `findTransformECC` (`MOTION_AFFINE`, `COUNT | EPS`, no mask, Gaussian size 5) as
+Task 014, but the private 2x3 Float32 warp starts from `Initial_Transform.Warp` instead of the
+identity. A previous `ECC_Affine_Result` may be passed directly.
+
+* **Row-major storage order.** The seed is placed in native matrix storage order `M00 M01 M02 M10
+  M11 M12`. This is *not* the native update-vector order (`M00 M10 M01 M11 M02 M12`) used inside the
+  optimizer. Nothing is transposed, negated, inverted, decomposed or composed; the seed uses the
+  same template-to-moving convention as the result.
+* **`Initial_Transform.Correlation` is ignored.** It is never read, validated, propagated or used as
+  a threshold, so even a nonfinite value changes nothing. The returned correlation is always the
+  new native value (computed before the final update).
+* **No implicit composition.** The seed is a prediction for *this* image pair. A previous pair's
+  result is not automatically the right transform for the next pair.
+* **Seed domain (binding policy, not an OpenCV guarantee).** `M00 M01 M10 M11` finite with absolute
+  value at most 4; `M02 M12` finite with absolute value at most `2**20` pixels. Violations raise
+  `OpenCV_Error` and are never clamped. Singular, near-singular and reflected seeds pass validation
+  because they are not unsafe; they usually make native ECC raise or return a poor finite matrix.
+  An accepted seed does not imply convergence or correct alignment.
+* **Identity seed equivalence.** The identity seed (and the default `others => <>` record) gives a
+  byte-identical result to the identity-initialized overload, including the same native failures.
+* **Seed consumption.** Identity initialization raises on a 0.12 shear, a 0.2 shear, a reflection,
+  a 12% anisotropic scale and an up-to-20% strong deformation on every qualified version; a
+  near-correct affine seed converges on the same pairs, so the seed is genuinely consumed.
+* **Nonconvergence** (constant, noise, deliberately wrong seeds) raises; a finite result can still
+  be wrong, e.g. a poor seed can end at a low-correlation matrix.
+* The result is a plain value; Regions are accepted, inputs and the initial record are never
+  modified.
+
+Production ABI: 21 exports (`opencv_video_estimate_ecc_affine_seeded`, result structure reused,
+size 32 bytes). AUnit has 163 registrations. See the [task note](docs/tasks/015-seeded-ecc-affine.md),
+the [source contract](docs/ecc-affine-seeded-source-contract.md) and the
+[qualification](docs/task015-qualification.md). The accepted upstream Farnebäck pointer-arithmetic
+finding does not extend to ECC.
+
 ### ECC six-parameter affine alignment (Task 014)
 
 ```ada
@@ -607,8 +651,8 @@ The first slice does not bind:
 
 - forward/backward prebuilt-pyramid composition;
 - DIS dense optical flow and Farneback options beyond the Task 009/010 subset (Gaussian, UMat);
-- ECC homography/perspective, masked, multiscale and caller-seeded affine registration
-  (translation, Euclidean, seeded Euclidean and identity-initialized affine ECC are bound);
+- ECC homography/perspective, masked and multiscale registration
+  (translation, Euclidean, seeded Euclidean, identity-initialized and seeded affine ECC are bound);
 - KalmanFilter;
 - CamShift / meanShift;
 - UMat/OpenCL overloads;

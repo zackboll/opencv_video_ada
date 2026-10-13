@@ -64,4 +64,11 @@ env -u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u LIBRARY_PATH \
     tests/cpp/ecc_affine_oracle.cpp $("$pkg_config" --libs "$package") -o obj/oracle/ecc-affine-oracle
 rm -f obj/oracle/ecc-affine.txt
 sh scripts/run_native.sh obj/oracle/ecc-affine-oracle obj/oracle/ecc-affine.txt
+# Independent seeded ECC affine oracle (Task 015): own source, binary and output file.
+env -u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u LIBRARY_PATH \
+    -u GCC_EXEC_PREFIX -u COMPILER_PATH \
+    "$compiler" "$@" -std=c++17 -Wall -Wextra -Wpedantic -Werror $cflags -Itests/cpp \
+    tests/cpp/ecc_affine_seeded_oracle.cpp $("$pkg_config" --libs "$package") -o obj/oracle/ecc-affine-seeded-oracle
+rm -f obj/oracle/ecc-affine-seeded.txt
+sh scripts/run_native.sh obj/oracle/ecc-affine-seeded-oracle obj/oracle/ecc-affine-seeded.txt
 sh scripts/run_native.sh obj/oracle/direct-oracle obj/oracle/forward-backward.txt obj/oracle/trackability.txt obj/oracle/farneback.txt obj/oracle/farneback-seeded.txt

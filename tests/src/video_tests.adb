@@ -6112,6 +6112,853 @@ package body Video_Tests is
       Ada.Directories.Delete_File (Scratch);
    end ECC_Affine_Oracle_Integrity;
 
+   ---------------------------------------------------------------------
+   --  Task 015: caller-seeded ECC affine alignment
+   ---------------------------------------------------------------------
+   --  Truth is row-major [A B TX; C D TY]: moving = A * template + t.
+   type Sd_Truth is array (0 .. 5) of Long_Float;
+
+   Sd_Identity_Truth : constant Sd_Truth := [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+   Sd_Small_Truth    : constant Sd_Truth := [1.01, 0.012, 2.0, -0.008, 0.99, 1.0];
+   Sd_Shear_Truth    : constant Sd_Truth := [1.0, 0.12, 1.0, -0.05, 1.0, -1.0];
+   Sd_Scale_Truth    : constant Sd_Truth := [1.12, 0.02, 2.0, -0.01, 0.88, 1.0];
+   Sd_Comb_Truth     : constant Sd_Truth := [1.08, 0.08, 2.0, -0.04, 0.94, -1.0];
+   Sd_Shear2_Truth   : constant Sd_Truth := [1.0, 0.2, 0.0, 0.0, 1.0, 0.0];
+   Sd_Strong_Truth   : constant Sd_Truth := [1.2, 0.1, 5.0, -0.1, 0.8, -3.0];
+   Sd_Reflect_Truth  : constant Sd_Truth := [-1.0, 0.0, 127.0, 0.0, 1.0, 0.0];
+
+   function Sd_Pair (T : Sd_Truth) return ECC_Pair is
+     (Aff_Pair (T (0), T (1), T (3), T (4), T (2), T (5)));
+
+   function Mk
+     (M00, M01, M02, M10, M11, M12 : OpenCV.Float32_Value;
+      Correlation : OpenCV.Float64_Value := 0.0) return ECC_Affine_Result is
+     (Warp => (M00 => M00, M01 => M01, M02 => M02, M10 => M10, M11 => M11, M12 => M12),
+      Correlation => Correlation);
+
+   function F32_Of (Value : Long_Float) return OpenCV.Float32_Value is
+     (OpenCV.Float32_Value (Value));
+
+   function Sd_Seed_Of (T : Sd_Truth) return ECC_Affine_Result is
+     (Mk (F32_Of (T (0)), F32_Of (T (1)), F32_Of (T (2)),
+          F32_Of (T (3)), F32_Of (T (4)), F32_Of (T (5))));
+
+   Sd_Identity_Seed : constant ECC_Affine_Result := Mk (1.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+   Sd_Shear_Near    : constant ECC_Affine_Result := Mk (1.0, 0.10, 0.5, -0.04, 1.0, -0.7);
+   Sd_Scale_Near    : constant ECC_Affine_Result := Mk (1.10, 0.01, 1.5, 0.0, 0.90, 0.8);
+   Sd_Comb_Near     : constant ECC_Affine_Result := Mk (1.06, 0.07, 1.7, -0.03, 0.95, -0.8);
+   Sd_Shear2_Near   : constant ECC_Affine_Result := Mk (1.0, 0.18, 0.0, 0.0, 1.0, 0.0);
+   Sd_Strong_Near   : constant ECC_Affine_Result := Mk (1.18, 0.09, 4.5, -0.09, 0.82, -2.7);
+   Sd_Reflect_Near  : constant ECC_Affine_Result := Mk (-0.98, 0.01, 126.0, 0.0, 1.0, 0.1);
+   Sd_Wrong_Seed    : constant ECC_Affine_Result := Mk (0.8, -0.2, 6.0, 0.2, 1.25, -5.0);
+
+   --  Largest absolute difference over the six coefficients (explicit metric, not a
+   --  confidence measure).
+   function Sd_Coef_Error (W : ECC_Affine_Warp; T : Sd_Truth) return Long_Float is
+      function D (V : OpenCV.Float32_Value; K : Natural) return Long_Float is
+        (abs (LF (V) - T (K)));
+   begin
+      return Long_Float'Max
+        (Long_Float'Max (Long_Float'Max (D (W.M00, 0), D (W.M01, 1)),
+                         Long_Float'Max (D (W.M02, 2), D (W.M10, 3))),
+         Long_Float'Max (D (W.M11, 4), D (W.M12, 5)));
+   end Sd_Coef_Error;
+
+   function Sd_Near (R : ECC_Affine_Result; T : Sd_Truth) return Boolean is
+     (Aff_Near (R, T (0), T (1), T (3), T (4), T (2), T (5)));
+
+   --  Interior mean absolute difference with border-clamped bilinear sampling: seeds may map
+   --  interior pixels outside the image (native uses BORDER_REFLECT_101; clamping is only a
+   --  test metric and never feeds the binding).
+   function Sd_Residual (Pair : ECC_Pair; W : ECC_Affine_Warp; Aligned : Boolean) return Long_Float is
+      Margin : constant := 24;
+      Sum    : Long_Float := 0.0;
+      Count  : Natural := 0;
+      MX, MY : Long_Float;
+      function Clamp (V : Long_Float) return Long_Float is
+        (Long_Float'Max (0.0, Long_Float'Min (126.0, V)));
+   begin
+      for Y in Margin .. 127 - Margin loop
+         for X in Margin .. 127 - Margin loop
+            if Aligned then
+               Aff_Map (W, Long_Float (X), Long_Float (Y), MX, MY);
+            else
+               MX := Long_Float (X);
+               MY := Long_Float (Y);
+            end if;
+            Sum := Sum + abs (Sample (Pair.Moving, Clamp (MX), Clamp (MY))
+                              - Long_Float (OpenCV.Core.UInt8_Access.Get (Pair.Template, Y, X)));
+            Count := Count + 1;
+         end loop;
+      end loop;
+      return Sum / Long_Float (Count);
+   end Sd_Residual;
+
+   procedure Sd_Run
+     (Pair : ECC_Pair; Initial : ECC_Affine_Result;
+      Result : out ECC_Affine_Result; Raised : out Boolean;
+      Options : ECC_Affine_Options := (others => <>)) is
+   begin
+      Result := Estimate_ECC_Affine (Pair.Template, Pair.Moving, Options, Initial);
+      Raised := False;
+   exception
+      when OpenCV.OpenCV_Error => Result := (others => <>); Raised := True;
+   end Sd_Run;
+
+   procedure Sd_Run_Plain
+     (Pair : ECC_Pair; Result : out ECC_Affine_Result; Raised : out Boolean) is
+   begin
+      Result := Estimate_ECC_Affine (Pair.Template, Pair.Moving);
+      Raised := False;
+   exception
+      when OpenCV.OpenCV_Error => Result := (others => <>); Raised := True;
+   end Sd_Run_Plain;
+
+   type Sd_Outcome is (Accepted, Preflight_Rejected, Native_Failed);
+
+   --  Native-layer failures carry the "Video.Estimate_ECC_Affine" prefix (C.Check);
+   --  Ada preflight rejections do not.
+   function Sd_Outcome_Of
+     (Pair : ECC_Pair; Initial : ECC_Affine_Result;
+      Options : ECC_Affine_Options := (others => <>)) return Sd_Outcome
+   is
+      Marker : constant String := "Video.Estimate_ECC_Affine";
+      Unused : ECC_Affine_Result;
+   begin
+      Unused := Estimate_ECC_Affine (Pair.Template, Pair.Moving, Options, Initial);
+      return Accepted;
+   exception
+      when Error : OpenCV.OpenCV_Error =>
+         declare
+            Text : constant String := Ada.Exceptions.Exception_Message (Error);
+         begin
+            return (if Text'Length >= Marker'Length
+                      and then Text (Text'First .. Text'First + Marker'Length - 1) = Marker
+                    then Native_Failed else Preflight_Rejected);
+         end;
+   end Sd_Outcome_Of;
+
+   procedure ECC_Affine_Seeded_Identity_Equivalence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pi   : constant Long_Float := 3.14159265358979323846;
+      Rot3 : constant Sd_Truth :=
+        [LM.Cos (3.0 * Pi / 180.0), -LM.Sin (3.0 * Pi / 180.0), 0.0,
+         LM.Sin (3.0 * Pi / 180.0), LM.Cos (3.0 * Pi / 180.0), 0.0];
+      Pairs : constant array (1 .. 11) of ECC_Pair :=
+        [Sd_Pair (Sd_Identity_Truth), Sd_Pair ([1.0, 0.0, 2.0, 0.0, 1.0, 1.0]),
+         Sd_Pair (Sd_Small_Truth), Sd_Pair (Rot3), Sd_Pair ([1.02, 0.0, 0.0, 0.0, 1.02, 0.0]),
+         Sd_Pair ([1.0, 0.03, 0.0, 0.0, 1.0, 0.0]), Sd_Pair (Sd_Strong_Truth),
+         Sd_Pair (Sd_Shear2_Truth), Sd_Pair (Sd_Reflect_Truth),
+         (EF.Constant_Image (128, 128, 128), EF.Constant_Image (128, 128, 128)),
+         (EF.Noise (128, 128, 3), EF.Noise (128, 128, 9))];
+      With_Correlation : constant ECC_Affine_Result := Mk (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.7);
+      Successes, Failures : Natural := 0;
+   begin
+      for Pair of Pairs loop
+         declare
+            Plain, Seeded, Defaulted, Correlated : ECC_Affine_Result;
+            Plain_Raised, Seeded_Raised, Defaulted_Raised, Correlated_Raised : Boolean;
+         begin
+            Sd_Run_Plain (Pair, Plain, Plain_Raised);
+            Sd_Run (Pair, Sd_Identity_Seed, Seeded, Seeded_Raised);
+            Sd_Run (Pair, (others => <>), Defaulted, Defaulted_Raised);
+            Sd_Run (Pair, With_Correlation, Correlated, Correlated_Raised);
+            Assert (Plain_Raised = Seeded_Raised and then Plain_Raised = Defaulted_Raised
+                    and then Plain_Raised = Correlated_Raised,
+                    "identity seed changed native success or failure");
+            if Plain_Raised then
+               Failures := Failures + 1;
+            else
+               Successes := Successes + 1;
+               Assert (Plain = Seeded and then Plain = Defaulted and then Plain = Correlated,
+                       "identity seed result differs from the identity-initialized operation");
+            end if;
+         end;
+      end loop;
+      Assert (Successes >= 5 and then Failures >= 3, "identity-equivalence coverage");
+   end ECC_Affine_Seeded_Identity_Equivalence;
+
+   procedure ECC_Affine_Seeded_Consumption (T : in out Fixture) is
+      pragma Unreferenced (T);
+      type Case_Data is record
+         Truth          : Sd_Truth;
+         Seed           : ECC_Affine_Result;
+         Identity_Fails : Boolean;
+         Coef_Improves  : Boolean;
+      end record;
+      Cases : constant array (1 .. 7) of Case_Data :=
+        [(Sd_Shear_Truth, Sd_Shear_Near, True, True),
+         (Sd_Shear2_Truth, Sd_Shear2_Near, True, False),
+         (Sd_Reflect_Truth, Sd_Reflect_Near, True, True),
+         (Sd_Scale_Truth, Sd_Scale_Near, True, True),
+         (Sd_Comb_Truth, Sd_Comb_Near, True, True),
+         (Sd_Strong_Truth, Sd_Strong_Near, True, True),
+         (Sd_Small_Truth, Mk (1.0, 0.01, 1.5, -0.005, 1.0, 0.5), False, False)];
+      Distinguishing : Natural := 0;
+   begin
+      for Item of Cases loop
+         declare
+            Pair : constant ECC_Pair := Sd_Pair (Item.Truth);
+            Plain, Refined, Exact : ECC_Affine_Result;
+            Plain_Raised, Refined_Raised, Exact_Raised : Boolean;
+            Before : constant Long_Float := Sd_Residual (Pair, Item.Seed.Warp, True);
+         begin
+            Sd_Run_Plain (Pair, Plain, Plain_Raised);
+            Sd_Run (Pair, Item.Seed, Refined, Refined_Raised);
+            Assert (not Refined_Raised, "near-correct seed did not converge");
+            Assert (Sd_Near (Refined, Item.Truth), "seeded result is not near the known transform");
+            Assert (Refined.Warp /= Item.Seed.Warp, "seeded result is the unmodified seed");
+            Assert (Sd_Residual (Pair, Refined.Warp, True) < Before * 0.5,
+                    "refinement did not reduce the image residual");
+            --  Native correlation is not clamped: Float32 rounding can exceed 1.0 slightly
+            --  (measured 1.000000085 for the exact reflection).
+            Assert (Refined.Correlation > 0.9 and then Refined.Correlation <= 1.000001,
+                    "seeded correlation");
+            if Item.Coef_Improves then
+               Assert (Sd_Coef_Error (Refined.Warp, Item.Truth)
+                         < Sd_Coef_Error (Item.Seed.Warp, Item.Truth),
+                       "refinement did not reduce the coefficient error");
+            end if;
+            if Item.Identity_Fails then
+               Assert (Plain_Raised, "identity initialization unexpectedly converged");
+               Distinguishing := Distinguishing + 1;
+            end if;
+            Sd_Run (Pair, Sd_Seed_Of (Item.Truth), Exact, Exact_Raised);
+            Assert (not Exact_Raised and then Sd_Near (Exact, Item.Truth), "exact seed");
+         end;
+      end loop;
+      Assert (Distinguishing >= 6, "too few identity-fails / seeded-succeeds fixtures");
+      Assert (Sd_Outcome_Of (Sd_Pair (Sd_Shear_Truth), Sd_Wrong_Seed) = Native_Failed,
+              "a grossly wrong seed must raise, not be fabricated");
+   end ECC_Affine_Seeded_Consumption;
+
+   procedure ECC_Affine_Seeded_Refinement_And_Direction (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pair : constant ECC_Pair := Sd_Pair (Sd_Comb_Truth);
+      One, Many, Three : ECC_Affine_Result;
+      One_Raised, Many_Raised, Three_Raised : Boolean;
+      Unaligned : constant Long_Float := Sd_Residual (Pair, Sd_Identity_Seed.Warp, False);
+   begin
+      Sd_Run (Pair, Sd_Comb_Near, One, One_Raised, (Maximum_Iterations => 1, Epsilon => 0.0001));
+      Sd_Run (Pair, Sd_Comb_Near, Three, Three_Raised, (Maximum_Iterations => 3, Epsilon => 0.0001));
+      Sd_Run (Pair, Sd_Comb_Near, Many, Many_Raised);
+      Assert (not One_Raised and then not Three_Raised and then not Many_Raised, "refinement runs");
+      Assert (One /= Many and then One /= Three and then Three /= Many,
+              "one, three and many iterations are indistinguishable");
+      Assert (Sd_Coef_Error (Many.Warp, Sd_Comb_Truth) < Sd_Coef_Error (One.Warp, Sd_Comb_Truth),
+              "more iterations did not move the matrix closer to the truth");
+      Assert (One.Correlation < Many.Correlation, "one-iteration correlation");
+      Assert (Estimate_ECC_Affine (Pair.Template, Pair.Moving, (others => <>), Sd_Comb_Near) = Many,
+              "seeded affine not repeatable");
+
+      --  Direction: the returned matrix is applied unchanged with WARP_INVERSE_MAP.
+      declare
+         W : constant ECC_Affine_Warp := Many.Warp;
+         Negated    : constant ECC_Affine_Warp := (W with delta M02 => -W.M02, M12 => -W.M12);
+         Transposed : constant ECC_Affine_Warp := (W with delta M01 => W.M10, M10 => W.M01);
+         Aligned    : constant Long_Float := Sd_Residual (Pair, W, True);
+      begin
+         Assert (Aligned < Unaligned * 0.1, "unmodified matrix does not align the moving image");
+         Assert (Sd_Residual (Pair, Negated, True) > Aligned * 5.0, "negated translation aligns");
+         Assert (Sd_Residual (Pair, Transposed, True) > Aligned * 3.0, "transposed matrix aligns");
+         Assert (abs (W.M01 - W.M10) > 0.05 and then abs (W.M02 - W.M12) > 1.0,
+                 "direction fixture is symmetric");
+      end;
+
+      --  Storage order: seeds with permuted or negated slots must not reproduce the
+      --  one-iteration estimate of the correct seed.
+      declare
+         S : ECC_Affine_Warp renames Sd_Comb_Near.Warp;
+         Variants : constant array (1 .. 6) of ECC_Affine_Warp :=
+           [(S with delta M01 => S.M10, M10 => S.M01),
+            (S with delta M02 => S.M12, M12 => S.M02),
+            (S with delta M00 => S.M11, M11 => S.M00),
+            (S with delta M01 => -S.M01),
+            (S with delta M02 => -S.M02),
+            (S with delta M10 => -S.M10)];
+      begin
+         for V of Variants loop
+            declare
+               Mutated : ECC_Affine_Result;
+               Mutated_Raised : Boolean;
+            begin
+               Sd_Run (Pair, (Warp => V, Correlation => 0.0), Mutated, Mutated_Raised,
+                       (Maximum_Iterations => 1, Epsilon => 0.0001));
+               Assert (Mutated_Raised or else Mutated.Warp /= One.Warp,
+                       "permuted seed produced the same one-iteration estimate");
+               Assert (Mutated_Raised or else Sd_Coef_Error (Mutated.Warp, Sd_Comb_Truth)
+                         > Sd_Coef_Error (One.Warp, Sd_Comb_Truth),
+                       "permuted seed was not worse than the correct seed");
+            end;
+         end loop;
+      end;
+   end ECC_Affine_Seeded_Refinement_And_Direction;
+
+   procedure ECC_Affine_Seeded_Correlation_Ignored (T : in out Fixture) is
+      pragma Unreferenced (T);
+      pragma Validity_Checks (Off);
+      function F64 is new Ada.Unchecked_Conversion (Interfaces.Unsigned_64, OpenCV.Float64_Value);
+      Pair : constant ECC_Pair := Sd_Pair (Sd_Comb_Truth);
+      Base : ECC_Affine_Result;
+      Base_Raised : Boolean;
+      Correlations : constant array (1 .. 7) of OpenCV.Float64_Value :=
+        [0.0, 1.0, -1.0, 12345.0, OpenCV.Float64_Value'Last,
+         F64 (16#7FF8_0000_0000_0000#), F64 (16#FFF0_0000_0000_0000#)];
+   begin
+      Sd_Run (Pair, Sd_Comb_Near, Base, Base_Raised);
+      Assert (not Base_Raised, "baseline seeded run");
+      for C of Correlations loop
+         declare
+            Initial : constant ECC_Affine_Result := (Sd_Comb_Near with delta Correlation => C);
+            Saved   : constant ECC_Affine_Result := Initial;
+            Again   : ECC_Affine_Result;
+            Raised  : Boolean;
+         begin
+            Sd_Run (Pair, Initial, Again, Raised);
+            Assert (not Raised and then Again = Base, "initial correlation changed the result");
+            Assert (Again.Warp = Base.Warp and then Again.Correlation = Base.Correlation,
+                    "initial correlation leaked into the result");
+            Assert (Initial.Warp = Saved.Warp, "initial warp modified");
+         end;
+      end loop;
+      --  A previous result is a valid seed for the next call, and chaining is repeatable.
+      declare
+         First  : constant ECC_Affine_Result := Estimate_ECC_Affine
+           (Pair.Template, Pair.Moving, (others => <>), Sd_Comb_Near);
+         Second : constant ECC_Affine_Result := Estimate_ECC_Affine
+           (Pair.Template, Pair.Moving, (others => <>), First);
+         Third  : constant ECC_Affine_Result := Estimate_ECC_Affine
+           (Pair.Template, Pair.Moving, (others => <>), First);
+      begin
+         Assert (Sd_Near (Second, Sd_Comb_Truth) and then Second = Third,
+                 "previous result reused as a seed");
+      end;
+   end ECC_Affine_Seeded_Correlation_Ignored;
+
+   procedure ECC_Affine_Seeded_Immutability_And_Regions (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Window : constant OpenCV.Rect := (16, 16, 128, 128);
+      Saved, Contiguous : ECC_Affine_Result;
+      Before_A, Before_B : Long_Long_Integer;
+      Initial : constant ECC_Affine_Result := Mk (1.0, 0.01, 1.5, 0.0, 1.0, 0.5, 0.25);
+      Snapshot : constant ECC_Affine_Result := Initial;
+      Unused : ECC_Affine_Result;
+      Raised : Boolean;
+   begin
+      declare
+         Parent_A : constant OpenCV.Core.Mat := EF.Texture (160, 160);
+         Parent_B : constant OpenCV.Core.Mat :=
+           EF.Affine_Texture (160, 160, 1.01, 0.012, -0.008, 0.99, 2.0, 1.0);
+         Region_A : constant OpenCV.Core.Mat := Parent_A.Region (Window);
+         Region_B : constant OpenCV.Core.Mat := Parent_B.Region (Window);
+      begin
+         Before_A := EF.Checksum (Parent_A);
+         Before_B := EF.Checksum (Parent_B);
+         Assert (not Region_A.Is_Continuous and then not Region_B.Is_Continuous,
+                 "seeded affine fixture Regions are contiguous");
+         Saved := Estimate_ECC_Affine (Region_A, Region_B, (others => <>), Initial);
+         Contiguous := Estimate_ECC_Affine (Region_A.Clone, Region_B.Clone, (others => <>), Initial);
+         Assert (Saved = Contiguous, "seeded Region differs from the contiguous clone");
+         Assert (EF.Checksum (Parent_A) = Before_A and then EF.Checksum (Parent_B) = Before_B,
+                 "seeded affine modified a Region parent");
+         --  One allocation in both roles with a nonidentity seed: source stays unchanged.
+         Sd_Run ((Parent_A, Parent_A), Initial, Unused, Raised);
+         Assert (EF.Checksum (Parent_A) = Before_A, "shared allocation modified");
+      end;
+      --  The window shifts the translation by (A - I) * 16; only the linear part is compared.
+      Assert (abs (LF (Saved.Warp.M00) - 1.01) < Aff_Linear_Tolerance
+              and then abs (LF (Saved.Warp.M01) - 0.012) < Aff_Linear_Tolerance
+              and then abs (LF (Saved.Warp.M10) + 0.008) < Aff_Linear_Tolerance
+              and then abs (LF (Saved.Warp.M11) - 0.99) < Aff_Linear_Tolerance
+              and then Saved.Correlation > 0.98, "seeded result after parent finalization");
+      Assert (Initial = Snapshot and then Initial.Correlation = 0.25, "initial record changed");
+
+      --  The initial record is untouched by success, nonconvergence and every rejection.
+      declare
+         Pair  : constant ECC_Pair := Sd_Pair (Sd_Shear_Truth);
+         Flat  : constant OpenCV.Core.Mat := EF.Constant_Image (128, 128, 128);
+         Seeds : constant ECC_Affine_Result := Mk (1.0, 0.10, 0.5, -0.04, 1.0, -0.7, 0.5);
+         Copy  : constant ECC_Affine_Result := Seeds;
+         Bad   : constant ECC_Affine_Result := Mk (9.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.5);
+         Bad_Copy : constant ECC_Affine_Result := Bad;
+      begin
+         Sd_Run (Pair, Seeds, Unused, Raised);
+         Assert (not Raised and then Seeds = Copy, "initial record changed by refinement");
+         Sd_Run ((Flat, Flat), Seeds, Unused, Raised);
+         Assert (Raised and then Seeds = Copy, "initial record changed by nonconvergence");
+         Sd_Run (Pair, Seeds, Unused, Raised, (Maximum_Iterations => 101, Epsilon => 0.0001));
+         Assert (Raised and then Seeds = Copy, "initial record changed by invalid options");
+         Sd_Run (Pair, Bad, Unused, Raised);
+         Assert (Raised and then Bad = Bad_Copy, "initial record changed by invalid seed");
+         Sd_Run ((Pair.Template, EF.Texture (128, 129)), Seeds, Unused, Raised);
+         Assert (Raised and then Seeds = Copy, "initial record changed by invalid images");
+      end;
+   end ECC_Affine_Seeded_Immutability_And_Regions;
+
+   procedure ECC_Affine_Seeded_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      pragma Validity_Checks (Off);
+      function F32 is new Ada.Unchecked_Conversion (Interfaces.Unsigned_32, OpenCV.Float32_Value);
+      NaN : constant OpenCV.Float32_Value := F32 (16#7FC0_0000#);
+      Inf : constant OpenCV.Float32_Value := F32 (16#7F80_0000#);
+      Lin : constant OpenCV.Float32_Value := 4.0;
+      Trn : constant OpenCV.Float32_Value := 1_048_576.0;
+      Pair : constant ECC_Pair := Sd_Pair (Sd_Small_Truth);
+      Base : constant ECC_Affine_Warp := Sd_Comb_Near.Warp;
+      Nonfinite : constant array (1 .. 3) of OpenCV.Float32_Value := [NaN, Inf, -Inf];
+
+      procedure Rejected (W : ECC_Affine_Warp; Message : String) is
+      begin
+         Assert (Sd_Outcome_Of (Pair, (Warp => W, Correlation => 0.0)) = Preflight_Rejected, Message);
+      end Rejected;
+
+      procedure Admitted (W : ECC_Affine_Warp; Message : String) is
+      begin
+         Assert (Sd_Outcome_Of (Pair, (Warp => W, Correlation => 0.0)) /= Preflight_Rejected, Message);
+      end Admitted;
+   begin
+      for Bad of Nonfinite loop
+         Rejected ((Base with delta M00 => Bad), "nonfinite M00");
+         Rejected ((Base with delta M01 => Bad), "nonfinite M01");
+         Rejected ((Base with delta M02 => Bad), "nonfinite M02");
+         Rejected ((Base with delta M10 => Bad), "nonfinite M10");
+         Rejected ((Base with delta M11 => Bad), "nonfinite M11");
+         Rejected ((Base with delta M12 => Bad), "nonfinite M12");
+      end loop;
+      Rejected ((Base with delta M00 => OpenCV.Float32_Value'Succ (Lin)), "M00 just beyond 4");
+      Rejected ((Base with delta M01 => -OpenCV.Float32_Value'Succ (Lin)), "M01 just beyond -4");
+      Rejected ((Base with delta M10 => 5.0), "M10 beyond 4");
+      Rejected ((Base with delta M11 => OpenCV.Float32_Value'Last), "M11 at Float32'Last");
+      Rejected ((Base with delta M02 => OpenCV.Float32_Value'Succ (Trn)), "M02 just beyond 2**20");
+      Rejected ((Base with delta M12 => -OpenCV.Float32_Value'Succ (Trn)), "M12 just beyond -2**20");
+      Rejected ((Base with delta M02 => 1.0E9), "M02 at 1e9");
+      Rejected ((Base with delta M12 => OpenCV.Float32_Value'First), "M12 at Float32'First");
+      --  Exact limits and singular / reflected / near-singular seeds pass preflight; their
+      --  native outcome is compared with the direct oracle, not asserted here.
+      Admitted ((M00 => Lin, M01 => Lin, M02 => Trn, M10 => -Lin, M11 => -Lin, M12 => -Trn),
+                "seed exactly at all limits");
+      Admitted ((M00 => -Lin, M01 => 0.0, M02 => 0.0, M10 => 0.0, M11 => Lin, M12 => 0.0),
+                "reflected seed at the linear limit");
+      Admitted ((M00 => 0.0, M01 => 0.0, M02 => 0.0, M10 => 0.0, M11 => 0.0, M12 => 0.0),
+                "all-zero seed passes preflight");
+      Admitted ((M00 => 1.0, M01 => 1.0, M02 => 0.0, M10 => 1.0, M11 => 1.0, M12 => 0.0),
+                "singular seed passes preflight");
+      Admitted ((M00 => 1.0, M01 => 1.0, M02 => 0.0, M10 => 1.0, M11 => 1.0000001, M12 => 0.0),
+                "near-singular seed passes preflight");
+   end ECC_Affine_Seeded_Validation;
+
+   procedure ECC_Affine_Seeded_Image_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Base  : constant ECC_Affine_Result := (Warp => Sd_Comb_Near.Warp, Correlation => 0.0);
+      Pair  : constant ECC_Pair := Sd_Pair (Sd_Small_Truth);
+      Good  : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+      Float_Image : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (128, 128, (Depth => OpenCV.Core.Float32, Channels => 1));
+      Color : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (128, 128, (Depth => OpenCV.Core.UInt8, Channels => 3));
+      Empty : OpenCV.Core.Mat;
+      Small : constant OpenCV.Core.Mat := EF.Texture (31, 128);
+      Unused : ECC_Affine_Result;
+   begin
+      Assert (Sd_Outcome_Of (Pair, Base, (Maximum_Iterations => 101, Epsilon => 0.0001))
+              = Preflight_Rejected, "101 iterations");
+      Assert (Sd_Outcome_Of (Pair, Base, (Maximum_Iterations => 50, Epsilon => 1.0))
+              = Preflight_Rejected, "epsilon 1.0");
+      Assert (Sd_Outcome_Of (Pair, Base, (Maximum_Iterations => 50, Epsilon => 0.0))
+              = Preflight_Rejected, "epsilon 0.0");
+      Assert (Sd_Outcome_Of ((Float_Image, Float_Image), Base) = Preflight_Rejected, "Float32 images");
+      Assert (Sd_Outcome_Of ((Color, Color), Base) = Preflight_Rejected, "three-channel images");
+      Assert (Sd_Outcome_Of ((Good, EF.Texture (128, 129)), Base) = Preflight_Rejected, "columns");
+      Assert (Sd_Outcome_Of ((EF.Texture (129, 128), Good), Base) = Preflight_Rejected, "rows");
+      Assert (Sd_Outcome_Of ((Small, Small), Base) = Preflight_Rejected, "31 rows");
+      begin
+         Unused := Estimate_ECC_Affine (Empty, Good, (others => <>), Base);
+         Assert (False, "empty template accepted");
+      exception
+         when OpenCV.OpenCV_Error => null;
+      end;
+      Assert (Sd_Outcome_Of (Pair, Base, (Maximum_Iterations => 1, Epsilon => 1.0E-8)) /= Preflight_Rejected
+              and then Sd_Outcome_Of (Pair, Base, (Maximum_Iterations => 100, Epsilon => 0.1))
+                       /= Preflight_Rejected, "option bounds are accepted");
+   end ECC_Affine_Seeded_Image_Validation;
+
+   procedure ECC_Affine_Seeded_Nonconvergence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Flat          : constant OpenCV.Core.Mat := EF.Constant_Image (128, 128, 128);
+      Texture_Image : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+      Seed          : constant ECC_Affine_Result := Mk (1.01, 0.01, 1.0, 0.0, 0.99, 1.0);
+   begin
+      Assert (Sd_Outcome_Of ((Flat, Flat), Seed) = Native_Failed, "constant images");
+      Assert (Sd_Outcome_Of ((Flat, Texture_Image), Seed) = Native_Failed, "constant template");
+      --  Measured: a NONIDENTITY seed on a constant moving image does not raise (identity
+      --  initialization does). The finite result is meaningless and has near-zero correlation.
+      declare
+         Flat_Result : ECC_Affine_Result;
+         Flat_Raised : Boolean;
+      begin
+         Sd_Run ((Texture_Image, Flat), Seed, Flat_Result, Flat_Raised);
+         Assert (Flat_Raised or else Flat_Result.Correlation < 0.1,
+                 "constant moving image produced a confident result");
+      end;
+      Assert (Sd_Outcome_Of ((EF.Noise (128, 128, 3), EF.Noise (128, 128, 9)), Seed) = Native_Failed,
+              "independent noise");
+      Assert (Sd_Outcome_Of (Sd_Pair (Sd_Shear_Truth), Sd_Wrong_Seed) = Native_Failed, "wrong seed");
+      --  A finite native result need not be correct: this poor seed ends far from the truth
+      --  (or raises); nothing is corrected or fabricated by the binding.
+      declare
+         Pair   : constant ECC_Pair := Sd_Pair (Sd_Scale_Truth);
+         R      : ECC_Affine_Result;
+         Raised : Boolean;
+         Asym   : constant ECC_Affine_Result := Mk (1.0, 0.3, 4.0, -0.25, 1.0, -2.0);
+      begin
+         Sd_Run (Pair, Asym, R, Raised);
+         Assert (Raised or else not Sd_Near (R, Sd_Scale_Truth), "wrong-but-finite outcome");
+      end;
+   end ECC_Affine_Seeded_Nonconvergence;
+
+   ---------------------------------------------------------------------
+   --  Task 015: independent seeded affine oracle (ecc-affine-seeded-oracle 1)
+   ---------------------------------------------------------------------
+   type Sd_Token_Array is array (1 .. 24) of Ada.Strings.Unbounded.Unbounded_String;
+
+   type Sd_Spec is record
+      Name  : String (1 .. 20);
+      Kind  : Character;
+      Truth : Sd_Truth;
+      Seed  : ECC_Affine_Warp;
+      Iterations : Positive;
+      Epsilon    : Long_Float;
+   end record;
+
+   function Sp
+     (Name : String; Kind : Character; Truth : Sd_Truth; Seed : ECC_Affine_Result;
+      Iterations : Positive := 50; Epsilon : Long_Float := 1.0E-4) return Sd_Spec is
+     (Name => Ada.Strings.Fixed.Head (Name, 20), Kind => Kind, Truth => Truth,
+      Seed => Seed.Warp, Iterations => Iterations, Epsilon => Epsilon);
+
+   function Z (A, B, C, D, E, F : OpenCV.Float32_Value) return ECC_Affine_Result is
+     (Mk (A, B, C, D, E, F));
+
+   Expected_Sd_Oracle_Fixtures : constant := 34;
+
+   Sd_Table : constant array (1 .. Expected_Sd_Oracle_Fixtures) of Sd_Spec :=
+     [Sp ("identity-id", 'T', Sd_Identity_Truth, Sd_Identity_Seed),
+      Sp ("translation-id", 'T', [1.0, 0.0, 2.0, 0.0, 1.0, 1.0], Sd_Identity_Seed),
+      Sp ("small-id", 'T', Sd_Small_Truth, Sd_Identity_Seed),
+      Sp ("shear-id", 'T', Sd_Shear_Truth, Sd_Identity_Seed),
+      Sp ("shear02-id", 'T', Sd_Shear2_Truth, Sd_Identity_Seed),
+      Sp ("reflect-id", 'T', Sd_Reflect_Truth, Sd_Identity_Seed),
+      Sp ("shear-exact", 'T', Sd_Shear_Truth, Z (1.0, 0.12, 1.0, -0.05, 1.0, -1.0)),
+      Sp ("shear-near", 'T', Sd_Shear_Truth, Sd_Shear_Near),
+      Sp ("scale-near", 'T', Sd_Scale_Truth, Sd_Scale_Near),
+      Sp ("combined-near", 'T', Sd_Comb_Truth, Sd_Comb_Near),
+      Sp ("reflect-near", 'T', Sd_Reflect_Truth, Sd_Reflect_Near),
+      Sp ("shear02-near", 'T', Sd_Shear2_Truth, Sd_Shear2_Near),
+      Sp ("strong-near", 'T', Sd_Strong_Truth, Sd_Strong_Near),
+      Sp ("translation-near", 'T', [1.0, 0.0, 2.0, 0.0, 1.0, 1.0], Z (1.0, 0.0, 1.5, 0.0, 1.0, 0.5)),
+      Sp ("small-near", 'T', Sd_Small_Truth, Z (1.0, 0.01, 1.5, -0.005, 1.0, 0.5)),
+      Sp ("shear-wrong", 'T', Sd_Shear_Truth, Sd_Wrong_Seed),
+      Sp ("scale-asym", 'T', Sd_Scale_Truth, Z (1.0, 0.3, 4.0, -0.25, 1.0, -2.0)),
+      Sp ("combined-asym", 'T', Sd_Comb_Truth, Z (1.0, 0.3, 4.0, -0.25, 1.0, -2.0)),
+      Sp ("shear02-asym", 'T', Sd_Shear2_Truth, Z (1.0, 0.3, 4.0, -0.25, 1.0, -2.0)),
+      Sp ("limit-linear", 'T', Sd_Small_Truth, Z (4.0, 4.0, 0.0, 4.0, 4.0, 0.0)),
+      Sp ("limit-translation", 'T', Sd_Small_Truth, Z (1.0, 0.0, 1_048_576.0, 0.0, 1.0, -1_048_576.0)),
+      Sp ("all-limits", 'T', Sd_Small_Truth, Z (4.0, -4.0, 1_048_576.0, -4.0, 4.0, -1_048_576.0)),
+      Sp ("singular-zero", 'T', Sd_Small_Truth, Z (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+      Sp ("singular-rank1", 'T', Sd_Small_Truth, Z (1.0, 1.0, 0.0, 1.0, 1.0, 0.0)),
+      Sp ("near-singular", 'T', Sd_Small_Truth, Z (1.0, 1.0, 0.0, 1.0, 1.0000001, 0.0)),
+      Sp ("reflect-seed", 'T', Sd_Small_Truth, Z (-1.0, 0.0, 0.0, 0.0, 1.0, 0.0)),
+      Sp ("aniso-seed", 'T', Sd_Small_Truth, Z (4.0, 0.0, 0.0, 0.0, 0.01, 0.0)),
+      Sp ("translation-1e5", 'T', Sd_Small_Truth, Z (1.0, 0.0, 100_000.0, 0.0, 1.0, 100_000.0)),
+      Sp ("combined-near-it1", 'T', Sd_Comb_Truth, Sd_Comb_Near, 1),
+      Sp ("combined-near-it3", 'T', Sd_Comb_Truth, Sd_Comb_Near, 3),
+      Sp ("combined-near-e0.1", 'T', Sd_Comb_Truth, Sd_Comb_Near, 50, 0.1),
+      Sp ("constant-seeded", 'C', Sd_Identity_Truth, Z (1.01, 0.01, 1.0, 0.0, 0.99, 1.0)),
+      Sp ("noise-seeded", 'N', Sd_Identity_Truth, Z (1.01, 0.01, 1.0, 0.0, 0.99, 1.0)),
+      Sp ("region-near", 'R', Sd_Small_Truth, Z (1.0, 0.01, 1.5, 0.0, 1.0, 0.5))];
+
+   function Sd_Name (I : Positive) return String is
+     (Ada.Strings.Fixed.Trim (Sd_Table (I).Name, Ada.Strings.Both));
+
+   function Sd_Build (Spec : Sd_Spec) return ECC_Pair is
+      Window : constant OpenCV.Rect := (16, 16, 128, 128);
+      T      : Sd_Truth renames Spec.Truth;
+   begin
+      case Spec.Kind is
+         when 'C' => return (EF.Constant_Image (128, 128, 128), EF.Constant_Image (128, 128, 128));
+         when 'N' => return (EF.Noise (128, 128, 3), EF.Noise (128, 128, 9));
+         when 'R' =>
+            return (EF.Texture (160, 160).Region (Window),
+                    EF.Affine_Texture (160, 160, T (0), T (1), T (3), T (4), T (2), T (5)).Region (Window));
+         when others => return Sd_Pair (T);
+      end case;
+   end Sd_Build;
+
+   procedure Sd_Split (Line : String; Tokens : out Sd_Token_Array; Count : out Natural) is
+      First : Natural := Line'First;
+   begin
+      Count := 0;
+      Tokens := [others => Ada.Strings.Unbounded.Null_Unbounded_String];
+      while First <= Line'Last loop
+         if Line (First) = ' ' then
+            First := First + 1;
+         else
+            declare
+               Last : Natural := First;
+            begin
+               while Last < Line'Last and then Line (Last + 1) /= ' ' loop
+                  Last := Last + 1;
+               end loop;
+               if Count = Tokens'Last then
+                  Count := Tokens'Last + 1;
+                  return;
+               end if;
+               Count := Count + 1;
+               Tokens (Count) := Ada.Strings.Unbounded.To_Unbounded_String (Line (First .. Last));
+               First := Last + 1;
+            end;
+         end if;
+      end loop;
+   end Sd_Split;
+
+   function Sd_Tok (Tokens : Sd_Token_Array; Index : Positive) return String is
+     (Ada.Strings.Unbounded.To_String (Tokens (Index)));
+
+   function Sd_Oracle_Path return String is
+     (Ada.Environment_Variables.Value
+        ("VIDEO_ECC_AFFINE_SEEDED_ORACLE", "../obj/oracle/ecc-affine-seeded.txt"));
+
+   --  Strict verifier (never raises): "" when the oracle is complete, current and agrees with
+   --  the binding, otherwise the first defect. Fixture record tokens: 1 fixture, 2 name,
+   --  3 iterations, 4 epsilon, 5..10 seed, 11 OK|EXC, 12..17 result, 18 correlation,
+   --  19 template checksum, 20 moving checksum.
+   function Sd_Compare
+     (Tok : Sd_Token_Array; Spec : Sd_Spec; Name : String;
+      Succeeded, Raised, Nonidentity, Distinguishing : in out Natural) return String
+   is
+      Outcome : constant String := Sd_Tok (Tok, 11);
+      Pair    : constant ECC_Pair := Sd_Build (Spec);
+      Options : constant ECC_Affine_Options :=
+        (Maximum_Iterations => Spec.Iterations, Epsilon => OpenCV.Float64_Value (Spec.Epsilon));
+      Initial : constant ECC_Affine_Result :=
+        (Warp => Spec.Seed, Correlation => 0.0);
+      S : array (0 .. 5) of Long_Float;
+      W : array (0 .. 5) of Long_Float;
+      Seed : constant array (0 .. 5) of Long_Float :=
+        [LF (Spec.Seed.M00), LF (Spec.Seed.M01), LF (Spec.Seed.M02),
+         LF (Spec.Seed.M10), LF (Spec.Seed.M11), LF (Spec.Seed.M12)];
+      Label : constant array (0 .. 5) of String (1 .. 3) :=
+        ["M00", "M01", "M02", "M10", "M11", "M12"];
+      R, Plain : ECC_Affine_Result;
+      Binding_Raised, Plain_Raised : Boolean;
+   begin
+      if Integer'Value (Sd_Tok (Tok, 3)) /= Spec.Iterations
+        or else abs (Long_Float'Value (Sd_Tok (Tok, 4)) - Spec.Epsilon) > 1.0E-15
+      then
+         return "fixture options differ: " & Name;
+      end if;
+      if Outcome /= "OK" and then Outcome /= "EXC" then return "outcome token: " & Name; end if;
+      for K in S'Range loop
+         S (K) := Long_Float'Value (Sd_Tok (Tok, 5 + K));
+         W (K) := Long_Float'Value (Sd_Tok (Tok, 12 + K));
+         if abs (S (K) - Seed (K)) > 1.0E-9 then return "seed " & Label (K) & " differs: " & Name; end if;
+      end loop;
+      if Long_Long_Integer'Value (Sd_Tok (Tok, 19)) /= EF.Checksum (Pair.Template)
+        or else Long_Long_Integer'Value (Sd_Tok (Tok, 20)) /= EF.Checksum (Pair.Moving)
+      then
+         return "fixture checksum differs: " & Name;
+      end if;
+      if Spec.Seed /= Sd_Identity_Seed.Warp then Nonidentity := Nonidentity + 1; end if;
+      Sd_Run (Pair, Initial, R, Binding_Raised, Options);
+      if Outcome = "OK" then
+         if Binding_Raised then return "binding raised where native succeeded: " & Name; end if;
+         Succeeded := Succeeded + 1;
+         for K in W'Range loop
+            declare
+               Got : constant Long_Float :=
+                 LF (case K is when 0 => R.Warp.M00, when 1 => R.Warp.M01, when 2 => R.Warp.M02,
+                               when 3 => R.Warp.M10, when 4 => R.Warp.M11, when others => R.Warp.M12);
+               Tolerance : constant Long_Float := (if K = 2 or else K = 5 then 1.0E-5 else 1.0E-6);
+            begin
+               if abs (Got - W (K)) > Tolerance then return Label (K) & " differs: " & Name; end if;
+            end;
+         end loop;
+         if abs (Long_Float (R.Correlation) - Long_Float'Value (Sd_Tok (Tok, 18))) > 1.0E-6 then
+            return "correlation differs: " & Name;
+         end if;
+         if Spec.Kind = 'T' and then Spec.Seed /= Sd_Identity_Seed.Warp
+           and then Sd_Near (R, Spec.Truth)
+         then
+            Sd_Run_Plain (Pair, Plain, Plain_Raised);
+            if Plain_Raised then Distinguishing := Distinguishing + 1; end if;
+         end if;
+      else
+         if not Binding_Raised then return "binding succeeded where native raised: " & Name; end if;
+         Raised := Raised + 1;
+      end if;
+      return "";
+   end Sd_Compare;
+
+   function Verify_Sd_Oracle
+     (Path : String; Succeeded, Raised, Nonidentity, Distinguishing : out Natural) return String
+   is
+      Lines : Aff_Line_Array;
+      N     : Natural;
+      Tok   : Sd_Token_Array;
+      TC    : Natural;
+      Native : constant String := Interfaces.C.Strings.Value (Aff_Native_Version);
+      function Line (I : Positive) return String is (Ada.Strings.Unbounded.To_String (Lines (I)));
+   begin
+      Succeeded := 0; Raised := 0; Nonidentity := 0; Distinguishing := 0;
+      begin
+         Aff_Read_Lines (Path, Lines, N);
+      exception
+         when others => return "oracle missing or unreadable";
+      end;
+      if N = 0 then return "oracle is empty"; end if;
+      if Line (1) /= "ecc-affine-seeded-oracle 1" then return "oracle magic or format version"; end if;
+      if N < 2 or else Line (2) /= "version " & Native then return "oracle OpenCV version differs"; end if;
+      if N < 3 or else Ada.Strings.Fixed.Head (Line (N), 4) /= "end " then
+         return "oracle truncated (no end record)";
+      end if;
+      if Line (N) /= "end" & Integer'Image (Expected_Sd_Oracle_Fixtures) then
+         return "oracle record count";
+      end if;
+      if N - 3 /= Expected_Sd_Oracle_Fixtures then return "oracle fixture record count"; end if;
+      for I in 1 .. Expected_Sd_Oracle_Fixtures loop
+         Sd_Split (Line (I + 2), Tok, TC);
+         if TC /= 20 or else Sd_Tok (Tok, 1) /= "fixture" then return "malformed fixture record"; end if;
+         if Sd_Tok (Tok, 2) /= Sd_Name (I) then return "fixture identity or order: " & Sd_Name (I); end if;
+         declare
+            Defect : constant String :=
+              Sd_Compare (Tok, Sd_Table (I), Sd_Name (I), Succeeded, Raised, Nonidentity, Distinguishing);
+         begin
+            if Defect /= "" then return Defect; end if;
+         end;
+      end loop;
+      return "";
+   exception
+      when others => return "oracle parse error";
+   end Verify_Sd_Oracle;
+
+   procedure ECC_Affine_Seeded_Direct_Oracle (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Succeeded, Raised, Nonidentity, Distinguishing : Natural;
+      Defect : constant String :=
+        Verify_Sd_Oracle (Sd_Oracle_Path, Succeeded, Raised, Nonidentity, Distinguishing);
+   begin
+      Assert (Defect = "", "seeded affine oracle: " & Defect);
+      Assert (Succeeded > 0 and then Raised > 0, "seeded oracle did not cover both outcomes");
+      Assert (Succeeded + Raised = Expected_Sd_Oracle_Fixtures, "seeded oracle outcome accounting");
+      Assert (Nonidentity >= 25, "seeded oracle needs genuinely nonidentity seeds");
+      Assert (Distinguishing >= 5, "seeded oracle has too few identity-fails / seeded-succeeds fixtures");
+   end ECC_Affine_Seeded_Direct_Oracle;
+
+   function Sd_With_Token
+     (Lines : Aff_Line_Array; Line_Index, Token_Index : Positive; Value : String) return Aff_Line_Array
+   is
+      Result : Aff_Line_Array := Lines;
+      Tok    : Sd_Token_Array;
+      TC     : Natural;
+      Text   : Ada.Strings.Unbounded.Unbounded_String;
+   begin
+      Sd_Split (Ada.Strings.Unbounded.To_String (Lines (Line_Index)), Tok, TC);
+      Tok (Token_Index) := Ada.Strings.Unbounded.To_Unbounded_String (Value);
+      for K in 1 .. TC loop
+         if K > 1 then Ada.Strings.Unbounded.Append (Text, " "); end if;
+         Ada.Strings.Unbounded.Append (Text, Tok (K));
+      end loop;
+      Result (Line_Index) := Text;
+      return Result;
+   end Sd_With_Token;
+
+   function Sd_Swap_Tokens
+     (Lines : Aff_Line_Array; Line_Index, A, B : Positive) return Aff_Line_Array
+   is
+      Tok : Sd_Token_Array;
+      TC  : Natural;
+   begin
+      Sd_Split (Ada.Strings.Unbounded.To_String (Lines (Line_Index)), Tok, TC);
+      return Sd_With_Token
+        (Sd_With_Token (Lines, Line_Index, A, Sd_Tok (Tok, B)), Line_Index, B, Sd_Tok (Tok, A));
+   end Sd_Swap_Tokens;
+
+   function Sd_Line_Of (Name : String) return Positive is
+   begin
+      for I in 1 .. Expected_Sd_Oracle_Fixtures loop
+         if Sd_Name (I) = Name then return I + 2; end if;
+      end loop;
+      raise Constraint_Error with "no such seeded oracle fixture " & Name;
+   end Sd_Line_Of;
+
+   procedure ECC_Affine_Seeded_Oracle_Integrity (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Original : constant String := Sd_Oracle_Path;
+      Scratch  : constant String := Original & ".tampered";
+      Lines    : Aff_Line_Array;
+      Count    : Natural;
+      A, B, C, D : Natural;
+
+      procedure Expect_Rejected (Label, Fragment : String; Edited : Aff_Line_Array; Edited_Count : Natural) is
+      begin
+         Aff_Write_Lines (Scratch, Edited, Edited_Count);
+         declare
+            Defect : constant String := Verify_Sd_Oracle (Scratch, A, B, C, D);
+         begin
+            Assert (Defect /= "", "tampered seeded oracle accepted: " & Label);
+            Assert (Ada.Strings.Fixed.Index (Defect, Fragment) > 0,
+                    "tampered seeded oracle (" & Label & ") rejected for the wrong reason: " & Defect);
+         end;
+      end Expect_Rejected;
+
+      function Value_Of (Line_Index, Token_Index : Positive) return Long_Float is
+         Tok : Sd_Token_Array;
+         TC  : Natural;
+      begin
+         Sd_Split (Ada.Strings.Unbounded.To_String (Lines (Line_Index)), Tok, TC);
+         return Long_Float'Value (Sd_Tok (Tok, Token_Index));
+      end Value_Of;
+   begin
+      Aff_Read_Lines (Original, Lines, Count);
+      Assert (Count = Expected_Sd_Oracle_Fixtures + 3, "seeded oracle line count");
+      Assert (Verify_Sd_Oracle (Original, A, B, C, D) = "", "pristine seeded oracle rejected");
+      declare
+         Comb : constant Positive := Sd_Line_Of ("combined-near");
+      begin
+         Assert (Verify_Sd_Oracle (Original & ".does-not-exist", A, B, C, D) = "oracle missing or unreadable",
+                 "missing seeded oracle accepted");
+         Expect_Rejected ("empty", "empty", Lines, 0);
+         Expect_Rejected ("truncated", "truncated", Lines, Count - 1);
+         Expect_Rejected ("truncated mid-record", "truncated", Lines, Count - 5);
+         Expect_Rejected ("wrong format version", "format version", Sd_With_Token (Lines, 1, 2, "2"), Count);
+         Expect_Rejected ("wrong OpenCV version", "OpenCV version", Sd_With_Token (Lines, 2, 2, "0.0.0"), Count);
+         Expect_Rejected ("wrong declared count", "record count", Sd_With_Token (Lines, Count, 2, "33"), Count);
+         Expect_Rejected ("renamed fixture", "fixture identity", Sd_With_Token (Lines, Comb, 2, "combined-nearX"), Count);
+         Expect_Rejected ("altered template checksum", "checksum", Sd_With_Token (Lines, Comb, 19, "1"), Count);
+         Expect_Rejected ("altered moving checksum", "checksum",
+                          Sd_With_Token (Lines, Sd_Line_Of ("shear-near"), 20, "1"), Count);
+         Expect_Rejected ("altered seed M00", "seed M00", Sd_With_Token (Lines, Comb, 5, "1.0"), Count);
+         Expect_Rejected ("altered seed M01", "seed M01", Sd_With_Token (Lines, Comb, 6, "0.5"), Count);
+         Expect_Rejected ("altered seed M10", "seed M10", Sd_With_Token (Lines, Comb, 8, "0.5"), Count);
+         Expect_Rejected ("swapped seed M01 and M10", "seed M01", Sd_Swap_Tokens (Lines, Comb, 6, 8), Count);
+         Expect_Rejected ("altered seed M02", "seed M02", Sd_With_Token (Lines, Comb, 7, "9.0"), Count);
+         Expect_Rejected ("altered seed M12", "seed M12", Sd_With_Token (Lines, Comb, 10, "9.0"), Count);
+         Expect_Rejected ("swapped seed translations", "seed M02", Sd_Swap_Tokens (Lines, Comb, 7, 10), Count);
+         Assert (abs (Value_Of (Comb, 13) - Value_Of (Comb, 15)) > 0.01, "swap fixture M01/M10 must differ");
+         Expect_Rejected ("swapped output M01 and M10", "differs", Sd_Swap_Tokens (Lines, Comb, 13, 15), Count);
+         Expect_Rejected ("swapped output M02 and M12", "differs", Sd_Swap_Tokens (Lines, Comb, 14, 17), Count);
+         Expect_Rejected ("altered output M00", "M00 differs", Sd_With_Token (Lines, Comb, 12, "1.5"), Count);
+         Expect_Rejected ("altered correlation", "correlation differs", Sd_With_Token (Lines, Comb, 18, "0.5"), Count);
+         Expect_Rejected ("success recorded as exception", "binding succeeded where native raised",
+                          Sd_With_Token (Lines, Sd_Line_Of ("identity-id"), 11, "EXC"), Count);
+         Expect_Rejected ("exception recorded as success", "binding raised where native succeeded",
+                          Sd_With_Token (Lines, Sd_Line_Of ("shear-id"), 11, "OK"), Count);
+         Expect_Rejected ("unknown outcome token", "outcome token",
+                          Sd_With_Token (Lines, Sd_Line_Of ("identity-id"), 11, "MAYBE"), Count);
+      end;
+      Ada.Directories.Delete_File (Scratch);
+   end ECC_Affine_Seeded_Oracle_Integrity;
+
    function Suite return AUnit.Test_Suites.Access_Test_Suite is
       Result : constant AUnit.Test_Suites.Access_Test_Suite := AUnit.Test_Suites.New_Suite;
    begin
@@ -6268,6 +7115,16 @@ package body Video_Tests is
       Result.Add_Test (Caller.Create ("ECC_Affine_Degenerate_And_Limits", ECC_Affine_Degenerate_And_Limits'Access));
       Result.Add_Test (Caller.Create ("ECC_Affine_Direct_Oracle", ECC_Affine_Direct_Oracle'Access));
       Result.Add_Test (Caller.Create ("ECC_Affine_Oracle_Integrity", ECC_Affine_Oracle_Integrity'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Seeded_Identity_Equivalence", ECC_Affine_Seeded_Identity_Equivalence'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Seeded_Consumption", ECC_Affine_Seeded_Consumption'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Seeded_Refinement_And_Direction", ECC_Affine_Seeded_Refinement_And_Direction'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Seeded_Correlation_Ignored", ECC_Affine_Seeded_Correlation_Ignored'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Seeded_Immutability_And_Regions", ECC_Affine_Seeded_Immutability_And_Regions'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Seeded_Validation", ECC_Affine_Seeded_Validation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Seeded_Image_Validation", ECC_Affine_Seeded_Image_Validation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Seeded_Nonconvergence", ECC_Affine_Seeded_Nonconvergence'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Seeded_Direct_Oracle", ECC_Affine_Seeded_Direct_Oracle'Access));
+      Result.Add_Test (Caller.Create ("ECC_Affine_Seeded_Oracle_Integrity", ECC_Affine_Seeded_Oracle_Integrity'Access));
       return Result;
    end Suite;
 end Video_Tests;

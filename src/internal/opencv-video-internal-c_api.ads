@@ -193,4 +193,17 @@ package OpenCV.Video.Internal.C_API is
       Epsilon                      : Interfaces.C.double;
       Result                       : access ECC_Affine_Result) return Status
      with Import, Convention => C, External_Name => "opencv_video_estimate_ecc_affine";
+   function Estimate_ECC_Affine_Seeded
+     (Template_Image, Moving_Image : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Maximum_Iterations           : Interfaces.Integer_32;
+      Epsilon                      : Interfaces.C.double;
+      Initial_M00                  : Interfaces.C.C_float;
+      Initial_M01                  : Interfaces.C.C_float;
+      Initial_M02                  : Interfaces.C.C_float;
+      Initial_M10                  : Interfaces.C.C_float;
+      Initial_M11                  : Interfaces.C.C_float;
+      Initial_M12                  : Interfaces.C.C_float;
+      Result                       : access ECC_Affine_Result) return Status
+     with Import, Convention => C,
+          External_Name => "opencv_video_estimate_ecc_affine_seeded";
 end OpenCV.Video.Internal.C_API;

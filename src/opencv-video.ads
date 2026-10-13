@@ -404,6 +404,29 @@ package OpenCV.Video is
       Moving_Image   : OpenCV.Core.Mat;
       Options        : ECC_Affine_Options := (others => <>))
       return ECC_Affine_Result;
+
+   --  Caller-seeded ECC affine alignment (Task 015). The private native 2x3 warp starts
+   --  from Initial_Transform.Warp instead of the identity and is refined by the same
+   --  findTransformECC call (MOTION_AFFINE, COUNT|EPS, no mask, Gaussian size 5).
+   --  The six coefficients are placed in native matrix STORAGE order (M00 M01 M02 M10
+   --  M11 M12), not the native update-vector order (M00 M10 M01 M11 M02 M12), using the
+   --  template-to-moving convention above. Nothing is transposed, negated, inverted,
+   --  decomposed or composed. Initial_Transform.Correlation is IGNORED (never read,
+   --  validated, propagated or used as a threshold), so a previous ECC_Affine_Result may
+   --  be passed directly. The seed is a prediction for THIS image pair; a previous pair's
+   --  result is not automatically the right transform.
+   --  Seed domain (binding policy, not an OpenCV guarantee): M00, M01, M10, M11 finite
+   --  with absolute value <= 4.0; M02, M12 finite with absolute value <= 2**20. Violations
+   --  raise OpenCV_Error and are never clamped. No determinant, orientation or
+   --  conditioning restriction is applied. An accepted seed does not guarantee
+   --  convergence; ECC may still raise on nonconvergence or end at a wrong finite
+   --  optimum. Initial_Transform is not modified.
+   function Estimate_ECC_Affine
+     (Template_Image    : OpenCV.Core.Mat;
+      Moving_Image      : OpenCV.Core.Mat;
+      Options           : ECC_Affine_Options := (others => <>);
+      Initial_Transform : ECC_Affine_Result)
+      return ECC_Affine_Result;
 private
    type PyrLK_Pyramid is new Ada.Finalization.Limited_Controlled with record
       Handle : System.Address := System.Null_Address;

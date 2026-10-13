@@ -864,10 +864,18 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_euclidean_seeded(
                                initial_rotation_radians, result);
 }
 
-extern "C" opencv_video_status opencv_video_estimate_ecc_affine(
-    const opencv_core_mat_handle *template_image,
-    const opencv_core_mat_handle *moving_image,
-    int32_t maximum_iterations, double epsilon,
+namespace {
+// Binding-policy affine seed domain (docs/ecc-affine-seeded-source-contract.md); not an
+// OpenCV guarantee. Both bounds are exactly representable in float.
+constexpr double kEccAffineSeedMaximumLinear = 4.0;
+constexpr double kEccAffineSeedMaximumTranslation = 1048576.0;
+
+// Shared affine ECC entry. `seed` is nullptr for the identity-initialized path, otherwise
+// six row-major coefficients m00 m01 m02 m10 m11 m12. Only the private initial matrix
+// differs; all validation, native call, output checks and publication are shared.
+opencv_video_status ecc_affine_entry(
+    const opencv_core_mat_handle *template_image, const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations, double epsilon, const float *seed,
     opencv_video_ecc_affine_result *result) {
     try {
         clear_error();
@@ -878,9 +886,30 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_affine(
         auto status = validate_ecc_inputs(template_image, moving_image, maximum_iterations,
                                           epsilon, &tmpl, &moving);
         if (status != OPENCV_VIDEO_OK) return status;
+        if (seed != nullptr) {
+            for (int i = 0; i < 6; ++i) {
+                if (!std::isfinite(seed[i]))
+                    return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                                "ECC affine seed coefficient is nonfinite");
+                const bool translation = (i == 2 || i == 5);
+                const double limit =
+                    translation ? kEccAffineSeedMaximumTranslation : kEccAffineSeedMaximumLinear;
+                if (std::fabs(double(seed[i])) > limit)
+                    return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                                "ECC affine seed coefficient outside accepted magnitude");
+            }
+        }
 
-        // Private identity warp: native code may mutate it; the caller's result is untouched.
+        // Private warp: native code may mutate it; the caller's result is untouched.
         cv::Mat warp = cv::Mat::eye(2, 3, CV_32F);
+        if (seed != nullptr) {
+            // Native matrix STORAGE order (row-major), not the update-vector order.
+            float *init = warp.ptr<float>();
+            for (int i = 0; i < 6; ++i) init[i] = seed[i];
+        }
+        if (warp.dims != 2 || warp.rows != 2 || warp.cols != 3 || warp.type() != CV_32FC1 ||
+            !warp.isContinuous())
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC private warp has an unexpected schema");
         const auto *storage = warp.data;
 
 #ifdef OPENCV_VIDEO_TEST_FAULTS
@@ -925,4 +954,27 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_affine(
     } catch (...) {
         return fail(OPENCV_VIDEO_ERROR_UNKNOWN, "Unknown ECC exception");
     }
+}
+}  // namespace
+
+extern "C" opencv_video_status opencv_video_estimate_ecc_affine(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations, double epsilon,
+    opencv_video_ecc_affine_result *result) {
+    return ecc_affine_entry(template_image, moving_image, maximum_iterations, epsilon,
+                            nullptr, result);
+}
+
+extern "C" opencv_video_status opencv_video_estimate_ecc_affine_seeded(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations, double epsilon,
+    float initial_m00, float initial_m01, float initial_m02,
+    float initial_m10, float initial_m11, float initial_m12,
+    opencv_video_ecc_affine_result *result) {
+    const float seed[6] = {initial_m00, initial_m01, initial_m02,
+                           initial_m10, initial_m11, initial_m12};
+    return ecc_affine_entry(template_image, moving_image, maximum_iterations, epsilon,
+                            seed, result);
 }
