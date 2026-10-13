@@ -38,7 +38,7 @@ def main() -> None:
     cpp = (ROOT / "cpp/opencv_video_shim.cpp").read_text()
     declared = set(re.findall(r"\b(opencv_video_\w+)\s*\(", header))
     imported = set(re.findall(r'External_Name\s*=>\s*"(opencv_video_\w+)"', ada))
-    check(len(declared) == 21, "production ABI inventory must be twenty-one")
+    check(len(declared) == 22, "production ABI inventory must be twenty-two")
     check(declared == imported, f"C/Ada import mismatch: {declared ^ imported}")
     check(all(re.search(r"\b" + re.escape(name) + r"\s*\(", cpp) for name in declared),
           "missing C++ export")

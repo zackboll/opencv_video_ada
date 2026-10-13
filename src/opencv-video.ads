@@ -427,6 +427,57 @@ package OpenCV.Video is
       Options           : ECC_Affine_Options := (others => <>);
       Initial_Transform : ECC_Affine_Result)
       return ECC_Affine_Result;
+
+   --  ECC eight-parameter homography alignment (Task 016): cv::findTransformECC with
+   --  MOTION_HOMOGRAPHY, a privately initialized identity 3x3 warp, COUNT|EPS, no mask,
+   --  Gaussian size 5. The image and option contract is exactly that of
+   --  Estimate_ECC_Translation (the options subtype reuses its validation).
+   subtype ECC_Homography_Options is ECC_Translation_Options;
+
+   --  The native 3x3 row-major warp maps TEMPLATE coordinates to MOVING coordinates
+   --  (X right, Y down) with homogeneous division:
+   --     D        = H20 * x + H21 * y + H22
+   --     moving_x = (H00 * x + H01 * y + H02) / D
+   --     moving_y = (H10 * x + H11 * y + H12) / D
+   --  The nine native coefficients are returned in matrix storage order (not the native
+   --  update-vector order). The native update never writes H22, so it is exactly 1.0 for
+   --  this identity-initialized call; any other value is reported as OpenCV_Error. To
+   --  resample the moving image into the template frame apply this same matrix with
+   --  WARP_INVERSE_MAP; never transpose, negate, invert or normalize it for that reason.
+   --  The mapping is undefined where D = 0 and extreme near it; the binding does not
+   --  resample and does not detect such points. No determinant, scale, perspective or
+   --  conditioning limit is applied to a finite native result.
+   type ECC_Homography_Warp is record
+      H00 : OpenCV.Float32_Value := 1.0;
+      H01 : OpenCV.Float32_Value := 0.0;
+      H02 : OpenCV.Float32_Value := 0.0;
+      H10 : OpenCV.Float32_Value := 0.0;
+      H11 : OpenCV.Float32_Value := 1.0;
+      H12 : OpenCV.Float32_Value := 0.0;
+      H20 : OpenCV.Float32_Value := 0.0;
+      H21 : OpenCV.Float32_Value := 0.0;
+      H22 : OpenCV.Float32_Value := 1.0;
+   end record;
+
+   --  Correlation is the native value, computed before the final update; it is neither
+   --  clamped nor a confidence. The result is a plain Ada value owning no native
+   --  resource, and an image-alignment matrix only (not a camera pose, 3D motion,
+   --  geolocation or verified navigation estimate).
+   type ECC_Homography_Result is record
+      Warp        : ECC_Homography_Warp := (others => <>);
+      Correlation : OpenCV.Float64_Value := 0.0;
+   end record;
+
+   --  Native nonconvergence raises OpenCV_Error; no identity result is fabricated. A
+   --  returned finite matrix does not mean the images are reliably registered. Identity
+   --  initialization has a small convergence basin (docs/ecc-homography-source-contract.md).
+   --  Peak memory is about 1.9 GiB at the 2**24-pixel limit; validation does not
+   --  guarantee sufficient system memory.
+   function Estimate_ECC_Homography
+     (Template_Image : OpenCV.Core.Mat;
+      Moving_Image   : OpenCV.Core.Mat;
+      Options        : ECC_Homography_Options := (others => <>))
+      return ECC_Homography_Result;
 private
    type PyrLK_Pyramid is new Ada.Finalization.Limited_Controlled with record
       Handle : System.Address := System.Null_Address;
