@@ -63,3 +63,73 @@ Poor seeds are not rescued: `[0.8 -.2 6; .2 1.25 -5]` raises on all versions; th
 `[1 .3 4; -.25 1 -2]` ends at a finite wrong matrix on the scale pair (rho about 0.41-0.43) and
 raises on the others. The identity seed equals the identity-initialized operation byte for byte,
 including failures.
+
+
+## Oracle
+
+`tests/cpp/ecc_affine_seeded_oracle.cpp` links OpenCV only and writes 34 fixtures (seed, status, six
+outputs, correlation, checksums); the Ada verifier rebuilds each image and seed independently. The
+integrity test rejects, for the expected reason: missing, empty, truncated (two forms), wrong
+format/native version, wrong count, renamed fixture, altered checksums, altered seed M00/M01/M10/
+M02/M12, swapped seed M01-M10 and M02-M12, swapped output M01-M10 and M02-M12, altered output M00
+and correlation, and success/exception/unknown outcome misclassification.
+
+## Memory (direct native, VmHWM, 4.10.0, shift pair)
+
+1024x1024: identity 99 MB, seeded 100 MB. 2048x2048: identity 334 MB, seeded 333 MB. The starts are
+equivalent within noise. Task 014's 1.2-1.3 GB at 2^24 pixels was not re-measured, and no large
+workload was added to CI.
+
+## Native campaigns (head `aa3636a`, serial builds)
+
+| OpenCV | Environment | Dev/Valid/Release | AUnit reg/run/ok/fail/err | ASan+UBSan+leaks | Example |
+|---|---|---|---|---|---|
+| 4.1.0 | pinned local install | exit 0 each | 163/163/163/0/0 | exit 0 | exit 0 |
+| 4.6.0 | Debian 12 container, copy of `aa3636a` | exit 0 each | 163/163/163/0/0 | exit 0 | exit 0 |
+| 4.10.0 | local system | exit 0 each | 163/163/163/0/0 | exit 0 | exit 0 |
+| 5.0.0 | pinned local install | exit 0 each | 163/163/163/0/0 | exit 0 | exit 0 |
+
+`Native_Version` matched in each configured install, and the oracle PASS lines for the loaded
+version were present. The sanitizer script instruments the shim, boundary, fault binary and every
+oracle; the prebuilt OpenCV libraries are not instrumented. An earlier 4.1.0 run failed one
+assertion: the correlation bound `<= 1.0` was exceeded by Float32 rounding (1.000000085 for an exact
+reflection). The bound became `<= 1.000001` with a comment; a test defect, not a binding defect.
+Production archive: exactly 21 `T opencv_video_*` symbols and no test hook. Only the 4.6.0 run used
+a separate copy of the committed head; the other three rebuilt in the worktree after removing the
+ignored `obj` and `config` directories. A full independent clean-clone run on all versions was not
+done.
+
+## Mutation results (scratch clones of `aa3636a`; nothing committed)
+
+A mutant counts as KILLED only when it compiled and a named test failed (AUnit and/or the native
+boundary, including the fault build). First-pass harness defects: mutants 3-8 did not compile
+(`-Werror=misleading-indentation`), mutant 18 hit an unused-variable error, and mutants 12-14 had
+patched the earlier Euclidean code instead of the affine path. The harness was corrected and those
+were rerun; only the rerun results count.
+
+| # | Mutation | Result | Failing evidence |
+|---|---|---|---|
+| 1 | ignore initial transform | killed | five seeded AUnit tests; boundary "moderate shear" |
+| 2 | seed replaced by identity | killed | seeded AUnit tests; boundary |
+| 3 | swap M01/M10 | killed | seeded AUnit + oracle; boundary "moderate shear" |
+| 4 | swap M02/M12 | killed | seeded AUnit + oracle; boundary "seeded export differs" |
+| 5 | swap M00/M11 | killed | seeded AUnit; boundary "nonuniform scale" |
+| 6 | negate shear | killed | seeded AUnit; boundary "moderate shear" |
+| 7 | negate translation | killed | seeded AUnit; boundary |
+| 8 | ignore initial scale | killed | seeded AUnit; boundary "nonuniform scale" |
+| 9 | MOTION_EUCLIDEAN | killed | affine and seeded AUnit; boundary |
+| 10 | return seed, no optimization | killed | AUnit; boundary |
+| 11 | return initial correlation | killed | `ECC_Affine_Seeded_Correlation_Ignored` and others |
+| 12 | validate ignored correlation | killed | `ECC_Affine_Seeded_Correlation_Ignored` |
+| 13 | ignore iteration count | killed | affine and seeded oracle, options AUnit tests |
+| 14 | ignore epsilon | killed | affine and seeded oracle AUnit; boundary |
+| 15 | reverse roles | killed | AUnit; boundary "translation" |
+| 16 | publish before validation | killed | boundary only: "constant failure changed result" |
+| 17 | remove seed finiteness check | killed | boundary only: "invalid seed coefficient accepted" |
+| 18 | remove translation bound | killed | boundary only: "invalid seed coefficient accepted" |
+| 19 | remove final finiteness check | killed | fault build only: "nonfinite native output accepted" |
+| 20 | suppress nonconvergence | killed | AUnit and boundary "constant images accepted" |
+
+No survivors. In mutant 17 the Ada preflight makes the same rejection unreachable from AUnit, so
+only the raw C boundary can see it. Mutants 13 and 14 also fail Task 014 tests because the helper
+is shared.
