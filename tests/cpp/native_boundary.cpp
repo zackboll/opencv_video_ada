@@ -2866,8 +2866,8 @@ void run_ecc_homography() {
         check(std::strlen(opencv_video_last_error()) == 0, "stale diagnostic after success");
     }
 
-    // Native nonconvergence and native exceptions (37-fixture oracle on 4.10.0): error status,
-    // diagnostic, untouched 48 bytes. Known wrong-but-finite successes are still published.
+    // Native nonconvergence and native exceptions (the 7 cases raise on 4.1.0, 4.10.0 and 5.0.0):
+    // error status, diagnostic, untouched 48 bytes. Wrong-but-finite successes are still published.
     {
         auto expect_failure = [&](const cv::Mat &a, const cv::Mat &b, const char *message) {
             auto ha = ecc_handle(a);
@@ -2899,14 +2899,30 @@ void run_ecc_homography() {
             {"noise-vs-texture", base_image, ecc_fixture::noise(n, n, 7)},
             {"ill-conditioned", base_image, ecc_fixture::homography_texture(n, n, ill)},
         };
+        // The outcome is version dependent and follows the same-build direct call: on 4.10.0 all
+        // three succeed with a wrong finite matrix; on 4.1.0 and 5.0.0 low-gradient and
+        // ill-conditioned raise natively (oracle and probe). Either way the binding must agree with
+        // native, and at least one wrong-but-finite success must be published (noise-vs-texture
+        // succeeds on every qualified version).
+        int finite_successes = 0;
         for (auto &f : finite) {
             auto ha = ecc_handle(f.a);
             auto hb = ecc_handle(f.b);
+            const HomDirect d = hom_direct(f.a, f.b);
             opencv_video_ecc_homography_result r = hom_sentinel();
-            check(hom_call(ha.get(), hb.get(), &r) == OPENCV_VIDEO_OK, f.name);
-            hom_matches_direct(r, hom_direct(f.a, f.b), f.name);
-            check(r.correlation < 0.5, "wrong-but-finite fixture unexpectedly well correlated");
+            const opencv_video_status s = hom_call(ha.get(), hb.get(), &r);
+            if (d.ok) {
+                check(s == OPENCV_VIDEO_OK, f.name);
+                hom_matches_direct(r, d, f.name);
+                check(r.correlation < 0.5, "wrong-but-finite fixture unexpectedly well correlated");
+                ++finite_successes;
+            } else {
+                check(s == OPENCV_VIDEO_ERROR_OPENCV, f.name);
+                check(std::strlen(opencv_video_last_error()) > 0, "no diagnostic after native failure");
+                hom_unchanged(r, f.name);
+            }
         }
+        check(finite_successes >= 1, "no wrong-but-finite homography success was observed");
         opencv_video_ecc_homography_result r = hom_sentinel();
         check(hom_call(base.get(), base.get(), &r) == OPENCV_VIDEO_OK, "valid call after native failures");
     }

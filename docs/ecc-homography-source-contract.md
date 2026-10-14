@@ -156,7 +156,12 @@ with its own independent `cv::findTransformECC(MOTION_HOMOGRAPHY)` call: identit
 
 * **Exact match on the same build.** On the deterministic CPU path the nine coefficients and the
   correlation match bitwise (`memcmp`). This holds for all eleven geometric fixtures, the option
-  boundaries, the Regions and the three known wrong-but-finite successes.
+  boundaries, the Regions and the three known wrong-but-finite successes on 4.10.0.
+  On 4.1.0 and 5.0.0, low-gradient and ill-conditioned raise natively (Checkpoint 4). The boundary
+  now follows the same-build direct outcome for those three fixtures:
+  * when native succeeds, the result must be published bitwise-equal;
+  * when native raises, the 48 bytes must be untouched;
+  * at least one wrong-but-finite success is still required (noise-vs-texture).
 * **Byte-exact failure atomicity.** Every expected failure leaves the caller's whole 48-byte object
   unchanged, including the 4 padding bytes at offset 36. This was checked with a patterned sentinel.
 * **Homography-only fault hooks.** Only the homography export calls them, they are compiled only under
