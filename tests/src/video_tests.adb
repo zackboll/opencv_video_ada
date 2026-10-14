@@ -6959,6 +6959,929 @@ package body Video_Tests is
       Ada.Directories.Delete_File (Scratch);
    end ECC_Affine_Seeded_Oracle_Integrity;
 
+   ---------------------------------------------------------------------
+   --  Task 016: ECC eight-parameter homography alignment
+   ---------------------------------------------------------------------
+   subtype HM is EF.Homography_Matrix;
+
+   Hom_Linear_Tolerance      : constant Long_Float := 0.003;
+   Hom_Translation_Tolerance : constant Long_Float := 0.1;
+   Hom_Projective_Tolerance  : constant Long_Float := 0.00005;
+
+   --  Ground-truth homographies (row-major, template to moving); the values mirror
+   --  tests/cpp/ecc_homography_oracle.cpp literally so both sides build equal images.
+   K_Identity : constant HM := [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+   K_T21      : constant HM := [1.0, 0.0, 2.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0];
+   K_Tm       : constant HM := [1.0, 0.0, -2.0, 0.0, 1.0, -1.0, 0.0, 0.0, 1.0];
+   K_T12      : constant HM := [1.0, 0.0, 1.0, 0.0, 1.0, 2.0, 0.0, 0.0, 1.0];
+   K_R2       : constant HM := [0.99939083, -0.0348995, 0.0, 0.0348995, 0.99939083, 0.0, 0.0, 0.0, 1.0];
+   K_Rm2      : constant HM := [0.99939083, 0.0348995, 0.0, -0.0348995, 0.99939083, 0.0, 0.0, 0.0, 1.0];
+   K_S102     : constant HM := [1.02, 0.0, 0.0, 0.0, 1.02, 0.0, 0.0, 0.0, 1.0];
+   K_S098     : constant HM := [0.98, 0.0, 0.0, 0.0, 0.98, 0.0, 0.0, 0.0, 1.0];
+   K_AN       : constant HM := [1.03, 0.0, 0.0, 0.0, 0.98, 0.0, 0.0, 0.0, 1.0];
+   K_SHX      : constant HM := [1.0, 0.02, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+   K_SHY      : constant HM := [1.0, 0.0, 0.0, -0.01, 1.0, 0.0, 0.0, 0.0, 1.0];
+   K_AC       : constant HM := [1.01, 0.01, 1.5, -0.01, 0.99, -1.0, 0.0, 0.0, 1.0];
+   K_P20p     : constant HM := [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0002, 0.0, 1.0];
+   K_P20n     : constant HM := [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, -0.0002, 0.0, 1.0];
+   K_P21p     : constant HM := [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0002, 1.0];
+   K_P21n     : constant HM := [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -0.0002, 1.0];
+   K_PB       : constant HM := [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0002, -0.0002, 1.0];
+   K_PM       : constant HM := [1.0, 0.01, 1.0, -0.005, 1.0, 0.5, 0.00005, -0.00004, 1.0];
+   K_RP       : constant HM := [0.9994, -0.0349, 1.0, 0.0349, 0.9994, 0.5, 0.0001, 0.00005, 1.0];
+   K_SP       : constant HM := [1.02, 0.01, 1.0, -0.01, 0.98, -0.5, 0.0001, -0.0001, 1.0];
+   K_Strong   : constant HM := [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.002, 0.002, 1.0];
+   K_NZ       : constant HM := [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, -0.0078, 0.0, 1.0];
+   K_CZ       : constant HM := [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, -0.012, 0.0, 1.0];
+   K_IC       : constant HM := [1.0, 0.0, 0.0, 0.0, 1.0E-6, 0.0, 0.0, 0.0, 1.0];
+   K_LU       : constant HM := [1.0, 0.0, 40.0, 0.0, 1.0, 30.0, 0.0, 0.0, 1.0];
+   K_RX       : constant HM := [-1.0, 0.0, 127.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+   function Hom_Pair (H : HM) return ECC_Pair is
+     (Template => EF.Texture (128, 128),
+      Moving   => EF.Homography_Texture (128, 128, H));
+
+   function Coeffs (W : ECC_Homography_Warp) return HM is
+     [LF (W.H00), LF (W.H01), LF (W.H02), LF (W.H10), LF (W.H11), LF (W.H12),
+      LF (W.H20), LF (W.H21), LF (W.H22)];
+
+   function Hom_Near (R : ECC_Homography_Result; H : HM) return Boolean is
+     (abs (LF (R.Warp.H00) - H (0)) < Hom_Linear_Tolerance
+      and then abs (LF (R.Warp.H01) - H (1)) < Hom_Linear_Tolerance
+      and then abs (LF (R.Warp.H02) - H (2)) < Hom_Translation_Tolerance
+      and then abs (LF (R.Warp.H10) - H (3)) < Hom_Linear_Tolerance
+      and then abs (LF (R.Warp.H11) - H (4)) < Hom_Linear_Tolerance
+      and then abs (LF (R.Warp.H12) - H (5)) < Hom_Translation_Tolerance
+      and then abs (LF (R.Warp.H20) - H (6)) < Hom_Projective_Tolerance
+      and then abs (LF (R.Warp.H21) - H (7)) < Hom_Projective_Tolerance
+      and then R.Warp.H22 = 1.0);
+
+   function Swapped (W : HM; A, B : Natural) return HM is
+      Result : HM := W;
+   begin
+      Result (A) := W (B);
+      Result (B) := W (A);
+      return Result;
+   end Swapped;
+
+   function Transposed (W : HM) return HM is
+     [W (0), W (3), W (6), W (1), W (4), W (7), W (2), W (5), W (8)];
+
+   function Negated_Translation (W : HM) return HM is
+     [W (0), W (1), -W (2), W (3), W (4), -W (5), W (6), W (7), W (8)];
+
+   --  Applies the matrix with homogeneous division: template to moving coordinates.
+   procedure Hom_Map (W : HM; X, Y : Long_Float; MX, MY : out Long_Float; Valid : out Boolean) is
+      D : constant Long_Float := W (6) * X + W (7) * Y + W (8);
+   begin
+      MX := 0.0;
+      MY := 0.0;
+      Valid := abs D > 1.0E-6;
+      if Valid then
+         MX := (W (0) * X + W (1) * Y + W (2)) / D;
+         MY := (W (3) * X + W (4) * Y + W (5)) / D;
+      end if;
+   end Hom_Map;
+
+   Ref_X : constant array (1 .. 5) of Long_Float := [32.0, 96.0, 32.0, 96.0, 64.0];
+   Ref_Y : constant array (1 .. 5) of Long_Float := [32.0, 32.0, 96.0, 96.0, 64.0];
+
+   --  Largest distance between where two matrices send the independent reference points.
+   function Hom_Map_Error (A, B : HM) return Long_Float is
+      Worst : Long_Float := 0.0;
+      AX, AY, BX, BY : Long_Float;
+      AV, BV : Boolean;
+   begin
+      for K in Ref_X'Range loop
+         Hom_Map (A, Ref_X (K), Ref_Y (K), AX, AY, AV);
+         Hom_Map (B, Ref_X (K), Ref_Y (K), BX, BY, BV);
+         if not (AV and then BV) then
+            return 1.0E9;
+         end if;
+         Worst := Long_Float'Max (Worst, Long_Float'Max (abs (AX - BX), abs (AY - BY)));
+      end loop;
+      return Worst;
+   end Hom_Map_Error;
+
+   --  Mean absolute difference over the interior. Aligned resamples the moving image at
+   --  W * p (homogeneous division), which is what WARP_INVERSE_MAP does with the returned
+   --  matrix. A point mapped outside the image or to a zero denominator counts as 255.
+   function Hom_Residual (Pair : ECC_Pair; W : HM; Aligned : Boolean) return Long_Float is
+      Margin : constant := 24;
+      Sum    : Long_Float := 0.0;
+      Count  : Natural := 0;
+      MX, MY : Long_Float;
+      Valid  : Boolean;
+   begin
+      for Y in Margin .. 127 - Margin loop
+         for X in Margin .. 127 - Margin loop
+            if Aligned then
+               Hom_Map (W, Long_Float (X), Long_Float (Y), MX, MY, Valid);
+            else
+               MX := Long_Float (X);
+               MY := Long_Float (Y);
+               Valid := True;
+            end if;
+            if Valid and then MX >= 0.0 and then MX < 126.0
+              and then MY >= 0.0 and then MY < 126.0
+            then
+               Sum := Sum + abs (Sample (Pair.Moving, MX, MY)
+                                 - Long_Float (OpenCV.Core.UInt8_Access.Get (Pair.Template, Y, X)));
+            else
+               Sum := Sum + 255.0;
+            end if;
+            Count := Count + 1;
+         end loop;
+      end loop;
+      return Sum / Long_Float (Count);
+   end Hom_Residual;
+
+   procedure Hom_Expect_Error
+     (Template, Moving : OpenCV.Core.Mat;
+      Options : ECC_Homography_Options := (others => <>);
+      Message : String)
+   is
+      Unused : ECC_Homography_Result;
+   begin
+      Unused := Estimate_ECC_Homography (Template, Moving, Options);
+      Assert (False, Message & ": request accepted");
+   exception
+      when OpenCV.OpenCV_Error => null;
+   end Hom_Expect_Error;
+
+   --  An Ada-preflight rejection does not carry the shim's "Video.Estimate_ECC_Homography"
+   --  prefix; a shim or native rejection does.
+   procedure Hom_Expect_Preflight_Error (Template, Moving : OpenCV.Core.Mat; Message : String) is
+      Unused : ECC_Homography_Result;
+   begin
+      Unused := Estimate_ECC_Homography (Template, Moving);
+      Assert (False, Message & ": request accepted");
+   exception
+      when Error : OpenCV.OpenCV_Error =>
+         declare
+            Text   : constant String := Ada.Exceptions.Exception_Message (Error);
+            Marker : constant String := "Video.Estimate_ECC_Homography";
+         begin
+            Assert (Text'Length < Marker'Length
+                    or else Text (Text'First .. Text'First + Marker'Length - 1) /= Marker,
+                    Message & ": rejected by the native layer, not the Ada preflight");
+         end;
+   end Hom_Expect_Preflight_Error;
+
+   --  Estimates one fixture and checks it against its ground truth.
+   function Hom_Check (Label : String; H : HM) return ECC_Homography_Result is
+      Pair : constant ECC_Pair := Hom_Pair (H);
+      R    : constant ECC_Homography_Result := Estimate_ECC_Homography (Pair.Template, Pair.Moving);
+   begin
+      Assert (Hom_Near (R, H), "ECC homography " & Label & " coefficients");
+      Assert (Hom_Map_Error (Coeffs (R.Warp), H) < 1.5, "ECC homography " & Label & " mapped points");
+      Assert (R.Correlation > 0.98, "ECC homography " & Label & " correlation");
+      return R;
+   end Hom_Check;
+
+   procedure ECC_Homography_Defaults (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Options  : constant ECC_Homography_Options := (others => <>);
+      Zero     : constant ECC_Homography_Result := (others => <>);
+      Identity : constant ECC_Homography_Warp :=
+        (H00 => 1.0, H01 => 0.0, H02 => 0.0, H10 => 0.0, H11 => 1.0, H12 => 0.0,
+         H20 => 0.0, H21 => 0.0, H22 => 1.0);
+   begin
+      Assert (Options = ECC_Translation_Options'(others => <>),
+              "ECC homography options reuse the translation defaults");
+      Assert (Zero.Warp = Identity and then Zero.Correlation = 0.0, "ECC homography default result");
+      Assert (EF."=" (Coeffs (Zero.Warp), K_Identity), "ECC homography default coefficients are row-major");
+   end ECC_Homography_Defaults;
+
+   procedure ECC_Homography_Identity_And_Translation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Base      : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+      Before    : constant Long_Long_Integer := EF.Checksum (Base);
+      Identity  : constant ECC_Homography_Result := Estimate_ECC_Homography (Base, Base);
+      Plus      : constant ECC_Homography_Result := Hom_Check ("translation (2,1)", K_T21);
+      Minus     : constant ECC_Homography_Result := Hom_Check ("translation (-2,-1)", K_Tm);
+      Other     : constant ECC_Homography_Result := Hom_Check ("translation (1,2)", K_T12);
+   begin
+      Assert (Hom_Near (Identity, K_Identity) and then abs (Identity.Correlation - 1.0) < 1.0E-6,
+              "ECC homography identity");
+      Assert (abs (LF (Identity.Warp.H20)) < 1.0E-6 and then abs (LF (Identity.Warp.H21)) < 1.0E-6,
+              "ECC homography identity has no projective part");
+      --  Translation lands in H02/H12 with the right signs, never in H20/H21.
+      Assert (Plus.Warp.H02 > 1.8 and then Plus.Warp.H12 > 0.8, "ECC homography (2,1) translation signs");
+      Assert (Minus.Warp.H02 < -1.8 and then Minus.Warp.H12 < -0.8, "ECC homography (-2,-1) translation signs");
+      Assert (abs (LF (Plus.Warp.H20)) < 1.0E-4 and then abs (LF (Plus.Warp.H21)) < 1.0E-4,
+              "ECC homography translation leaked into the projective terms");
+      Assert (Other.Warp.H02 < Other.Warp.H12 and then Plus.Warp.H02 > Plus.Warp.H12,
+              "ECC homography (1,2) translation not distinguished from (2,1)");
+      Assert (Plus.Warp.H22 = 1.0 and then Minus.Warp.H22 = 1.0 and then Identity.Warp.H22 = 1.0,
+              "ECC homography H22 is exactly 1");
+      Assert (EF.Checksum (Base) = Before, "ECC homography modified an input");
+   end ECC_Homography_Identity_And_Translation;
+
+   procedure ECC_Homography_Rotation_Scale_Shear (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Rp  : constant ECC_Homography_Result := Hom_Check ("rotation +2", K_R2);
+      Rm  : constant ECC_Homography_Result := Hom_Check ("rotation -2", K_Rm2);
+      Up  : constant ECC_Homography_Result := Hom_Check ("scale 1.02", K_S102);
+      Dn  : constant ECC_Homography_Result := Hom_Check ("scale 0.98", K_S098);
+      An  : constant ECC_Homography_Result := Hom_Check ("anisotropic scale", K_AN);
+      ShX : constant ECC_Homography_Result := Hom_Check ("x shear", K_SHX);
+      ShY : constant ECC_Homography_Result := Hom_Check ("y shear", K_SHY);
+      Aff : constant ECC_Homography_Result := Hom_Check ("affine combination", K_AC);
+   begin
+      Assert (Rp.Warp.H10 > 0.03 and then Rp.Warp.H01 < -0.03, "ECC homography +rotation signs");
+      Assert (Rm.Warp.H10 < -0.03 and then Rm.Warp.H01 > 0.03, "ECC homography -rotation signs");
+      Assert (Up.Warp.H00 > 1.01 and then Up.Warp.H11 > 1.01
+              and then Dn.Warp.H00 < 0.99 and then Dn.Warp.H11 < 0.99,
+              "ECC homography isotropic scale directions");
+      Assert (An.Warp.H00 - An.Warp.H11 > 0.04, "ECC homography anisotropic scale diagonal entries");
+      Assert (ShX.Warp.H01 > 0.015 and then abs (LF (ShX.Warp.H10)) < 0.003,
+              "ECC homography x shear placement");
+      Assert (ShY.Warp.H10 < -0.007 and then abs (LF (ShY.Warp.H01)) < 0.003,
+              "ECC homography y shear placement");
+      Assert (Aff.Warp.H01 > 0.005 and then Aff.Warp.H10 < -0.005 and then Aff.Warp.H02 > 1.3
+              and then Aff.Warp.H12 < -0.8, "ECC homography affine-equivalent combination");
+      Assert (abs (LF (Aff.Warp.H20)) < 5.0E-5 and then abs (LF (Aff.Warp.H21)) < 5.0E-5,
+              "ECC homography affine-equivalent projective terms");
+   end ECC_Homography_Rotation_Scale_Shear;
+
+   procedure ECC_Homography_Projective_Coefficients (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Xp   : constant ECC_Homography_Result := Hom_Check ("positive H20", K_P20p);
+      Xn   : constant ECC_Homography_Result := Hom_Check ("negative H20", K_P20n);
+      Yp   : constant ECC_Homography_Result := Hom_Check ("positive H21", K_P21p);
+      Yn   : constant ECC_Homography_Result := Hom_Check ("negative H21", K_P21n);
+      Both : constant ECC_Homography_Result := Hom_Check ("H20 and H21", K_PB);
+      Mild : constant ECC_Homography_Result := Hom_Check ("mild perspective", K_PM);
+      Rot  : constant ECC_Homography_Result := Hom_Check ("rotation and perspective", K_RP);
+      Sst  : constant ECC_Homography_Result := Hom_Check ("scale shear translation perspective", K_SP);
+      Reversed : constant ECC_Homography_Result :=
+        Estimate_ECC_Homography (EF.Homography_Texture (128, 128, K_PB), EF.Texture (128, 128));
+      RW   : constant HM := Coeffs (Rot.Warp);
+   begin
+      Assert (Xp.Warp.H20 > 0.00015 and then abs (LF (Xp.Warp.H21)) < 0.00005, "positive H20 only");
+      Assert (Xn.Warp.H20 < -0.00015 and then abs (LF (Xn.Warp.H21)) < 0.00005, "negative H20 only");
+      Assert (Yp.Warp.H21 > 0.00015 and then abs (LF (Yp.Warp.H20)) < 0.00005, "positive H21 only");
+      Assert (Yn.Warp.H21 < -0.00015 and then abs (LF (Yn.Warp.H20)) < 0.00005, "negative H21 only");
+      Assert (Both.Warp.H20 > 0.00015 and then Both.Warp.H21 < -0.00015, "H20 and H21 together");
+      Assert (Mild.Warp.H20 > 0.0 and then Mild.Warp.H21 < 0.0, "mild perspective signs");
+      Assert (Rot.Warp.H20 > 0.00005 and then Rot.Warp.H21 > 0.0, "rotation and perspective signs");
+      Assert (Sst.Warp.H20 > 0.00005 and then Sst.Warp.H21 < -0.00005,
+              "scale/shear/translation and perspective signs");
+      Assert (Reversed.Warp.H20 < -0.00015 and then Reversed.Warp.H21 > 0.00015
+              and then Reversed.Warp.H22 = 1.0, "image role reversal flips the projective terms");
+      --  Misplaced coefficients map the independent reference points somewhere else.
+      Assert (Hom_Map_Error (RW, Swapped (RW, 2, 6)) > 5.0, "swapping H02 and H20 preserved the mapping");
+      Assert (Hom_Map_Error (RW, Swapped (RW, 5, 7)) > 5.0, "swapping H12 and H21 preserved the mapping");
+      Assert (Hom_Map_Error (RW, Swapped (RW, 1, 3)) > 3.0, "swapping H01 and H10 preserved the mapping");
+      Assert (Hom_Map_Error (RW, Transposed (RW)) > 3.0, "transposing the matrix preserved the mapping");
+      Assert (Hom_Map_Error (RW, Negated_Translation (RW)) > 1.5,
+              "negating the translation preserved the mapping");
+   end ECC_Homography_Projective_Coefficients;
+
+   function Aff_As_HM (W : ECC_Affine_Warp) return HM is
+     [LF (W.M00), LF (W.M01), LF (W.M02), LF (W.M10), LF (W.M11), LF (W.M12), 0.0, 0.0, 1.0];
+
+   procedure ECC_Homography_Versus_Affine (T : in out Fixture) is
+      pragma Unreferenced (T);
+      --  Fixtures where the measured advantage is material (affine/homography residual ratio
+      --  2.2 to 4.2 on 4.10.0). The very mild K_PM perspective is excluded on purpose: there the
+      --  affine model is only about 1.2 times worse, which is not a meaningful distinction.
+      Cases : constant array (1 .. 5) of HM := [K_P20p, K_P21n, K_PB, K_RP, K_SP];
+   begin
+      for H of Cases loop
+         declare
+            Pair : constant ECC_Pair := Hom_Pair (H);
+            Hom  : constant ECC_Homography_Result := Estimate_ECC_Homography (Pair.Template, Pair.Moving);
+            Aff  : constant ECC_Affine_Result := Estimate_ECC_Affine (Pair.Template, Pair.Moving);
+            Before : constant Long_Float := Hom_Residual (Pair, K_Identity, True);
+            HR   : constant Long_Float := Hom_Residual (Pair, Coeffs (Hom.Warp), True);
+            AR   : constant Long_Float := Hom_Residual (Pair, Aff_As_HM (Aff.Warp), True);
+            TR   : constant Long_Float := Hom_Residual (Pair, H, True);
+         begin
+            --  The affine call returns a finite, plausible matrix: this is not a native failure.
+            Assert (Aff.Correlation > 0.9, "ECC affine on a projective fixture is finite and correlated");
+            Assert (Before > 2.5, "projective fixture is not already aligned");
+            Assert (HR < 0.6 and then HR < Before / 5.0, "ECC homography residual did not collapse");
+            Assert (AR > 1.8 * HR, "ECC homography is not materially better than affine");
+            Assert (HR < TR + 0.1, "ECC homography residual is worse than the true matrix");
+            --  Only the homography result carries a projective part.
+            Assert (abs (LF (Hom.Warp.H20)) > 5.0E-5 or else abs (LF (Hom.Warp.H21)) > 5.0E-5,
+                    "ECC homography found no projective term");
+         end;
+      end loop;
+   end ECC_Homography_Versus_Affine;
+
+   procedure ECC_Homography_Inverse_Warp (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Cases : constant array (1 .. 4) of HM := [K_P20p, K_PM, K_RP, K_SP];
+   begin
+      for H of Cases loop
+         declare
+            Pair : constant ECC_Pair := Hom_Pair (H);
+            R    : constant ECC_Homography_Result := Estimate_ECC_Homography (Pair.Template, Pair.Moving);
+            W    : constant HM := Coeffs (R.Warp);
+            Good : constant Long_Float := Hom_Residual (Pair, W, True);
+         begin
+            --  The returned matrix, unchanged, resamples the moving image into the template frame.
+            Assert (Hom_Residual (Pair, K_Identity, True) > 5.0 * Good, "inverse warp did not reduce the residual");
+            Assert (Hom_Residual (Pair, Transposed (W), True) > 5.0 * Good, "transposed matrix aligned the images");
+            --  Only meaningful when the fixture has a real translation (K_P20p has none).
+            if abs (W (2)) > 0.5 then
+               Assert (Hom_Residual (Pair, Negated_Translation (W), True) > 3.0 * Good,
+                       "negated translation aligned the images");
+            end if;
+            Assert (Hom_Residual (Pair, Swapped (W, 2, 6), True) > 5.0 * Good, "swapped H02/H20 aligned the images");
+            Assert (Hom_Residual (Pair, Swapped (W, 5, 7), True) > 5.0 * Good, "swapped H12/H21 aligned the images");
+         end;
+      end loop;
+   end ECC_Homography_Inverse_Warp;
+
+   procedure ECC_Homography_Options_And_Repeatability (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pair    : constant ECC_Pair := Hom_Pair (K_PB);
+      Default : constant ECC_Homography_Result := Estimate_ECC_Homography (Pair.Template, Pair.Moving);
+      One     : constant ECC_Homography_Result := Estimate_ECC_Homography
+        (Pair.Template, Pair.Moving, (Maximum_Iterations => 1, Epsilon => 1.0E-4));
+      Three   : constant ECC_Homography_Result := Estimate_ECC_Homography
+        (Pair.Template, Pair.Moving, (Maximum_Iterations => 3, Epsilon => 1.0E-4));
+      Tight   : constant ECC_Homography_Result := Estimate_ECC_Homography
+        (Pair.Template, Pair.Moving, (Maximum_Iterations => 50, Epsilon => 1.0E-8));
+      Loose   : constant ECC_Homography_Result := Estimate_ECC_Homography
+        (Pair.Template, Pair.Moving, (Maximum_Iterations => 50, Epsilon => 0.1));
+   begin
+      Assert (Hom_Near (Default, K_PB), "ECC homography default options");
+      Assert (Default = Estimate_ECC_Homography (Pair.Template, Pair.Moving), "ECC homography not repeatable");
+      Assert (One /= Default and then Three /= One, "ECC homography iteration option ignored");
+      Assert (One.Warp.H20 < Default.Warp.H20 and then One.Correlation < Default.Correlation,
+              "one iteration should be coarser than the converged result");
+      Assert (Hom_Near (Three, K_PB), "ECC homography three iterations");
+      Assert (Hom_Near (Tight, K_PB) and then Hom_Near (Loose, K_PB), "ECC homography nondefault options lost accuracy");
+      Assert (Tight /= Loose, "ECC homography epsilon option ignored");
+      Assert (Default.Warp.H22 = 1.0 and then One.Warp.H22 = 1.0 and then Loose.Warp.H22 = 1.0,
+              "ECC homography H22 under options");
+      Assert (Loose.Correlation > 0.98 and then Loose.Correlation < 1.01,
+              "ECC homography correlation outside the observed range");
+      --  Option bounds.
+      Assert (Estimate_ECC_Homography (Pair.Template, Pair.Moving, (Maximum_Iterations => 100, Epsilon => 0.1))
+              /= Estimate_ECC_Homography (Pair.Template, Pair.Moving, (Maximum_Iterations => 1, Epsilon => 1.0E-8)),
+              "ECC homography option bounds");
+   end ECC_Homography_Options_And_Repeatability;
+
+   procedure ECC_Homography_Regions_Lifetime (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Window : constant OpenCV.Rect := (16, 16, 128, 128);
+      Saved, Contiguous : ECC_Homography_Result;
+      Before_A, Before_B : Long_Long_Integer;
+   begin
+      declare
+         Parent_A : constant OpenCV.Core.Mat := EF.Texture (160, 160);
+         Parent_B : constant OpenCV.Core.Mat := EF.Homography_Texture (160, 160, K_PM);
+         Region_A : constant OpenCV.Core.Mat := Parent_A.Region (Window);
+         Region_B : constant OpenCV.Core.Mat := Parent_B.Region (Window);
+      begin
+         Before_A := EF.Checksum (Parent_A);
+         Before_B := EF.Checksum (Parent_B);
+         Assert (not Region_A.Is_Continuous and then not Region_B.Is_Continuous,
+                 "ECC homography fixture Regions are contiguous");
+         Saved := Estimate_ECC_Homography (Region_A, Region_B);
+         Contiguous := Estimate_ECC_Homography (Region_A.Clone, Region_B.Clone);
+         Assert (Saved = Contiguous, "ECC homography Region differs from the contiguous clone");
+         Assert (EF.Checksum (Parent_A) = Before_A and then EF.Checksum (Parent_B) = Before_B,
+                 "ECC homography modified a Region parent");
+         Assert (EF.Checksum (Region_A) = EF.Checksum (Region_A.Clone), "ECC homography modified a Region");
+         --  One allocation in both roles.
+         Assert (Hom_Near (Estimate_ECC_Homography (Parent_A, Parent_A), K_Identity),
+                 "ECC homography with one image in both roles");
+         Assert (Hom_Near (Estimate_ECC_Homography (Region_A, Region_A), K_Identity),
+                 "ECC homography with one Region in both roles");
+      end;
+      --  Parents and Regions are finalized; the result is a plain value.
+      Assert (Saved.Warp.H22 = 1.0 and then Saved.Correlation > 0.98
+              and then abs (LF (Saved.Warp.H20) - 0.00005) < 0.0001
+              and then abs (LF (Saved.Warp.H21) + 0.00004) < 0.0001, "ECC homography result after finalization");
+   end ECC_Homography_Regions_Lifetime;
+
+   procedure ECC_Homography_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Good : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+      Empty : OpenCV.Core.Mat;
+      Float_Image : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (128, 128, (Depth => OpenCV.Core.Float32, Channels => 1));
+      Color : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (128, 128, (Depth => OpenCV.Core.UInt8, Channels => 3));
+      function From_Bits is new Ada.Unchecked_Conversion (Interfaces.Unsigned_64, OpenCV.Float64_Value);
+      Bad_Epsilons : constant array (Positive range <>) of OpenCV.Float64_Value :=
+        [0.0, -1.0E-4, 9.0E-9, 0.1000001, 1.0,
+         From_Bits (16#7FF0_0000_0000_0000#), From_Bits (16#FFF0_0000_0000_0000#),
+         From_Bits (16#7FF8_0000_0000_0000#)];
+   begin
+      Hom_Expect_Error (Empty, Good, Message => "empty template");
+      Hom_Expect_Error (Good, Empty, Message => "empty moving");
+      Hom_Expect_Preflight_Error (Float_Image, Float_Image, "Float32 images");
+      Hom_Expect_Preflight_Error (Color, Color, "three-channel images");
+      Hom_Expect_Preflight_Error (Good, EF.Texture (128, 129), "different columns");
+      Hom_Expect_Preflight_Error (EF.Texture (129, 128), Good, "different rows");
+      Hom_Expect_Error (Good, Float_Image, Message => "Float32 moving");
+      Hom_Expect_Error (EF.Texture (31, 128), EF.Texture (31, 128), Message => "31 rows");
+      Hom_Expect_Error (EF.Texture (128, 31), EF.Texture (128, 31), Message => "31 columns");
+      declare
+         Wide : constant OpenCV.Core.Mat := OpenCV.Core.Create
+           (32, 16_385, (Depth => OpenCV.Core.UInt8, Channels => 1));
+         Area : constant OpenCV.Core.Mat := OpenCV.Core.Create
+           (4_097, 4_096, (Depth => OpenCV.Core.UInt8, Channels => 1));
+      begin
+         --  Rejected before native work: no eight-block Jacobian is allocated.
+         Hom_Expect_Preflight_Error (Wide, Wide, "16385 columns");
+         Hom_Expect_Preflight_Error (Area, Area, "4097 x 4096 pixels");
+      end;
+      Hom_Expect_Error (Good, Good, (Maximum_Iterations => 101, Epsilon => 0.0001), Message => "101 iterations");
+      Hom_Expect_Error (Good, Good, (Maximum_Iterations => Positive'Last, Epsilon => 0.0001),
+                        Message => "Positive'Last iterations");
+      for Epsilon of Bad_Epsilons loop
+         Hom_Expect_Error (Good, Good, (Maximum_Iterations => 50, Epsilon => Epsilon), Message => "invalid epsilon");
+      end loop;
+   end ECC_Homography_Validation;
+
+   procedure ECC_Homography_Nonconvergence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Flat          : constant OpenCV.Core.Mat := EF.Constant_Image (128, 128, 128);
+      Texture_Image : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+      Noise         : constant OpenCV.Core.Mat := EF.Noise (128, 128, 7);
+   begin
+      Hom_Expect_Error (Flat, Flat, Message => "constant images");
+      Hom_Expect_Error (Flat, Texture_Image, Message => "constant template");
+      Hom_Expect_Error (Texture_Image, Flat, Message => "constant moving");
+      Hom_Expect_Error (EF.Noise (128, 128, 3), EF.Noise (128, 128, 9), Message => "uncorrelated noise");
+      --  Outside the identity-initialized basin on every locally qualified version.
+      Hom_Expect_Error (Texture_Image, EF.Homography_Texture (128, 128, K_Strong), Message => "strong perspective");
+      Hom_Expect_Error (Texture_Image, EF.Homography_Texture (128, 128, K_NZ), Message => "near-zero denominator");
+      Hom_Expect_Error (Texture_Image, EF.Homography_Texture (128, 128, K_CZ), Message => "denominator crossing zero");
+      Hom_Expect_Error (Texture_Image, EF.Homography_Texture (128, 128, K_LU), Message => "large translation");
+      Hom_Expect_Error (Texture_Image, EF.Homography_Texture (128, 128, K_RX), Message => "reflection");
+      --  Nonconvergence carries the shim prefix and the native diagnostic; no identity is fabricated.
+      begin
+         declare
+            Unused : constant ECC_Homography_Result := Estimate_ECC_Homography (Flat, Flat);
+         begin
+            null;
+         end;
+         Assert (False, "constant images accepted");
+      exception
+         when Error : OpenCV.OpenCV_Error =>
+            Assert (Ada.Strings.Fixed.Index (Ada.Exceptions.Exception_Message (Error),
+                                             "Video.Estimate_ECC_Homography") = 1,
+                    "native nonconvergence lost the operation prefix");
+      end;
+      --  Finite is not correct: noise against a texture and an ill-conditioned fixture may be
+      --  accepted with a low correlation, repeatably; another native version may raise instead.
+      begin
+         declare
+            R : constant ECC_Homography_Result := Estimate_ECC_Homography (Texture_Image, Noise);
+         begin
+            Assert (R.Correlation < 0.2 and then R.Warp.H22 = 1.0, "ECC homography noise-vs-texture");
+            Assert (R = Estimate_ECC_Homography (Texture_Image, Noise), "ECC homography noise not repeatable");
+         end;
+      exception
+         when OpenCV.OpenCV_Error => null;
+      end;
+      begin
+         declare
+            R : constant ECC_Homography_Result :=
+              Estimate_ECC_Homography (Texture_Image, EF.Homography_Texture (128, 128, K_IC));
+         begin
+            Assert (R.Correlation < 0.5 and then Hom_Residual (Hom_Pair (K_IC), Coeffs (R.Warp), True) > 20.0,
+                    "ill-conditioned fixture was reported as a good fit");
+         end;
+      exception
+         when OpenCV.OpenCV_Error => null;
+      end;
+   end ECC_Homography_Nonconvergence;
+
+   ---------------------------------------------------------------------
+   --  Task 016: independent homography oracle (ecc-homography-oracle 1)
+   ---------------------------------------------------------------------
+   Expected_Hom_Oracle_Fixtures : constant := 37;
+
+   type Hom_Line_Array is array (1 .. 64) of Ada.Strings.Unbounded.Unbounded_String;
+   type Hom_Token_Array is array (1 .. 20) of Ada.Strings.Unbounded.Unbounded_String;
+
+   function Hom_Oracle_Path return String is
+     (Ada.Environment_Variables.Value ("VIDEO_ECC_HOMOGRAPHY_ORACLE", "../obj/oracle/ecc-homography.txt"));
+
+   function Hom_Name (Index : Positive) return String is
+   begin
+      case Index is
+         when 1 => return "identity";
+         when 2 => return "translation-2-1";
+         when 3 => return "translation-m2-m1";
+         when 4 => return "rot+2";
+         when 5 => return "rot-2";
+         when 6 => return "iso-1.02";
+         when 7 => return "iso-0.98";
+         when 8 => return "aniso-1.03-0.98";
+         when 9 => return "shear-x+0.02";
+         when 10 => return "shear-y-0.01";
+         when 11 => return "affine-combo";
+         when 12 => return "h20-pos";
+         when 13 => return "h20-neg";
+         when 14 => return "h21-pos";
+         when 15 => return "h21-neg";
+         when 16 => return "h20-h21-both";
+         when 17 => return "persp-mild";
+         when 18 => return "rot-persp";
+         when 19 => return "sst-persp";
+         when 20 => return "reversed-persp-both";
+         when 21 => return "photometric-persp-both";
+         when 22 => return "it1";
+         when 23 => return "it3";
+         when 24 => return "it100-e8";
+         when 25 => return "e0.1";
+         when 26 => return "e1e-8";
+         when 27 => return "region-persp-mild";
+         when 28 => return "constant";
+         when 29 => return "lowgrad";
+         when 30 => return "noise-vs-texture";
+         when 31 => return "noise-vs-noise";
+         when 32 => return "persp-strong";
+         when 33 => return "persp-near-zero-den";
+         when 34 => return "persp-den-crosses-zero";
+         when 35 => return "illcond";
+         when 36 => return "large-translation";
+         when 37 => return "reflect-x";
+         when others => raise Constraint_Error with "homography oracle fixture index";
+      end case;
+   end Hom_Name;
+
+   --  Rebuilds a named oracle fixture independently of the C++ code.
+   function Hom_Build (Name : String) return ECC_Pair is
+      Window : constant OpenCV.Rect := (16, 16, 128, 128);
+      function Tex return OpenCV.Core.Mat is (EF.Texture (128, 128));
+      function Mov (H : HM) return OpenCV.Core.Mat is (EF.Homography_Texture (128, 128, H));
+      function P (H : HM) return ECC_Pair is (Tex, Mov (H));
+   begin
+      if Name = "identity" then return (Tex, Tex);
+      elsif Name = "translation-2-1" then return P (K_T21);
+      elsif Name = "translation-m2-m1" then return P (K_Tm);
+      elsif Name = "rot+2" then return P (K_R2);
+      elsif Name = "rot-2" then return P (K_Rm2);
+      elsif Name = "iso-1.02" then return P (K_S102);
+      elsif Name = "iso-0.98" then return P (K_S098);
+      elsif Name = "aniso-1.03-0.98" then return P (K_AN);
+      elsif Name = "shear-x+0.02" then return P (K_SHX);
+      elsif Name = "shear-y-0.01" then return P (K_SHY);
+      elsif Name = "affine-combo" then return P (K_AC);
+      elsif Name = "h20-pos" then return P (K_P20p);
+      elsif Name = "h20-neg" then return P (K_P20n);
+      elsif Name = "h21-pos" then return P (K_P21p);
+      elsif Name = "h21-neg" then return P (K_P21n);
+      elsif Name = "h20-h21-both" or else Name = "it1" or else Name = "it3"
+        or else Name = "it100-e8" or else Name = "e0.1" or else Name = "e1e-8" then return P (K_PB);
+      elsif Name = "persp-mild" then return P (K_PM);
+      elsif Name = "rot-persp" then return P (K_RP);
+      elsif Name = "sst-persp" then return P (K_SP);
+      elsif Name = "reversed-persp-both" then return (Mov (K_PB), Tex);
+      elsif Name = "photometric-persp-both" then return (Tex, EF.Affine (Mov (K_PB), 4, 5, 20));
+      elsif Name = "region-persp-mild" then
+         declare
+            PA : constant OpenCV.Core.Mat := EF.Texture (160, 160);
+            PB : constant OpenCV.Core.Mat := EF.Homography_Texture (160, 160, K_PM);
+         begin
+            --  Region pixels are cloned for the checksum; Region geometry has its own test.
+            return (PA.Region (Window).Clone, PB.Region (Window).Clone);
+         end;
+      elsif Name = "constant" then
+         return (EF.Constant_Image (128, 128, 128), EF.Constant_Image (128, 128, 128));
+      elsif Name = "lowgrad" then
+         return (EF.Affine (Tex, 1, 40, 126), EF.Affine (Mov (K_PB), 1, 40, 126));
+      elsif Name = "noise-vs-texture" then return (Tex, EF.Noise (128, 128, 7));
+      elsif Name = "noise-vs-noise" then return (EF.Noise (128, 128, 3), EF.Noise (128, 128, 9));
+      elsif Name = "persp-strong" then return P (K_Strong);
+      elsif Name = "persp-near-zero-den" then return P (K_NZ);
+      elsif Name = "persp-den-crosses-zero" then return P (K_CZ);
+      elsif Name = "illcond" then return P (K_IC);
+      elsif Name = "large-translation" then return P (K_LU);
+      elsif Name = "reflect-x" then return P (K_RX);
+      end if;
+      raise Constraint_Error with "unknown homography oracle fixture " & Name;
+   end Hom_Build;
+
+   procedure Hom_Read_Lines (Path : String; Lines : out Hom_Line_Array; Count : out Natural) is
+      File : Ada.Text_IO.File_Type;
+   begin
+      Count := 0;
+      Lines := [others => Ada.Strings.Unbounded.Null_Unbounded_String];
+      Ada.Text_IO.Open (File, Ada.Text_IO.In_File, Path);
+      while not Ada.Text_IO.End_Of_File (File) loop
+         if Count = Lines'Last then
+            Ada.Text_IO.Close (File);
+            raise Constraint_Error with "oracle has too many lines";
+         end if;
+         Count := Count + 1;
+         Lines (Count) := Ada.Strings.Unbounded.To_Unbounded_String (Ada.Text_IO.Get_Line (File));
+      end loop;
+      Ada.Text_IO.Close (File);
+   end Hom_Read_Lines;
+
+   procedure Hom_Write_Lines (Path : String; Lines : Hom_Line_Array; Count : Natural) is
+      File : Ada.Text_IO.File_Type;
+   begin
+      Ada.Text_IO.Create (File, Ada.Text_IO.Out_File, Path);
+      for I in 1 .. Count loop
+         Ada.Text_IO.Put_Line (File, Ada.Strings.Unbounded.To_String (Lines (I)));
+      end loop;
+      Ada.Text_IO.Close (File);
+   end Hom_Write_Lines;
+
+   procedure Hom_Split (Line : String; Tokens : out Hom_Token_Array; Count : out Natural) is
+      First : Natural := Line'First;
+   begin
+      Count := 0;
+      Tokens := [others => Ada.Strings.Unbounded.Null_Unbounded_String];
+      while First <= Line'Last loop
+         if Line (First) = ' ' then
+            First := First + 1;
+         else
+            declare
+               Last : Natural := First;
+            begin
+               while Last < Line'Last and then Line (Last + 1) /= ' ' loop
+                  Last := Last + 1;
+               end loop;
+               if Count = Tokens'Last then
+                  Count := Tokens'Last + 1;
+                  return;
+               end if;
+               Count := Count + 1;
+               Tokens (Count) := Ada.Strings.Unbounded.To_Unbounded_String (Line (First .. Last));
+               First := Last + 1;
+            end;
+         end if;
+      end loop;
+   end Hom_Split;
+
+   function Hom_Tok (Tokens : Hom_Token_Array; Index : Positive) return String is
+     (Ada.Strings.Unbounded.To_String (Tokens (Index)));
+
+   --  Same-build agreement: a tight absolute term plus a relative term for large
+   --  ill-conditioned values (the illcond fixture returns coefficients in the hundreds).
+   function Hom_Close (A, B, Absolute : Long_Float) return Boolean is
+     (abs (A - B) <= Absolute + 1.0E-5 * abs (B));
+
+   function Hom_Native_Version return Interfaces.C.Strings.chars_ptr
+     with Import, Convention => C, External_Name => "opencv_video_native_version";
+
+   --  Token layout of a fixture record: 1 "fixture", 2 name, 3 iterations, 4 epsilon,
+   --  5 outcome, 6..14 H00..H22 (row-major), 15 correlation, 16 determinant,
+   --  17 template checksum, 18 moving checksum.
+   function Verify_Hom_Oracle (Path : String; Succeeded, Raised : out Natural) return String is
+      Lines  : Hom_Line_Array;
+      N      : Natural;
+      Tok    : Hom_Token_Array;
+      TC     : Natural;
+      Native : constant String := Interfaces.C.Strings.Value (Hom_Native_Version);
+      function Line (I : Positive) return String is (Ada.Strings.Unbounded.To_String (Lines (I)));
+   begin
+      Succeeded := 0;
+      Raised := 0;
+      begin
+         Hom_Read_Lines (Path, Lines, N);
+      exception
+         when others => return "oracle missing or unreadable";
+      end;
+      if N = 0 then return "oracle is empty"; end if;
+      if Line (1) /= "ecc-homography-oracle 1" then return "oracle magic or format version"; end if;
+      if N < 2 or else Line (2) /= "version " & Native then return "oracle OpenCV version differs"; end if;
+      if N < 3 or else Ada.Strings.Fixed.Head (Line (N), 4) /= "end " then
+         return "oracle truncated (no end record)";
+      end if;
+      if Line (N) /= "end" & Integer'Image (Expected_Hom_Oracle_Fixtures) then
+         return "oracle record count";
+      end if;
+      if N - 3 /= Expected_Hom_Oracle_Fixtures then return "oracle fixture record count"; end if;
+
+      for I in 1 .. Expected_Hom_Oracle_Fixtures loop
+         Hom_Split (Line (I + 2), Tok, TC);
+         if TC /= 18 or else Hom_Tok (Tok, 1) /= "fixture" then return "malformed fixture record"; end if;
+         declare
+            Name       : constant String := Hom_Name (I);
+            Iterations : constant Integer := Integer'Value (Hom_Tok (Tok, 3));
+            Epsilon    : constant Long_Float := Long_Float'Value (Hom_Tok (Tok, 4));
+            Outcome    : constant String := Hom_Tok (Tok, 5);
+            W          : HM;
+            Rho        : Long_Float;
+            Pair       : constant ECC_Pair := Hom_Build (Name);
+            Options    : constant ECC_Homography_Options :=
+              (Maximum_Iterations => Iterations, Epsilon => OpenCV.Float64_Value (Epsilon));
+         begin
+            if Hom_Tok (Tok, 2) /= Name then return "fixture identity or order: " & Name; end if;
+            if Outcome /= "OK" and then Outcome /= "EXC" then return "outcome token: " & Name; end if;
+            for K in W'Range loop
+               W (K) := Long_Float'Value (Hom_Tok (Tok, 6 + K));
+            end loop;
+            Rho := Long_Float'Value (Hom_Tok (Tok, 15));
+            if Long_Long_Integer'Value (Hom_Tok (Tok, 17)) /= EF.Checksum (Pair.Template)
+              or else Long_Long_Integer'Value (Hom_Tok (Tok, 18)) /= EF.Checksum (Pair.Moving)
+            then
+               return "fixture checksum differs: " & Name;
+            end if;
+            if Outcome = "OK" then
+               declare
+                  R : ECC_Homography_Result;
+                  B : HM;
+               begin
+                  begin
+                     R := Estimate_ECC_Homography (Pair.Template, Pair.Moving, Options);
+                  exception
+                     when OpenCV.OpenCV_Error => return "binding raised where native succeeded: " & Name;
+                  end;
+                  Succeeded := Succeeded + 1;
+                  B := Coeffs (R.Warp);
+                  if W (8) /= 1.0 or else B (8) /= 1.0 then return "H22 is not exactly 1: " & Name; end if;
+                  if not Hom_Close (B (0), W (0), 1.0E-6) then return "H00 differs: " & Name; end if;
+                  if not Hom_Close (B (1), W (1), 1.0E-6) then return "H01 differs: " & Name; end if;
+                  if not Hom_Close (B (2), W (2), 1.0E-5) then return "H02 differs: " & Name; end if;
+                  if not Hom_Close (B (3), W (3), 1.0E-6) then return "H10 differs: " & Name; end if;
+                  if not Hom_Close (B (4), W (4), 1.0E-6) then return "H11 differs: " & Name; end if;
+                  if not Hom_Close (B (5), W (5), 1.0E-5) then return "H12 differs: " & Name; end if;
+                  if not Hom_Close (B (6), W (6), 1.0E-8) then return "H20 differs: " & Name; end if;
+                  if not Hom_Close (B (7), W (7), 1.0E-8) then return "H21 differs: " & Name; end if;
+                  if abs (Long_Float (R.Correlation) - Rho) > 1.0E-6 then
+                     return "correlation differs: " & Name;
+                  end if;
+               end;
+            else
+               declare
+                  Accepted : Boolean := True;
+               begin
+                  begin
+                     declare
+                        Unused : constant ECC_Homography_Result :=
+                          Estimate_ECC_Homography (Pair.Template, Pair.Moving, Options);
+                     begin
+                        null;
+                     end;
+                  exception
+                     when OpenCV.OpenCV_Error => Accepted := False;
+                  end;
+                  if Accepted then return "binding succeeded where native raised: " & Name; end if;
+                  Raised := Raised + 1;
+               end;
+            end if;
+         end;
+      end loop;
+      return "";
+   exception
+      when others => return "oracle parse error";
+   end Verify_Hom_Oracle;
+
+   procedure ECC_Homography_Direct_Oracle (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Succeeded, Raised : Natural;
+      Defect : constant String := Verify_Hom_Oracle (Hom_Oracle_Path, Succeeded, Raised);
+   begin
+      Assert (Defect = "", "homography oracle: " & Defect);
+      Assert (Succeeded > 0 and then Raised > 0, "homography oracle did not cover both outcomes");
+      Assert (Succeeded + Raised = Expected_Hom_Oracle_Fixtures, "homography oracle outcome accounting");
+   end ECC_Homography_Direct_Oracle;
+
+   function Hom_With_Token
+     (Lines : Hom_Line_Array; Line_Index, Token_Index : Positive; Value : String) return Hom_Line_Array
+   is
+      Result : Hom_Line_Array := Lines;
+      Tok    : Hom_Token_Array;
+      TC     : Natural;
+      Text   : Ada.Strings.Unbounded.Unbounded_String;
+   begin
+      Hom_Split (Ada.Strings.Unbounded.To_String (Lines (Line_Index)), Tok, TC);
+      Tok (Token_Index) := Ada.Strings.Unbounded.To_Unbounded_String (Value);
+      for K in 1 .. TC loop
+         if K > 1 then Ada.Strings.Unbounded.Append (Text, " "); end if;
+         Ada.Strings.Unbounded.Append (Text, Tok (K));
+      end loop;
+      Result (Line_Index) := Text;
+      return Result;
+   end Hom_With_Token;
+
+   function Hom_Swap_Tokens
+     (Lines : Hom_Line_Array; Line_Index, A, B : Positive) return Hom_Line_Array
+   is
+      Tok : Hom_Token_Array;
+      TC  : Natural;
+   begin
+      Hom_Split (Ada.Strings.Unbounded.To_String (Lines (Line_Index)), Tok, TC);
+      return Hom_With_Token
+        (Hom_With_Token (Lines, Line_Index, A, Hom_Tok (Tok, B)), Line_Index, B, Hom_Tok (Tok, A));
+   end Hom_Swap_Tokens;
+
+   --  Fixture line index in the file: 2 header lines, then fixtures in table order.
+   function Hom_Line_Of (Name : String) return Positive is
+   begin
+      for I in 1 .. Expected_Hom_Oracle_Fixtures loop
+         if Hom_Name (I) = Name then return I + 2; end if;
+      end loop;
+      raise Constraint_Error with "no such homography oracle fixture " & Name;
+   end Hom_Line_Of;
+
+   --  Damaged copies are verified in-process with the real verifier; the oracle generator is
+   --  never rerun, so a damaged file cannot be regenerated or skipped.
+   procedure ECC_Homography_Oracle_Integrity (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Original : constant String := Hom_Oracle_Path;
+      Scratch  : constant String := Original & ".tampered";
+      Lines    : Hom_Line_Array;
+      Count    : Natural;
+      Succeeded, Raised : Natural;
+
+      procedure Expect_Rejected (Label, Fragment : String; Edited : Hom_Line_Array; Edited_Count : Natural) is
+      begin
+         Hom_Write_Lines (Scratch, Edited, Edited_Count);
+         declare
+            Defect : constant String := Verify_Hom_Oracle (Scratch, Succeeded, Raised);
+         begin
+            Assert (Defect /= "", "tampered homography oracle accepted: " & Label);
+            Assert (Ada.Strings.Fixed.Index (Defect, Fragment) > 0,
+                    "tampered homography oracle (" & Label & ") rejected for the wrong reason: " & Defect);
+         end;
+      end Expect_Rejected;
+
+      function Value_Of (Line_Index, Token_Index : Positive) return Long_Float is
+         Tok : Hom_Token_Array;
+         TC  : Natural;
+      begin
+         Hom_Split (Ada.Strings.Unbounded.To_String (Lines (Line_Index)), Tok, TC);
+         return Long_Float'Value (Hom_Tok (Tok, Token_Index));
+      end Value_Of;
+   begin
+      Hom_Read_Lines (Original, Lines, Count);
+      Assert (Count = Expected_Hom_Oracle_Fixtures + 3, "homography oracle line count");
+      Assert (Verify_Hom_Oracle (Original, Succeeded, Raised) = "", "pristine homography oracle rejected");
+      Assert (Verify_Hom_Oracle (Original & ".does-not-exist", Succeeded, Raised) = "oracle missing or unreadable",
+              "missing homography oracle accepted");
+      Expect_Rejected ("empty", "empty", Lines, 0);
+      Expect_Rejected ("truncated header", "truncated", Lines, 2);
+      Expect_Rejected ("truncated final record", "truncated", Lines, Count - 1);
+      Expect_Rejected ("truncated mid-record", "truncated", Lines, Count - 5);
+      Expect_Rejected ("wrong magic", "format version", Hom_With_Token (Lines, 1, 1, "ecc-affine-oracle"), Count);
+      Expect_Rejected ("wrong format version", "format version", Hom_With_Token (Lines, 1, 2, "2"), Count);
+      Expect_Rejected ("wrong OpenCV version", "OpenCV version", Hom_With_Token (Lines, 2, 2, "0.0.0"), Count);
+      Expect_Rejected ("wrong declared count", "record count", Hom_With_Token (Lines, Count, 2, "36"), Count);
+      declare
+         Removed : Hom_Line_Array := Lines;
+      begin
+         for I in Hom_Line_Of ("it3") .. Count - 1 loop
+            Removed (I) := Lines (I + 1);
+         end loop;
+         Expect_Rejected ("dropped fixture", "record count", Removed, Count - 1);
+      end;
+      Expect_Rejected ("renamed fixture", "fixture identity",
+                       Hom_With_Token (Lines, Hom_Line_Of ("rot-persp"), 2, "rot-perspX"), Count);
+      Expect_Rejected ("altered template checksum", "checksum",
+                       Hom_With_Token (Lines, Hom_Line_Of ("rot-persp"), 17, "1"), Count);
+      Expect_Rejected ("altered moving checksum", "checksum",
+                       Hom_With_Token (Lines, Hom_Line_Of ("h20-pos"), 18, "1"), Count);
+      Assert (abs (Value_Of (Hom_Line_Of ("persp-mild"), 8) - Value_Of (Hom_Line_Of ("persp-mild"), 12)) > 0.5
+              and then abs (Value_Of (Hom_Line_Of ("persp-mild"), 11)
+                            - Value_Of (Hom_Line_Of ("persp-mild"), 13)) > 0.1,
+              "swap fixtures must have distinguishable H02/H20 and H12/H21");
+      Expect_Rejected ("swapped H02 and H20", "differs",
+                       Hom_Swap_Tokens (Lines, Hom_Line_Of ("persp-mild"), 8, 12), Count);
+      Expect_Rejected ("swapped H12 and H21", "differs",
+                       Hom_Swap_Tokens (Lines, Hom_Line_Of ("persp-mild"), 11, 13), Count);
+      Expect_Rejected ("modified H20", "H20 differs",
+                       Hom_With_Token (Lines, Hom_Line_Of ("h20-pos"), 12, "-0.0002"), Count);
+      Expect_Rejected ("modified H21", "H21 differs",
+                       Hom_With_Token (Lines, Hom_Line_Of ("h21-pos"), 13, "0.0"), Count);
+      Expect_Rejected ("modified H22", "H22", Hom_With_Token (Lines, Hom_Line_Of ("rot-persp"), 14, "2.0"), Count);
+      Expect_Rejected ("altered correlation", "correlation differs",
+                       Hom_With_Token (Lines, Hom_Line_Of ("rot-persp"), 15, "0.5"), Count);
+      Expect_Rejected ("success recorded as exception", "binding succeeded where native raised",
+                       Hom_With_Token (Lines, Hom_Line_Of ("identity"), 5, "EXC"), Count);
+      Expect_Rejected ("exception recorded as success", "binding raised where native succeeded",
+                       Hom_With_Token (Lines, Hom_Line_Of ("reflect-x"), 5, "OK"), Count);
+      Expect_Rejected ("unknown outcome token", "outcome token",
+                       Hom_With_Token (Lines, Hom_Line_Of ("identity"), 5, "MAYBE"), Count);
+      Ada.Directories.Delete_File (Scratch);
+   end ECC_Homography_Oracle_Integrity;
+
+   procedure ECC_Homography_Other_Models_Unchanged (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Shift : constant ECC_Pair := Euc_Pair (0.0, 2.0, 1.0);
+      Rigid : constant ECC_Pair := Euc_Pair (3.0, 2.0, 1.0);
+      Trans : constant ECC_Translation_Result := Estimate_ECC_Translation (Shift.Template, Shift.Moving);
+      Euc   : constant ECC_Euclidean_Result := Estimate_ECC_Euclidean (Rigid.Template, Rigid.Moving);
+      Aff   : constant ECC_Affine_Result := Estimate_ECC_Affine (Shift.Template, Shift.Moving);
+      Hom   : constant ECC_Homography_Result := Estimate_ECC_Homography (Shift.Template, Shift.Moving);
+   begin
+      Assert (ECC_Near (Trans, 2, 1), "translation ECC regression");
+      Assert (Euc_Near (Euc, 3.0, 2.0, 1.0), "Euclidean ECC regression");
+      Assert (Aff_Near (Aff, 1.0, 0.0, 0.0, 1.0, 2.0, 1.0), "affine ECC regression");
+      Assert (Hom_Near (Hom, K_T21), "homography agrees with the pure shift");
+      Assert (abs (LF (Hom.Warp.H02) - LF (Aff.Warp.M02)) < 0.1
+              and then abs (LF (Hom.Warp.H12) - LF (Aff.Warp.M12)) < 0.1,
+              "homography and affine models disagree on a pure shift");
+   end ECC_Homography_Other_Models_Unchanged;
+
    function Suite return AUnit.Test_Suites.Access_Test_Suite is
       Result : constant AUnit.Test_Suites.Access_Test_Suite := AUnit.Test_Suites.New_Suite;
    begin
@@ -7125,6 +8048,19 @@ package body Video_Tests is
       Result.Add_Test (Caller.Create ("ECC_Affine_Seeded_Nonconvergence", ECC_Affine_Seeded_Nonconvergence'Access));
       Result.Add_Test (Caller.Create ("ECC_Affine_Seeded_Direct_Oracle", ECC_Affine_Seeded_Direct_Oracle'Access));
       Result.Add_Test (Caller.Create ("ECC_Affine_Seeded_Oracle_Integrity", ECC_Affine_Seeded_Oracle_Integrity'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Defaults", ECC_Homography_Defaults'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Identity_And_Translation", ECC_Homography_Identity_And_Translation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Rotation_Scale_Shear", ECC_Homography_Rotation_Scale_Shear'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Projective_Coefficients", ECC_Homography_Projective_Coefficients'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Versus_Affine", ECC_Homography_Versus_Affine'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Inverse_Warp", ECC_Homography_Inverse_Warp'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Options_And_Repeatability", ECC_Homography_Options_And_Repeatability'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Regions_Lifetime", ECC_Homography_Regions_Lifetime'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Other_Models_Unchanged", ECC_Homography_Other_Models_Unchanged'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Validation", ECC_Homography_Validation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Nonconvergence", ECC_Homography_Nonconvergence'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Direct_Oracle", ECC_Homography_Direct_Oracle'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Oracle_Integrity", ECC_Homography_Oracle_Integrity'Access));
       return Result;
    end Suite;
 end Video_Tests;

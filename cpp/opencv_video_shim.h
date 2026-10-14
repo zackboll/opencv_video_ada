@@ -296,6 +296,74 @@ opencv_video_status opencv_video_estimate_ecc_affine(
     double epsilon,
     opencv_video_ecc_affine_result *result);
 
+/* ECC eight-parameter homography alignment (Task 016): cv::findTransformECC with
+ * MOTION_HOMOGRAPHY, a private identity 3x3 Float32 warp, COUNT|EPS criteria, no mask,
+ * Gaussian size 5. The native warp maps template coordinates to moving coordinates
+ * (X right, Y down) with homogeneous division:
+ *   d = h20 * x + h21 * y + h22
+ *   moving_x = (h00 * x + h01 * y + h02) / d
+ *   moving_y = (h10 * x + h11 * y + h12) / d
+ * The nine row-major native storage-order coefficients are returned (not the native
+ * update-vector order); apply the same matrix with WARP_INVERSE_MAP to resample. The
+ * native update never writes h22, so it is exactly 1 for this identity-initialized call;
+ * a different h22 is reported as OPENCV_VIDEO_ERROR_OPENCV. Input and option envelope is
+ * identical to opencv_video_estimate_ecc_translation. All nine coefficients and the
+ * correlation must be finite. No determinant, scale, perspective or conditioning policy is
+ * applied, and mapped points with d == 0 are not detected (docs/ecc-homography-source-contract.md).
+ * *result is written only after every native and validation step succeeds; on any
+ * failure it is left unchanged. Native nonconvergence is OPENCV_VIDEO_ERROR_OPENCV.
+ * Layout on qualified targets: offsets 0,4,...,32 for h00..h22, correlation 40; size 48;
+ * alignment 8 (four padding bytes before correlation). */
+typedef struct {
+    float h00;
+    float h01;
+    float h02;
+    float h10;
+    float h11;
+    float h12;
+    float h20;
+    float h21;
+    float h22;
+    double correlation;
+} opencv_video_ecc_homography_result;
+
+#if defined(__cplusplus)
+static_assert(sizeof(opencv_video_ecc_homography_result) == 48 &&
+              alignof(opencv_video_ecc_homography_result) == 8 &&
+              offsetof(opencv_video_ecc_homography_result, h00) == 0 &&
+              offsetof(opencv_video_ecc_homography_result, h01) == 4 &&
+              offsetof(opencv_video_ecc_homography_result, h02) == 8 &&
+              offsetof(opencv_video_ecc_homography_result, h10) == 12 &&
+              offsetof(opencv_video_ecc_homography_result, h11) == 16 &&
+              offsetof(opencv_video_ecc_homography_result, h12) == 20 &&
+              offsetof(opencv_video_ecc_homography_result, h20) == 24 &&
+              offsetof(opencv_video_ecc_homography_result, h21) == 28 &&
+              offsetof(opencv_video_ecc_homography_result, h22) == 32 &&
+              offsetof(opencv_video_ecc_homography_result, correlation) == 40,
+              "opencv_video_ecc_homography_result layout");
+#else
+_Static_assert(sizeof(opencv_video_ecc_homography_result) == 48 &&
+               _Alignof(opencv_video_ecc_homography_result) == 8 &&
+               offsetof(opencv_video_ecc_homography_result, h00) == 0 &&
+               offsetof(opencv_video_ecc_homography_result, h01) == 4 &&
+               offsetof(opencv_video_ecc_homography_result, h02) == 8 &&
+               offsetof(opencv_video_ecc_homography_result, h10) == 12 &&
+               offsetof(opencv_video_ecc_homography_result, h11) == 16 &&
+               offsetof(opencv_video_ecc_homography_result, h12) == 20 &&
+               offsetof(opencv_video_ecc_homography_result, h20) == 24 &&
+               offsetof(opencv_video_ecc_homography_result, h21) == 28 &&
+               offsetof(opencv_video_ecc_homography_result, h22) == 32 &&
+               offsetof(opencv_video_ecc_homography_result, correlation) == 40,
+               "opencv_video_ecc_homography_result layout");
+#endif
+
+opencv_video_status opencv_video_estimate_ecc_homography(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations,
+    double epsilon,
+    opencv_video_ecc_homography_result *result);
+
 /* Caller-seeded affine ECC (Task 015). Identical to opencv_video_estimate_ecc_affine
  * except the private 2x3 Float32 warp starts from the six row-major coefficients
  * (native matrix storage order, NOT the native update-vector order). Each coefficient

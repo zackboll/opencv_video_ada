@@ -1,5 +1,70 @@
 # OpenCV Video for Ada
 
+### ECC eight-parameter homography alignment (Task 016)
+
+```ada
+Alignment : constant ECC_Homography_Result :=
+  OpenCV.Video.Estimate_ECC_Homography
+    (Template_Image => Previous_Image,
+     Moving_Image   => Current_Image);
+```
+
+This calls native `cv::findTransformECC` with these settings:
+* `MOTION_HOMOGRAPHY`;
+* a privately identity-initialized 3x3 Float32 warp;
+* `COUNT | EPS` termination;
+* no mask;
+* Gaussian size 5.
+
+`ECC_Homography_Options` is a subtype of `ECC_Translation_Options`. The returned matrix maps
+**template coordinates into moving coordinates**, in pixels, with X right and Y down:
+
+```text
+[ H00 H01 H02 ]      D        = H20*x + H21*y + H22
+[ H10 H11 H12 ]      moving_x = (H00*x + H01*y + H02) / D
+[ H20 H21 H22 ]      moving_y = (H10*x + H11*y + H12) / D
+```
+
+* **Eight parameters, nine coefficients.** Native ECC optimizes eight parameters and never writes
+  H22, so H22 is exactly 1 for this identity-initialized call. Any other value is reported as
+  `OpenCV_Error`. The coefficients are returned in row-major storage order, not the native
+  update-vector order.
+* **Projective denominator.** The mapping is undefined where `D = 0` and extreme near it. The
+  binding does not resample, so it neither detects nor alters such points.
+* **Resampling.** To resample the moving image into the template frame, apply the same matrix with
+  `WARP_INVERSE_MAP`. The binding never inverts, transposes, normalizes or decomposes it.
+* **Correlation.** This is the native value, computed before the final native update. It is not a
+  confidence score.
+* **Errors and wrong results.** Native nonconvergence raises `OpenCV_Error`, for example on constant
+  images, uncorrelated noise, strong perspective, a near-zero or zero-crossing denominator, a large
+  translation or a reflection. A finite result can still be wrong: noise against a texture
+  (all versions), and low-gradient or ill-conditioned pairs on 4.6.0 and 4.10.0. No correlation threshold
+  hides these cases, and a finite result does not guarantee correct registration.
+* **Small basin.** From identity, convergence covers about 2% scale or shear, 2 degrees of rotation,
+  a few pixels of translation and perspective terms of about `2e-4` at 128 px.
+* **Homography versus affine.** On five measured perspective fixtures, the homography interior
+  residual (0.35-0.36 gray levels) was 2.2-4.2 times lower than affine ECC's (0.77-1.49), on 4.10.0.
+  Homography does not always outperform affine; on pure affine motion the two are equal.
+* **Limits.** These are the Task 011 envelope: 2-D UInt8 C1, 32 .. 16,384 per side, at most `2**24`
+  pixels, 1 .. 100 iterations, epsilon 1e-8 .. 0.1. The measured native peak at `2**24` pixels was
+  about 1.9 GiB on 4.10.0, including a 512 MiB Jacobian. This is a measurement, not a limit, and
+  validation does not guarantee the memory is available.
+* **Result value.** The result is a plain value with no native ownership. Regions are accepted, and
+  inputs are never modified. It is an image-alignment matrix, not a camera pose, attitude,
+  geographic mapping or navigation estimate.
+
+The native safety gate (four-version source review of the unguarded projective-denominator path)
+was established before implementation. Upstream OpenCV is not sanitizer-instrumented by these
+tests.
+
+Production ABI: 22 exports. The new export is `opencv_video_estimate_ecc_homography`, with a 48-byte,
+8-aligned result. AUnit has 176 registrations. See:
+* the [task note](docs/tasks/016-ecc-homography.md);
+* the [source contract](docs/ecc-homography-source-contract.md);
+* the [qualification](docs/task016-qualification.md).
+
+The new code has not yet run on Windows; that happens in the push-to-main Windows workflow.
+
 ### Caller-seeded ECC affine alignment (Task 015)
 
 ```ada
@@ -651,8 +716,9 @@ The first slice does not bind:
 
 - forward/backward prebuilt-pyramid composition;
 - DIS dense optical flow and Farneback options beyond the Task 009/010 subset (Gaussian, UMat);
-- ECC homography/perspective, masked and multiscale registration
-  (translation, Euclidean, seeded Euclidean, identity-initialized and seeded affine ECC are bound);
+- seeded ECC homography, masked and multiscale registration (translation, Euclidean, seeded
+  Euclidean, identity-initialized and seeded affine, and identity-initialized homography ECC are
+  bound);
 - KalmanFilter;
 - CamShift / meanShift;
 - UMat/OpenCL overloads;

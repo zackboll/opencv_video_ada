@@ -87,6 +87,50 @@ package body ECC_Fixtures is
       end return;
    end Affine_Texture;
 
+   function Homography_Texture
+     (Rows, Columns : Positive; H : Homography_Matrix) return OpenCV.Core.Mat
+   is
+      C00 : constant Long_Float := H (4) * H (8) - H (5) * H (7);
+      C01 : constant Long_Float := H (5) * H (6) - H (3) * H (8);
+      C02 : constant Long_Float := H (3) * H (7) - H (4) * H (6);
+      Det : constant Long_Float := H (0) * C00 + H (1) * C01 + H (2) * C02;
+   begin
+      if not (abs Det > 1.0E-12) then
+         raise Constraint_Error with "singular homography";
+      end if;
+      declare
+         I0 : constant Long_Float := C00 / Det;
+         I1 : constant Long_Float := (H (2) * H (7) - H (1) * H (8)) / Det;
+         I2 : constant Long_Float := (H (1) * H (5) - H (2) * H (4)) / Det;
+         I3 : constant Long_Float := C01 / Det;
+         I4 : constant Long_Float := (H (0) * H (8) - H (2) * H (6)) / Det;
+         I5 : constant Long_Float := (H (2) * H (3) - H (0) * H (5)) / Det;
+         I6 : constant Long_Float := C02 / Det;
+         I7 : constant Long_Float := (H (1) * H (6) - H (0) * H (7)) / Det;
+         I8 : constant Long_Float := (H (0) * H (4) - H (1) * H (3)) / Det;
+      begin
+         return Result : OpenCV.Core.Mat := Blank (Rows, Columns) do
+            for R in 0 .. Rows - 1 loop
+               for Col in 0 .. Columns - 1 loop
+                  declare
+                     U : constant Long_Float := Long_Float (Col);
+                     V : constant Long_Float := Long_Float (R);
+                     D : constant Long_Float := I6 * U + I7 * V + I8;
+                  begin
+                     if D = 0.0 then
+                        raise Constraint_Error with "zero projective denominator";
+                     end if;
+                     OpenCV.Core.UInt8_Access.Set
+                       (Result, R, Col,
+                        Saturate (Signal ((I0 * U + I1 * V + I2) / D,
+                                          (I3 * U + I4 * V + I5) / D)));
+                  end;
+               end loop;
+            end loop;
+         end return;
+      end;
+   end Homography_Texture;
+
    function Affine (Source : OpenCV.Core.Mat; Num, Den, Beta : Integer) return OpenCV.Core.Mat is
    begin
       return Result : OpenCV.Core.Mat := Blank (Source.Rows, Source.Columns) do

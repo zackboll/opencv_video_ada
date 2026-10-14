@@ -193,6 +193,28 @@ package OpenCV.Video.Internal.C_API is
       Epsilon                      : Interfaces.C.double;
       Result                       : access ECC_Affine_Result) return Status
      with Import, Convention => C, External_Name => "opencv_video_estimate_ecc_affine";
+   --  Mirrors opencv_video_ecc_homography_result exactly (nine float, double):
+   --  offsets 0, 4, ..., 32; four padding bytes; Correlation at 40; size 48.
+   type ECC_Homography_Result is record
+      H00         : Interfaces.C.C_float := 1.0;
+      H01         : Interfaces.C.C_float := 0.0;
+      H02         : Interfaces.C.C_float := 0.0;
+      H10         : Interfaces.C.C_float := 0.0;
+      H11         : Interfaces.C.C_float := 1.0;
+      H12         : Interfaces.C.C_float := 0.0;
+      H20         : Interfaces.C.C_float := 0.0;
+      H21         : Interfaces.C.C_float := 0.0;
+      H22         : Interfaces.C.C_float := 1.0;
+      Correlation : Interfaces.C.double := 0.0;
+   end record
+     with Convention => C;
+
+   function Estimate_ECC_Homography
+     (Template_Image, Moving_Image : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Maximum_Iterations           : Interfaces.Integer_32;
+      Epsilon                      : Interfaces.C.double;
+      Result                       : access ECC_Homography_Result) return Status
+     with Import, Convention => C, External_Name => "opencv_video_estimate_ecc_homography";
    function Estimate_ECC_Affine_Seeded
      (Template_Image, Moving_Image : OpenCV.Core.Module_Interop.Input_Mat_Handle;
       Maximum_Iterations           : Interfaces.Integer_32;

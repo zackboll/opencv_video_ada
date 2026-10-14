@@ -7,6 +7,7 @@
 #include <opencv2/core.hpp>
 #include <cmath>
 #include <cstdint>
+#include <stdexcept>
 
 namespace ecc_fixture {
 
@@ -59,6 +60,37 @@ inline cv::Mat affine_texture(int rows, int cols, double a, double b, double c, 
         for (int col = 0; col < cols; ++col) {
             const double u = col - tx, v = r - ty;
             m.at<uint8_t>(r, col) = cv::saturate_cast<uint8_t>(signal(ia * u + ib * v, ic * u + id * v));
+        }
+    return m;
+}
+
+// Task 016 homography fixture. The native warp H (row-major h[0..8]) maps template
+// coordinates to moving coordinates with homogeneous division:
+//   moving(H p) == template(p)   i.e.   moving(p) = signal(H^-1 p).
+// Evaluated analytically (no image resampling) with an explicit adjugate inverse and
+// explicit denominator handling so Ada can reproduce it. H must be invertible and the
+// inverse denominator must be nonzero at every pixel; otherwise std::invalid_argument is
+// thrown (no pixel is invented). Expression order is mirrored in ECC_Fixtures.Homography_Texture.
+inline cv::Mat homography_texture(int rows, int cols, const double *h) {
+    const double c00 = h[4] * h[8] - h[5] * h[7];
+    const double c01 = h[5] * h[6] - h[3] * h[8];
+    const double c02 = h[3] * h[7] - h[4] * h[6];
+    const double det = h[0] * c00 + h[1] * c01 + h[2] * c02;
+    if (!(std::fabs(det) > 1e-12)) throw std::invalid_argument("singular homography");
+    const double i0 = c00 / det, i1 = (h[2] * h[7] - h[1] * h[8]) / det,
+                 i2 = (h[1] * h[5] - h[2] * h[4]) / det;
+    const double i3 = c01 / det, i4 = (h[0] * h[8] - h[2] * h[6]) / det,
+                 i5 = (h[2] * h[3] - h[0] * h[5]) / det;
+    const double i6 = c02 / det, i7 = (h[1] * h[6] - h[0] * h[7]) / det,
+                 i8 = (h[0] * h[4] - h[1] * h[3]) / det;
+    cv::Mat m(rows, cols, CV_8UC1);
+    for (int r = 0; r < rows; ++r)
+        for (int col = 0; col < cols; ++col) {
+            const double u = col, v = r;
+            const double d = i6 * u + i7 * v + i8;
+            if (d == 0.0) throw std::invalid_argument("zero projective denominator");
+            m.at<uint8_t>(r, col) = cv::saturate_cast<uint8_t>(
+                signal((i0 * u + i1 * v + i2) / d, (i3 * u + i4 * v + i5) / d));
         }
     return m;
 }

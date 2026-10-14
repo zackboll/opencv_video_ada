@@ -25,6 +25,11 @@ struct opencv_video_pyramid_handle {
 void opencv_video_test_fault(int);
 void opencv_video_test_corrupt_flow(float *values, size_t count);
 void opencv_video_test_corrupt_ecc(float *warp, double *correlation);
+// Task 016 homography-only hooks. The first receives the private 3x3 Float32 warp (nine valid
+// positions); the second may replace the private warp through ordinary cv::Mat operations
+// to exercise the post-native schema/storage-identity checks without corrupting Mat memory.
+void opencv_video_test_corrupt_homography(float *warp, double *correlation);
+void opencv_video_test_homography_schema(cv::Mat &warp);
 #endif
 
 namespace {
@@ -964,6 +969,77 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_affine(
     opencv_video_ecc_affine_result *result) {
     return ecc_affine_entry(template_image, moving_image, maximum_iterations, epsilon,
                             nullptr, result);
+}
+
+extern "C" opencv_video_status opencv_video_estimate_ecc_homography(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations, double epsilon,
+    opencv_video_ecc_homography_result *result) {
+    try {
+        clear_error();
+        if (result == nullptr)
+            return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "Null ECC result");
+        const cv::Mat *tmpl = nullptr;
+        const cv::Mat *moving = nullptr;
+        auto status = validate_ecc_inputs(template_image, moving_image, maximum_iterations,
+                                          epsilon, &tmpl, &moving);
+        if (status != OPENCV_VIDEO_OK) return status;
+
+        // Private warp: native code mutates it; the caller's result is untouched.
+        cv::Mat warp = cv::Mat::eye(3, 3, CV_32F);
+        if (warp.dims != 2 || warp.rows != 3 || warp.cols != 3 || warp.type() != CV_32FC1 ||
+            !warp.isContinuous())
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC private warp has an unexpected schema");
+        const auto *storage = warp.data;
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+        opencv_video_test_fault(1);
+#endif
+        double correlation = cv::findTransformECC(
+            *tmpl, *moving, warp, cv::MOTION_HOMOGRAPHY,
+            cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS,
+                             maximum_iterations, epsilon),
+            cv::noArray(), 5);
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+        opencv_video_test_fault(2);
+        opencv_video_test_corrupt_homography(warp.ptr<float>(), &correlation);
+        opencv_video_test_homography_schema(warp);
+#endif
+        if (warp.data != storage || warp.dims != 2 || warp.rows != 3 || warp.cols != 3 ||
+            warp.type() != CV_32FC1 || !warp.isContinuous())
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "OpenCV returned an unexpected ECC warp schema");
+        const float *w = warp.ptr<float>();
+        for (int i = 0; i < 9; ++i)
+            if (!std::isfinite(w[i]))
+                return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite warp entry");
+        if (!std::isfinite(correlation))
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite correlation");
+        // The native homography update never writes H22 (docs/ecc-homography-source-contract.md).
+        if (w[8] != 1.0f)
+            return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC homography H22 is not exactly 1");
+
+        opencv_video_ecc_homography_result computed;
+        computed.h00 = w[0];
+        computed.h01 = w[1];
+        computed.h02 = w[2];
+        computed.h10 = w[3];
+        computed.h11 = w[4];
+        computed.h12 = w[5];
+        computed.h20 = w[6];
+        computed.h21 = w[7];
+        computed.h22 = w[8];
+        computed.correlation = correlation;
+        *result = computed;
+        clear_error();
+        return OPENCV_VIDEO_OK;
+    } catch (const cv::Exception &e) {
+        return fail(OPENCV_VIDEO_ERROR_OPENCV, e.what());
+    } catch (const std::exception &e) {
+        return fail(OPENCV_VIDEO_ERROR_STANDARD, e.what());
+    } catch (...) {
+        return fail(OPENCV_VIDEO_ERROR_UNKNOWN, "Unknown ECC exception");
+    }
 }
 
 extern "C" opencv_video_status opencv_video_estimate_ecc_affine_seeded(

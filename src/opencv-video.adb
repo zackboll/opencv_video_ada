@@ -1112,6 +1112,49 @@ package body OpenCV.Video is
             M12 => OpenCV.Float32_Value (Native.M12)),
          Correlation => OpenCV.Float64_Value (Native.Correlation));
    end Estimate_ECC_Affine;
+
+   function Estimate_ECC_Homography
+     (Template_Image : OpenCV.Core.Mat;
+      Moving_Image   : OpenCV.Core.Mat;
+      Options        : ECC_Homography_Options := (others => <>))
+      return ECC_Homography_Result
+   is
+      Native : aliased C.ECC_Homography_Result;
+      Code   : C.Status := C.Success;
+   begin
+      Validate_ECC_Arguments (Template_Image, Moving_Image, Options);
+
+      declare
+         procedure Template_Callback (Template_Handle : Bridge.Input_Mat_Handle) is
+            procedure Moving_Callback (Moving_Handle : Bridge.Input_Mat_Handle) is
+            begin
+               Code := C.Estimate_ECC_Homography
+                 (Template_Handle, Moving_Handle,
+                  Interfaces.Integer_32 (Options.Maximum_Iterations),
+                  Interfaces.C.double (Options.Epsilon),
+                  Native'Access);
+            end Moving_Callback;
+         begin
+            Bridge.With_Input_Handle (Moving_Image, Moving_Callback'Access);
+         end Template_Callback;
+      begin
+         Bridge.With_Input_Handle (Template_Image, Template_Callback'Access);
+      end;
+      C.Check (Code, "Video.Estimate_ECC_Homography");
+
+      return
+        (Warp        =>
+           (H00 => OpenCV.Float32_Value (Native.H00),
+            H01 => OpenCV.Float32_Value (Native.H01),
+            H02 => OpenCV.Float32_Value (Native.H02),
+            H10 => OpenCV.Float32_Value (Native.H10),
+            H11 => OpenCV.Float32_Value (Native.H11),
+            H12 => OpenCV.Float32_Value (Native.H12),
+            H20 => OpenCV.Float32_Value (Native.H20),
+            H21 => OpenCV.Float32_Value (Native.H21),
+            H22 => OpenCV.Float32_Value (Native.H22)),
+         Correlation => OpenCV.Float64_Value (Native.Correlation));
+   end Estimate_ECC_Homography;
    function Estimate_ECC_Affine
      (Template_Image    : OpenCV.Core.Mat;
       Moving_Image      : OpenCV.Core.Mat;

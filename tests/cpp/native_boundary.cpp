@@ -14,6 +14,8 @@
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <type_traits>
+#include <utility>
 
 static_assert(sizeof(opencv_video_status) == 4, "status ABI width");
 static_assert(sizeof(float) == 4 && sizeof(double) == 8, "floating ABI widths");
@@ -81,6 +83,81 @@ void opencv_video_test_corrupt_ecc(float *warp, double *correlation) {
                  warp[3] = 1.0e-30f; warp[4] = -2.0e38f; warp[5] = 3.0e38f; break;
         default: break;
     }
+}
+// Task 016 homography-only post-native hooks (test builds only). The homography export calls
+// these instead of opencv_video_test_corrupt_ecc, so the generic 2x3 modes above are untouched
+// and no generic mode can write warp[6..8]. `warp` is the private 3x3 Float32 matrix.
+//  1 H00=NaN  2 H01=+Inf  3 H02=-Inf  4 H10=NaN  5 H11=+Inf  6 H12=-Inf  7 H20=NaN  8 H21=+Inf
+//  9 H22=NaN 10 H22=0    11 H22=1.01 12 corr=NaN 13 corr=+Inf 14 corr=-Inf
+// 15 H20=-Inf 16 H21=NaN 17 H22=+Inf 18 H22=nextafter(1,2) 19 H22=nextafter(1,0) 20 H22=-1
+// 30..34 replace the matrix with FINITE projective matrices whose H22 is exactly 1.
+int hom_corrupt_mode = 0;
+const float kHomInjected[5][9] = {
+    {1.0f, 0.0f, 2.0f, 0.0f, 1.0f, 1.0f, 3.0e-4f, 0.0f, 1.0f},          // 30 H20 only
+    {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, -4.0e-4f, 1.0f},         // 31 H21 only
+    {0.98f, 0.01f, -1.5f, -0.02f, 1.03f, 0.75f, 2.5e-4f, -1.5e-4f, 1.0f}, // 32 both
+    {-1.7f, 0.9f, 12.0f, 2.3f, 0.05f, -8.0f, 0.01f, 0.02f, 1.0f},       // 33 unusual linear part
+    {3.0e38f, -3.0e38f, 1.0e30f, 1.0e-30f, -2.0e38f, 3.0e38f, 5.0f, -7.0f, 1.0f},  // 34 extreme
+};
+void opencv_video_test_corrupt_homography(float *warp, double *correlation) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    switch (hom_corrupt_mode) {
+        case 1: warp[0] = nan; break;
+        case 2: warp[1] = inf; break;
+        case 3: warp[2] = -inf; break;
+        case 4: warp[3] = nan; break;
+        case 5: warp[4] = inf; break;
+        case 6: warp[5] = -inf; break;
+        case 7: warp[6] = nan; break;
+        case 8: warp[7] = inf; break;
+        case 9: warp[8] = nan; break;
+        case 10: warp[8] = 0.0f; break;
+        case 11: warp[8] = 1.01f; break;
+        case 12: *correlation = std::numeric_limits<double>::quiet_NaN(); break;
+        case 13: *correlation = std::numeric_limits<double>::infinity(); break;
+        case 14: *correlation = -std::numeric_limits<double>::infinity(); break;
+        case 15: warp[6] = -inf; break;
+        case 16: warp[7] = nan; break;
+        case 17: warp[8] = inf; break;
+        case 18: warp[8] = std::nextafter(1.0f, 2.0f); break;
+        case 19: warp[8] = std::nextafter(1.0f, 0.0f); break;
+        case 20: warp[8] = -1.0f; break;
+        case 30: case 31: case 32: case 33: case 34:
+            std::memcpy(warp, kHomInjected[hom_corrupt_mode - 30], 9 * sizeof(float)); break;
+        default: break;
+    }
+}
+// Schema mutations through ordinary, well-defined cv::Mat operations only. hom_schema_keep
+// retains the original private allocation so headers that alias it stay valid; it is released
+// by the test after the call. 1 fresh 3x3 allocation (storage identity), 2 reshape to 1x9 (same
+// storage, rows/cols), 3 reshape to 9x1, 4 CV_32SC1 header over the same storage (type),
+// 5 non-continuous 3x3 Float32 view of a fresh 3x4 allocation (a non-continuous header over the
+// original 36 bytes would need a >= 16-byte row step and read past the allocation, so continuity
+// cannot be isolated from storage identity safely), 6 3-D 1x3x3 header over the same storage
+// (dims), 7 fresh 2x3 identity (shape and storage), 8 fresh 3x3 CV_64F identity (type, storage).
+// hom_schema_applied counts hooks that completed, so a rejection cannot come from the hook throwing.
+int hom_schema_mode = 0;
+int hom_schema_applied = 0;
+cv::Mat hom_schema_keep;
+cv::Mat hom_schema_wide;
+void opencv_video_test_homography_schema(cv::Mat &warp) {
+    if (hom_schema_mode == 0) return;
+    hom_schema_keep = warp;
+    unsigned char *data = hom_schema_keep.data;
+    switch (hom_schema_mode) {
+        case 1: warp = hom_schema_keep.clone(); break;
+        case 2: warp = hom_schema_keep.reshape(1, 1); break;
+        case 3: warp = hom_schema_keep.reshape(1, 9); break;
+        case 4: warp = cv::Mat(3, 3, CV_32SC1, data); break;
+        case 5: hom_schema_wide = cv::Mat::zeros(3, 4, CV_32F);
+                warp = hom_schema_wide.colRange(0, 3); break;
+        case 6: { const int sizes[3] = {1, 3, 3}; warp = cv::Mat(3, sizes, CV_32FC1, data); break; }
+        case 7: warp = cv::Mat::eye(2, 3, CV_32F); break;
+        case 8: warp = cv::Mat::eye(3, 3, CV_64F); break;
+        default: return;
+    }
+    ++hom_schema_applied;
 }
 int corrupt_mode = 0;  // 1 NaN, 2 +Inf, 3 -Inf written into one private component
 void opencv_video_test_corrupt_flow(float *values, size_t count) {
@@ -2463,6 +2540,511 @@ void run_ecc_affine_seeded() {
 }
 }  // namespace
 
+// ECC homography (Task 016): actual shim versus an independent direct
+// cv::findTransformECC(MOTION_HOMOGRAPHY) call, with byte-exact 48-byte failure atomicity.
+namespace {
+static_assert(sizeof(opencv_video_ecc_homography_result) == 48 &&
+              alignof(opencv_video_ecc_homography_result) == 8 &&
+              offsetof(opencv_video_ecc_homography_result, h00) == 0 &&
+              offsetof(opencv_video_ecc_homography_result, h01) == 4 &&
+              offsetof(opencv_video_ecc_homography_result, h02) == 8 &&
+              offsetof(opencv_video_ecc_homography_result, h10) == 12 &&
+              offsetof(opencv_video_ecc_homography_result, h11) == 16 &&
+              offsetof(opencv_video_ecc_homography_result, h12) == 20 &&
+              offsetof(opencv_video_ecc_homography_result, h20) == 24 &&
+              offsetof(opencv_video_ecc_homography_result, h21) == 28 &&
+              offsetof(opencv_video_ecc_homography_result, h22) == 32 &&
+              offsetof(opencv_video_ecc_homography_result, correlation) == 40,
+              "ECC homography result layout");
+static_assert(std::is_trivially_copyable<opencv_video_ecc_homography_result>::value,
+              "ECC homography result must be trivially copyable");
+
+// The whole 48-byte caller object, including the 4 padding bytes at offset 36, is filled
+// with a distinguishable pattern; failure atomicity compares every byte.
+opencv_video_ecc_homography_result hom_sentinel() {
+    opencv_video_ecc_homography_result r;
+    unsigned char *bytes = reinterpret_cast<unsigned char *>(&r);
+    for (size_t i = 0; i < sizeof r; ++i) bytes[i] = static_cast<unsigned char>(0xA5 ^ (i * 37));
+    return r;
+}
+
+void hom_unchanged(const opencv_video_ecc_homography_result &r, const char *message) {
+    const opencv_video_ecc_homography_result s = hom_sentinel();
+    check(std::memcmp(&r, &s, sizeof r) == 0, message);
+}
+
+opencv_video_status hom_call(const opencv_core_mat_handle *a, const opencv_core_mat_handle *b,
+                             opencv_video_ecc_homography_result *r, int iterations = 50,
+                             double epsilon = 1e-4) {
+    return opencv_video_estimate_ecc_homography(a, b, iterations, epsilon, r);
+}
+
+struct HomDirect {
+    bool ok;
+    float w[9];
+    double rho;
+};
+
+// Independent direct native call: own identity warp, own criteria, no Video shim code.
+HomDirect hom_direct(const cv::Mat &a, const cv::Mat &b, int iterations = 50, double epsilon = 1e-4) {
+    HomDirect d{};
+    cv::Mat warp = cv::Mat::eye(3, 3, CV_32F);
+    try {
+        d.rho = cv::findTransformECC(a, b, warp, cv::MOTION_HOMOGRAPHY,
+            cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, iterations, epsilon),
+            cv::noArray(), 5);
+        d.ok = true;
+    } catch (const cv::Exception &) {
+        d.ok = false;
+    }
+    check(warp.rows == 3 && warp.cols == 3 && warp.type() == CV_32FC1 && warp.isContinuous(),
+          "direct homography warp schema");
+    for (int i = 0; i < 9; ++i) d.w[i] = warp.ptr<float>()[i];
+    return d;
+}
+
+const float *hom_values(const opencv_video_ecc_homography_result &r, float out[9]) {
+    out[0] = r.h00; out[1] = r.h01; out[2] = r.h02;
+    out[3] = r.h10; out[4] = r.h11; out[5] = r.h12;
+    out[6] = r.h20; out[7] = r.h21; out[8] = r.h22;
+    return out;
+}
+
+// Bitwise on the same build: same library, same inputs, deterministic CPU path (measured).
+void hom_matches_direct(const opencv_video_ecc_homography_result &r, const HomDirect &d,
+                        const char *message) {
+    check(d.ok, message);
+    float got[9];
+    hom_values(r, got);
+    check(std::memcmp(got, d.w, sizeof got) == 0 &&
+          std::memcmp(&r.correlation, &d.rho, sizeof d.rho) == 0, message);
+    check(r.h22 == 1.0f && d.w[8] == 1.0f, "ECC homography H22 is not exactly 1");
+}
+
+int64_t hom_checksum(const cv::Mat &m) {
+    int64_t sum = 0;
+    for (int r = 0; r < m.rows; ++r)
+        for (int c = 0; c < m.cols; ++c)
+            sum += int64_t(m.at<uint8_t>(r, c)) * (1 + (int64_t(r) * 977 + int64_t(c) * 131) % 8191);
+    return sum;
+}
+
+// Mean absolute residual over the interior when the moving image is sampled at H p
+// (WARP_INVERSE_MAP semantics: dst(p) = moving(H p)), bilinear, homogeneous division.
+double hom_residual(const cv::Mat &tmpl, const cv::Mat &moving, const float *h) {
+    double sum = 0;
+    int count = 0;
+    for (int y = 24; y < tmpl.rows - 24; ++y)
+        for (int x = 24; x < tmpl.cols - 24; ++x) {
+            const double d = h[6] * x + h[7] * y + h[8];
+            const double mx = (h[0] * x + h[1] * y + h[2]) / d;
+            const double my = (h[3] * x + h[4] * y + h[5]) / d;
+            const int x0 = int(std::floor(mx)), y0 = int(std::floor(my));
+            if (x0 < 0 || y0 < 0 || x0 + 1 >= moving.cols || y0 + 1 >= moving.rows) return 1e9;
+            const double fx = mx - x0, fy = my - y0;
+            auto p = [&](int px, int py) { return double(moving.at<uint8_t>(py, px)); };
+            const double v = (1 - fy) * ((1 - fx) * p(x0, y0) + fx * p(x0 + 1, y0)) +
+                             fy * ((1 - fx) * p(x0, y0 + 1) + fx * p(x0 + 1, y0 + 1));
+            sum += std::fabs(v - tmpl.at<uint8_t>(y, x));
+            ++count;
+        }
+    return sum / count;
+}
+
+void run_ecc_homography() {
+    const int n = 128;
+    const cv::Mat base_image = ecc_fixture::texture(n, n);
+    auto base = ecc_handle(base_image);
+    const cv::Mat before_base = base_image.clone();
+    const int64_t base_sum = hom_checksum(base_image);
+    const float identity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+
+    // Ground truth (template -> moving) and coefficient tolerances: 0.003 linear,
+    // 0.1 translation, 5e-5 projective (Task 016 Checkpoint 2, same fixtures).
+    struct Case {
+        const char *name;
+        double h[9];
+        bool projective;
+    };
+    const Case cases[] = {
+        {"identity", {1, 0, 0, 0, 1, 0, 0, 0, 1}, false},
+        {"translation (2,1)", {1, 0, 2, 0, 1, 1, 0, 0, 1}, false},
+        {"rotation +2", {0.99939083, -0.0348995, 0, 0.0348995, 0.99939083, 0, 0, 0, 1}, false},
+        {"scale and shear", {1.01, 0.01, 1.5, -0.01, 0.99, -1, 0, 0, 1}, false},
+        {"H20 positive", {1, 0, 0, 0, 1, 0, 0.0002, 0, 1}, true},
+        {"H20 negative", {1, 0, 0, 0, 1, 0, -0.0002, 0, 1}, true},
+        {"H21 positive", {1, 0, 0, 0, 1, 0, 0, 0.0002, 1}, true},
+        {"H21 negative", {1, 0, 0, 0, 1, 0, 0, -0.0002, 1}, true},
+        {"H20 and H21", {1, 0, 0, 0, 1, 0, 0.0002, -0.0002, 1}, true},
+        {"rotation and perspective", {0.9994, -0.0349, 1.0, 0.0349, 0.9994, 0.5, 0.0001, 0.00005, 1}, true},
+        {"scale shear perspective", {1.02, 0.01, 1.0, -0.01, 0.98, -0.5, 0.0001, -0.0001, 1}, true},
+    };
+    for (const auto &c : cases) {
+        const cv::Mat moving_image = (c.name[0] == 'i') ? base_image.clone()
+                                                        : ecc_fixture::homography_texture(n, n, c.h);
+        auto moving = ecc_handle(moving_image);
+        const int64_t moving_sum = hom_checksum(moving_image);
+        opencv_video_ecc_homography_result r = hom_sentinel();
+        check(hom_call(base.get(), moving.get(), &r) == OPENCV_VIDEO_OK, c.name);
+        hom_matches_direct(r, hom_direct(base_image, moving_image), c.name);
+        float got[9];
+        hom_values(r, got);
+        for (int i = 0; i < 8; ++i) {
+            const double tol = (i == 2 || i == 5) ? 0.1 : (i >= 6 ? 5e-5 : 0.003);
+            if (!(std::fabs(got[i] - c.h[i]) < tol)) {
+                std::cerr << c.name << " coefficient " << i << " got " << got[i] << " want " << c.h[i] << '\n';
+                check(false, "homography coefficient position, sign or magnitude");
+            }
+        }
+        check(got[8] == 1.0f, "homography H22 not exactly 1");
+        check(std::isfinite(r.correlation) && r.correlation > 0.98, "homography correlation");
+        // Template -> moving under WARP_INVERSE_MAP: residual collapses; the transposed or
+        // projective/translation-swapped matrix does not (for nonidentity cases).
+        const double good = hom_residual(base_image, moving_image, got);
+        check(good < 0.6, "homography WARP_INVERSE_MAP residual did not collapse");
+        if (c.projective) {
+            float swapped[9];
+            std::memcpy(swapped, got, sizeof swapped);
+            std::swap(swapped[2], swapped[6]);
+            std::swap(swapped[5], swapped[7]);
+            check(hom_residual(base_image, moving_image, swapped) > 2.0 * good,
+                  "H02/H12 and H20/H21 are indistinguishable");
+            const double ident = hom_residual(base_image, moving_image, identity);
+            check(ident > 2.0 * good, "projective fixture is already aligned at identity");
+        }
+        check(hom_checksum(moving_image) == moving_sum &&
+              cv::norm(output(moving.get()), moving_image, cv::NORM_INF) == 0, "homography changed moving image");
+        opencv_video_ecc_homography_result again = hom_sentinel();
+        check(hom_call(base.get(), moving.get(), &again) == OPENCV_VIDEO_OK &&
+              std::memcmp(&again, &r, offsetof(opencv_video_ecc_homography_result, h22) + 4) == 0 &&
+              again.correlation == r.correlation, "repeated homography call differs");
+    }
+    // Affine-equivalent projective matrix (H20 = H21 = 0) agrees with the affine export to
+    // within the optimizer's model difference; both see the same affine motion.
+    {
+        const double h[9] = {1.01, 0.01, 1.5, -0.01, 0.99, -1, 0, 0, 1};
+        auto moving = ecc_handle(ecc_fixture::homography_texture(n, n, h));
+        opencv_video_ecc_homography_result r = hom_sentinel();
+        opencv_video_ecc_affine_result a = kAffSentinel;
+        check(hom_call(base.get(), moving.get(), &r) == OPENCV_VIDEO_OK &&
+              aff_call(base.get(), moving.get(), &a) == OPENCV_VIDEO_OK, "affine-equivalent call");
+        check(std::fabs(r.h20) < 5e-5 && std::fabs(r.h21) < 5e-5 && r.h22 == 1.0f &&
+              std::fabs(r.h00 - a.m00) < 0.003 && std::fabs(r.h01 - a.m01) < 0.003 &&
+              std::fabs(r.h02 - a.m02) < 0.1 && std::fabs(r.h10 - a.m10) < 0.003 &&
+              std::fabs(r.h11 - a.m11) < 0.003 && std::fabs(r.h12 - a.m12) < 0.1,
+              "affine-equivalent homography disagrees with the affine export");
+    }
+
+    // Accepted option boundaries equal the direct call with the same options.
+    {
+        const double h[9] = {1, 0, 0, 0, 1, 0, 0.0002, -0.0002, 1};
+        const cv::Mat mv = ecc_fixture::homography_texture(n, n, h);
+        auto moving = ecc_handle(mv);
+        struct Opt { int it; double eps; } opts[] = {{1, 1e-8}, {1, 0.1}, {100, 1e-8}, {100, 0.1}, {3, 1e-4}};
+        for (const auto &o : opts) {
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            check(hom_call(base.get(), moving.get(), &r, o.it, o.eps) == OPENCV_VIDEO_OK, "option boundary rejected");
+            hom_matches_direct(r, hom_direct(base_image, mv, o.it, o.eps), "option boundary differs from direct call");
+        }
+        opencv_video_ecc_homography_result one = hom_sentinel(), many = hom_sentinel();
+        check(hom_call(base.get(), moving.get(), &one, 1, 1e-8) == OPENCV_VIDEO_OK &&
+              hom_call(base.get(), moving.get(), &many, 100, 1e-8) == OPENCV_VIDEO_OK, "iteration options");
+        check(std::memcmp(&one, &many, 36) != 0, "maximum iterations had no effect");
+    }
+
+    // Aliasing, shared allocations, role reversal.
+    {
+        opencv_video_ecc_homography_result r = hom_sentinel();
+        check(hom_call(base.get(), base.get(), &r) == OPENCV_VIDEO_OK, "same-handle homography call");
+        hom_matches_direct(r, hom_direct(base_image, base_image), "same-handle differs from direct");
+        float got[9];
+        hom_values(r, got);
+        check(std::memcmp(got, identity, sizeof got) == 0 ||
+              (std::fabs(got[0] - 1) < 1e-5 && std::fabs(got[4] - 1) < 1e-5 && std::fabs(got[6]) < 1e-7 &&
+               std::fabs(got[7]) < 1e-7 && got[8] == 1.0f), "same-handle homography identity");
+        check(std::fabs(r.correlation - 1.0) < 1e-6, "same-handle correlation");
+        auto alias = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(alias.get()) = output(base.get());
+        check(output(alias.get()).data == output(base.get()).data, "alias fixture does not share storage");
+        opencv_video_ecc_homography_result a = hom_sentinel();
+        check(hom_call(base.get(), alias.get(), &a) == OPENCV_VIDEO_OK &&
+              std::memcmp(&a, &r, 36) == 0 && a.correlation == r.correlation, "shared-allocation headers");
+        const double h[9] = {1, 0, 0, 0, 1, 0, 0.0002, -0.0002, 1};
+        auto moving = ecc_handle(ecc_fixture::homography_texture(n, n, h));
+        opencv_video_ecc_homography_result fwd = hom_sentinel(), rev = hom_sentinel();
+        check(hom_call(base.get(), moving.get(), &fwd) == OPENCV_VIDEO_OK &&
+              hom_call(moving.get(), base.get(), &rev) == OPENCV_VIDEO_OK, "role reversal");
+        check(fwd.h20 > 0 && fwd.h21 < 0 && rev.h20 < 0 && rev.h21 > 0, "reversed roles did not invert perspective");
+    }
+
+    // Genuine non-contiguous Regions equal the direct call and the contiguous clones.
+    {
+        const double h[9] = {1.0, 0.01, 1.0, -0.005, 1.0, 0.5, 0.00005, -0.00004, 1.0};
+        const cv::Mat parent_a = ecc_fixture::texture(160, 160);
+        const cv::Mat parent_b = ecc_fixture::homography_texture(160, 160, h);
+        const cv::Mat saved_a = parent_a.clone(), saved_b = parent_b.clone();
+        const cv::Rect roi(16, 16, n, n);
+        auto h_a = ecc_handle(parent_a);
+        auto h_b = ecc_handle(parent_b);
+        auto region_a = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto region_b = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(region_a.get()) = output(h_a.get())(roi);
+        output(region_b.get()) = output(h_b.get())(roi);
+        check(!output(region_a.get()).isContinuous() && !output(region_b.get()).isContinuous(),
+              "fixture Region is contiguous");
+        opencv_video_ecc_homography_result r = hom_sentinel();
+        check(hom_call(region_a.get(), region_b.get(), &r) == OPENCV_VIDEO_OK, "homography Region call failed");
+        hom_matches_direct(r, hom_direct(parent_a(roi), parent_b(roi)), "Region differs from direct native Region call");
+        auto clone_a = ecc_handle(parent_a(roi).clone());
+        auto clone_b = ecc_handle(parent_b(roi).clone());
+        opencv_video_ecc_homography_result c = hom_sentinel();
+        check(hom_call(clone_a.get(), clone_b.get(), &c) == OPENCV_VIDEO_OK &&
+              std::memcmp(&c, &r, 36) == 0 && c.correlation == r.correlation,
+              "Region and contiguous clone differ");
+        check(cv::norm(output(h_a.get()), saved_a, cv::NORM_INF) == 0 &&
+              cv::norm(output(h_b.get()), saved_b, cv::NORM_INF) == 0, "homography changed Region parents");
+    }
+
+    // Argument validation: every rejected call leaves all 48 bytes unchanged.
+    {
+        const double h[9] = {1, 0, 0, 0, 1, 0, 0.0002, -0.0002, 1};
+        auto moving = ecc_handle(ecc_fixture::homography_texture(n, n, h));
+        opencv_video_ecc_homography_result r = hom_sentinel();
+        auto rejected = [&](opencv_video_status code, const char *message) {
+            check(code == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, message);
+            check(std::strlen(opencv_video_last_error()) > 0, "no diagnostic after rejected homography call");
+            hom_unchanged(r, message);
+        };
+        rejected(hom_call(nullptr, moving.get(), &r), "null template");
+        rejected(hom_call(base.get(), nullptr, &r), "null moving");
+        rejected(hom_call(base.get(), moving.get(), nullptr), "null result accepted");
+        for (int iterations : {0, -1, 101, std::numeric_limits<int>::min(), std::numeric_limits<int>::max()})
+            rejected(hom_call(base.get(), moving.get(), &r, iterations), "bad iterations accepted");
+        for (double epsilon : {0.0, -0.0, -1e-4, 9e-9, 9.999999e-9, 0.1000001,
+                               std::numeric_limits<double>::quiet_NaN(),
+                               std::numeric_limits<double>::infinity(),
+                               -std::numeric_limits<double>::infinity()})
+            rejected(hom_call(base.get(), moving.get(), &r, 50, epsilon), "bad epsilon accepted");
+        auto wrong_depth = matrix(n, n, OPENCV_CORE_DEPTH_FLOAT32, 1);
+        auto wrong_channels = matrix(n, n, OPENCV_CORE_DEPTH_UINT8, 3);
+        auto other_rows = matrix(n + 1, n, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto other_cols = matrix(n, n + 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        for (auto *bad : {wrong_depth.get(), wrong_channels.get(), other_rows.get(), other_cols.get()}) {
+            rejected(hom_call(base.get(), bad, &r), "bad moving accepted");
+            rejected(hom_call(bad, base.get(), &r), "bad template accepted");
+        }
+        auto small = matrix(31, 128, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto small_peer = matrix(31, 128, OPENCV_CORE_DEPTH_UINT8, 1);
+        rejected(hom_call(small.get(), small_peer.get(), &r), "rows below minimum accepted");
+        auto narrow = matrix(128, 31, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto narrow_peer = matrix(128, 31, OPENCV_CORE_DEPTH_UINT8, 1);
+        rejected(hom_call(narrow.get(), narrow_peer.get(), &r), "columns below minimum accepted");
+        auto empty = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(empty.get()) = cv::Mat();
+        rejected(hom_call(empty.get(), base.get(), &r), "empty template accepted");
+        rejected(hom_call(base.get(), empty.get(), &r), "empty moving accepted");
+        auto wide = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto wide_peer = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(wide.get()) = cv::Mat(32, 16385, CV_8UC1, cv::Scalar(0));
+        output(wide_peer.get()) = cv::Mat(32, 16385, CV_8UC1, cv::Scalar(0));
+        rejected(hom_call(wide.get(), wide_peer.get(), &r), "columns above maximum accepted");
+        auto tall = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto tall_peer = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(tall.get()) = cv::Mat(16385, 32, CV_8UC1, cv::Scalar(0));
+        output(tall_peer.get()) = cv::Mat(16385, 32, CV_8UC1, cv::Scalar(0));
+        rejected(hom_call(tall.get(), tall_peer.get(), &r), "rows above maximum accepted");
+        {
+            // Area bound: 4097 x 4096 > 2^24 with both sides in range. Real zero-filled
+            // storage (about 16 MiB each); released before continuing.
+            auto area = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+            auto area_peer = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+            output(area.get()) = cv::Mat(4097, 4096, CV_8UC1, cv::Scalar(0));
+            output(area_peer.get()) = cv::Mat(4097, 4096, CV_8UC1, cv::Scalar(0));
+            rejected(hom_call(area.get(), area_peer.get(), &r), "above maximum area accepted");
+        }
+        check(hom_call(base.get(), moving.get(), &r) == OPENCV_VIDEO_OK, "valid call after rejected arguments");
+        check(std::strlen(opencv_video_last_error()) == 0, "stale diagnostic after success");
+    }
+
+    // Native nonconvergence and native exceptions (the 7 cases raise on 4.1.0, 4.10.0 and 5.0.0):
+    // error status, diagnostic, untouched 48 bytes. Wrong-but-finite successes are still published.
+    {
+        auto expect_failure = [&](const cv::Mat &a, const cv::Mat &b, const char *message) {
+            auto ha = ecc_handle(a);
+            auto hb = ecc_handle(b);
+            check(!hom_direct(a, b).ok, message);
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            check(hom_call(ha.get(), hb.get(), &r) == OPENCV_VIDEO_ERROR_OPENCV, message);
+            check(std::strlen(opencv_video_last_error()) > 0, "no diagnostic after native failure");
+            hom_unchanged(r, message);
+        };
+        const double strong[9] = {1, 0, 0, 0, 1, 0, 0.002, 0.002, 1};
+        const double near_zero[9] = {1, 0, 0, 0, 1, 0, -0.0078, 0, 1};
+        const double crosses[9] = {1, 0, 0, 0, 1, 0, -0.012, 0, 1};
+        const double far[9] = {1, 0, 40, 0, 1, 30, 0, 0, 1};
+        const double reflect[9] = {-1, 0, 127, 0, 1, 0, 0, 0, 1};
+        expect_failure(ecc_fixture::constant(n, n, 128), ecc_fixture::constant(n, n, 128), "constant images accepted");
+        expect_failure(ecc_fixture::noise(n, n, 3), ecc_fixture::noise(n, n, 9), "uncorrelated noise accepted");
+        expect_failure(base_image, ecc_fixture::homography_texture(n, n, strong), "strong perspective accepted");
+        expect_failure(base_image, ecc_fixture::homography_texture(n, n, near_zero), "near-zero denominator accepted");
+        expect_failure(base_image, ecc_fixture::homography_texture(n, n, crosses), "denominator crossing zero accepted");
+        expect_failure(base_image, ecc_fixture::homography_texture(n, n, far), "large translation accepted");
+        expect_failure(base_image, ecc_fixture::homography_texture(n, n, reflect), "reflection accepted");
+
+        const double pb[9] = {1, 0, 0, 0, 1, 0, 0.0002, -0.0002, 1};
+        const double ill[9] = {1, 0, 0, 0, 1.0e-6, 0, 0, 0, 1};
+        struct Finite { const char *name; cv::Mat a, b; } finite[] = {
+            {"low-gradient", ecc_fixture::affine_int(base_image, 1, 40, 126),
+             ecc_fixture::affine_int(ecc_fixture::homography_texture(n, n, pb), 1, 40, 126)},
+            {"noise-vs-texture", base_image, ecc_fixture::noise(n, n, 7)},
+            {"ill-conditioned", base_image, ecc_fixture::homography_texture(n, n, ill)},
+        };
+        // The outcome is version dependent and follows the same-build direct call: on 4.10.0 all
+        // three succeed with a wrong finite matrix; on 4.1.0 and 5.0.0 low-gradient and
+        // ill-conditioned raise natively (oracle and probe). Either way the binding must agree with
+        // native, and at least one wrong-but-finite success must be published (noise-vs-texture
+        // succeeds on every qualified version).
+        int finite_successes = 0;
+        for (auto &f : finite) {
+            auto ha = ecc_handle(f.a);
+            auto hb = ecc_handle(f.b);
+            const HomDirect d = hom_direct(f.a, f.b);
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            const opencv_video_status s = hom_call(ha.get(), hb.get(), &r);
+            if (d.ok) {
+                check(s == OPENCV_VIDEO_OK, f.name);
+                hom_matches_direct(r, d, f.name);
+                check(r.correlation < 0.5, "wrong-but-finite fixture unexpectedly well correlated");
+                ++finite_successes;
+            } else {
+                check(s == OPENCV_VIDEO_ERROR_OPENCV, f.name);
+                check(std::strlen(opencv_video_last_error()) > 0, "no diagnostic after native failure");
+                hom_unchanged(r, f.name);
+            }
+        }
+        check(finite_successes >= 1, "no wrong-but-finite homography success was observed");
+        opencv_video_ecc_homography_result r = hom_sentinel();
+        check(hom_call(base.get(), base.get(), &r) == OPENCV_VIDEO_OK, "valid call after native failures");
+    }
+    check(cv::norm(output(base.get()), before_base, cv::NORM_INF) == 0 &&
+          hom_checksum(output(base.get())) == base_sum, "homography changed an input");
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    {
+        const double h[9] = {1, 0, 0, 0, 1, 0, 0.0002, -0.0002, 1};
+        const cv::Mat mv = ecc_fixture::homography_texture(n, n, h);
+        auto moving = ecc_handle(mv);
+        const int64_t moving_sum = hom_checksum(mv);
+        const HomDirect reference = hom_direct(base_image, mv);
+        auto inputs_unchanged = [&](const char *message) {
+            check(hom_checksum(output(base.get())) == base_sum && hom_checksum(output(moving.get())) == moving_sum,
+                  message);
+        };
+        auto valid_again = [&](const char *message) {
+            opencv_video_ecc_homography_result ok = hom_sentinel();
+            check(hom_call(base.get(), moving.get(), &ok) == OPENCV_VIDEO_OK, message);
+            hom_matches_direct(ok, reference, message);
+        };
+        int executed = 0;
+        // All eight exception injections (before and after native execution).
+        for (int stage : {1, 2}) for (int kind : {1, 2, 4, 3}) {
+            fault_stage = stage; fault_kind = kind;
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            const auto code = hom_call(base.get(), moving.get(), &r);
+            fault_stage = 0; fault_kind = 0;
+            const auto expected = kind == 2 ? OPENCV_VIDEO_ERROR_OPENCV
+                                : kind == 3 ? OPENCV_VIDEO_ERROR_UNKNOWN : OPENCV_VIDEO_ERROR_STANDARD;
+            check(code == expected, "ECC homography injected exception mapped to the wrong status");
+            check(std::strlen(opencv_video_last_error()) > 0, "no diagnostic after injected homography exception");
+            hom_unchanged(r, "ECC homography injected failure changed result");
+            inputs_unchanged("ECC homography injected failure changed an input");
+            valid_again("valid homography call after injected exception");
+            ++executed;
+        }
+        check(executed == 8, "not all homography exception injections executed");
+        // Invalid arguments are rejected before the native fault hook is reached.
+        for (int stage : {1, 2}) {
+            fault_stage = stage; fault_kind = 2;
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            const auto a = hom_call(base.get(), moving.get(), &r, 0);
+            const auto b = hom_call(nullptr, moving.get(), &r);
+            const auto c = hom_call(base.get(), moving.get(), nullptr);
+            fault_stage = 0; fault_kind = 0;
+            check(a == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT && b == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT &&
+                  c == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "invalid homography arguments reached the fault hook");
+            hom_unchanged(r, "rejected homography arguments changed result");
+        }
+        // Generic 2x3 ECC corruption modes are not consulted by the homography export.
+        for (int mode : {1, 2, 3, 4, 9, 21, 22, 23, 24, 25, 26}) {
+            ecc_corrupt_mode = mode;
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            const auto code = hom_call(base.get(), moving.get(), &r);
+            ecc_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_OK, "generic ECC corruption hook reached the homography export");
+            hom_matches_direct(r, reference, "generic ECC corruption altered the homography result");
+        }
+        // Nonfinite or non-unit-H22 post-native output is rejected; all 48 bytes untouched.
+        int rejected = 0;
+        for (int mode = 1; mode <= 20; ++mode) {
+            hom_corrupt_mode = mode;
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            const auto code = hom_call(base.get(), moving.get(), &r);
+            hom_corrupt_mode = 0;
+            if (code != OPENCV_VIDEO_ERROR_OPENCV) std::cerr << "homography corruption mode " << mode << '\n';
+            check(code == OPENCV_VIDEO_ERROR_OPENCV, "ECC homography corrupted native output accepted");
+            // H22 = NaN/Inf is caught by the finiteness loop; finite non-unit H22 by the H22 check.
+            const char *expected_text = (mode >= 12 && mode <= 14) ? "nonfinite correlation"
+                : (mode == 10 || mode == 11 || mode >= 18) ? "H22 is not exactly 1"
+                : "nonfinite warp entry";
+            if (std::strstr(opencv_video_last_error(), expected_text) == nullptr)
+                std::cerr << "mode " << mode << " diagnostic: " << opencv_video_last_error() << '\n';
+            check(std::strstr(opencv_video_last_error(), expected_text) != nullptr,
+                  "homography corruption rejected for the wrong reason");
+            hom_unchanged(r, "ECC homography corrupted output was partially published");
+            inputs_unchanged("ECC homography corruption changed an input");
+            ++rejected;
+        }
+        check(rejected == 20, "not all homography corruption modes executed");
+        // Finite projective matrices with H22 == 1 are legitimate output and published exactly;
+        // no affine, determinant or perspective-magnitude policy is applied.
+        for (int mode = 30; mode <= 34; ++mode) {
+            hom_corrupt_mode = mode;
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            const auto code = hom_call(base.get(), moving.get(), &r);
+            hom_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_OK, "ECC homography rejected an injected finite projective matrix");
+            float got[9];
+            hom_values(r, got);
+            check(std::memcmp(got, kHomInjected[mode - 30], sizeof got) == 0,
+                  "ECC homography altered an injected finite matrix");
+            check(r.correlation == reference.rho, "injected finite matrix changed the correlation");
+            check(std::strlen(opencv_video_last_error()) == 0, "stale diagnostic after accepted matrix");
+        }
+        // Schema / storage-identity mutations through well-defined cv::Mat operations.
+        for (int mode = 1; mode <= 8; ++mode) {
+            hom_schema_mode = mode;
+            const int applied = hom_schema_applied;
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            const auto code = hom_call(base.get(), moving.get(), &r);
+            hom_schema_mode = 0;
+            hom_schema_keep.release();
+            hom_schema_wide.release();
+            check(hom_schema_applied == applied + 1, "homography schema hook did not complete");
+            check(code == OPENCV_VIDEO_ERROR_OPENCV, "ECC homography accepted a changed native warp schema");
+            check(std::strstr(opencv_video_last_error(), "unexpected ECC warp schema") != nullptr,
+                  "schema rejection has the wrong diagnostic");
+            hom_unchanged(r, "ECC homography schema failure changed result");
+        }
+        valid_again("valid homography call after corruption campaign");
+        std::cout << "PASS: ECC homography faults: 8 exception injections, 20 rejected corruptions, "
+                     "5 accepted finite projective matrices, 8 schema mutations, generic hook isolation\n";
+    }
+#endif
+    std::cout << "PASS: ECC homography shim vs direct MOTION_HOMOGRAPHY findTransformECC, nine coefficients, "
+                 "H22, layout, sentinel, validation, nonconvergence, aliases, Regions\n";
+}
+}  // namespace
+
 
 int main() {
     try {
@@ -2483,6 +3065,7 @@ int main() {
         run_ecc_euclidean_seeded();
         run_ecc_affine();
         run_ecc_affine_seeded();
+        run_ecc_homography();
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "FAIL: " << error.what() << '\n';

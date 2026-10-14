@@ -17,6 +17,14 @@ package ECC_Fixtures is
    --  A must be invertible.
    function Affine_Texture
      (Rows, Columns : Positive; A, B, C, D, TX, TY : Long_Float) return OpenCV.Core.Mat;
+   --  Task 016 homography template-to-moving warp: row-major H (H00 H01 H02 H10 H11 H12
+   --  H20 H21 H22), moving(p) = signal (H**-1 p) with homogeneous division, evaluated
+   --  analytically with the same adjugate inverse and expression order as
+   --  ecc_fixture::homography_texture in C++. Raises Constraint_Error for a singular H or a
+   --  zero projective denominator at any pixel (no pixel is invented).
+   type Homography_Matrix is array (0 .. 8) of Long_Float;
+   function Homography_Texture
+     (Rows, Columns : Positive; H : Homography_Matrix) return OpenCV.Core.Mat;
    --  sat((v * Num + Den / 2) / Den + Beta), exact integer arithmetic.
    function Affine (Source : OpenCV.Core.Mat; Num, Den, Beta : Integer) return OpenCV.Core.Mat;
    function Constant_Image (Rows, Columns : Positive; Value : Natural) return OpenCV.Core.Mat;
