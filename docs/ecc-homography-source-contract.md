@@ -147,6 +147,71 @@ overflow with eight parameters and a measured peak of 1.88 GiB at the area limit
 4. Points with `D = 0` or near 0 are a property of the returned matrix, not of call memory safety. The
    binding does not resample and must not silently convert them.
 
+## Checkpoint 3 boundary and fault qualification (4.10.0)
+
+`run_ecc_homography()` in `tests/cpp/native_boundary.cpp` calls the real
+`opencv_video_estimate_ecc_homography` export through Core-owned Mat handles. It compares the result
+with its own independent `cv::findTransformECC(MOTION_HOMOGRAPHY)` call: identity 3x3 warp,
+`COUNT|EPS`, no mask, Gaussian size 5.
+
+* **Exact match on the same build.** On the deterministic CPU path the nine coefficients and the
+  correlation match bitwise (`memcmp`). This holds for all eleven geometric fixtures, the option
+  boundaries, the Regions and the three known wrong-but-finite successes.
+* **Byte-exact failure atomicity.** Every expected failure leaves the caller's whole 48-byte object
+  unchanged, including the 4 padding bytes at offset 36. This was checked with a patterned sentinel.
+* **Homography-only fault hooks.** Only the homography export calls them, they are compiled only under
+  `OPENCV_VIDEO_TEST_FAULTS`, and they run after fault stage 2 and before validation:
+  * `opencv_video_test_corrupt_homography(float *warp, double *correlation)` receives the private
+    3x3 Float32 warp, which has nine valid positions.
+  * `opencv_video_test_homography_schema(cv::Mat &)` can replace the private header using only
+    well-defined `cv::Mat` operations.
+* **Generic hook unchanged.** The 2x3 `opencv_video_test_corrupt_ecc` modes are untouched and the
+  homography export no longer calls that hook. The boundary test checks that generic modes do not
+  affect homography output.
+* **Schema mutation 5 (non-continuity).** It uses a column view of a fresh 3x4 allocation. A
+  non-continuous header over the original 36-byte storage would read past the allocation, so
+  non-continuity cannot be tested apart from storage identity without undefined behavior.
+
+### Mutation campaign
+
+**Setup.**
+* Mutants were applied to a scratch copy of `934517b` plus the Checkpoint 3 harness. They were never
+  applied to the worktree.
+* Every edit pattern was required to match exactly once between
+  `opencv_video_estimate_ecc_homography(` and the next export.
+* AUnit ran against pristine oracle files that were not regenerated.
+
+**Counting rule.** A mutant counts as KILLED only if it built, a test ran, and a named check failed.
+
+**Baseline.** Mutant 00 is an unmodified build. It passed AUnit 176/176 and both boundary drivers.
+
+| # | Mutation | Result | First named failure |
+|---|---|---|---|
+| 1 | `MOTION_AFFINE` | killed | `ECC_Homography_Direct_Oracle`: binding raised where native succeeded; boundary `identity` |
+| 2 | 2x3 private warp | killed | same as 1 |
+| 3 | identity without ECC | killed | oracle H00 differs `translation-2-1`; boundary `identity` |
+| 4 | ignore native output | killed | oracle H00 differs `translation-2-1` |
+| 5 | swap H02/H20 | killed | oracle H02 differs |
+| 6 | swap H12/H21 | killed | oracle H12 differs |
+| 7 | swap H01/H10 | killed | oracle H01 differs; `ECC_Homography_Inverse_Warp` |
+| 8 | negate H20 | killed | oracle H20 differs |
+| 9 | negate H21 | killed | oracle H21 differs |
+| 10 | zero H20/H21 | killed | oracle H20 differs |
+| 11 | publish H22 = 0 | killed | oracle "H22 is not exactly 1" |
+| 12 | force H22 = 1 after the H22 check | **equivalent** | none; the check already guarantees `w[8] == 1.0f`, so the forced value equals the observed one |
+| 12b | remove the H22 check and force H22 = 1 | killed | fault boundary: "corrupted native output accepted" (H22 = 0 / 1.01 modes) |
+| 13 | fixed correlation | killed | oracle correlation differs |
+| 14 | ignore iterations | killed | oracle H00 differs `it1`; boundary "option boundary differs" |
+| 15 | ignore epsilon | killed | oracle H01 differs `it100-e8` |
+| 16 | swap roles | killed | oracle H00 differs; boundary `translation (2,1)` |
+| 17 | publish before validation | killed | fault boundary: "corrupted output was partially published" |
+| 18 | no H20 finiteness check | killed | fault boundary: "corrupted native output accepted" |
+| 19 | no correlation finiteness check | killed | fault boundary: "corrupted native output accepted" |
+| 20 | suppress nonconvergence | killed | oracle "binding succeeded where native raised: constant" |
+
+Mutants 17-19 change final-output paths that real native results cannot reach on 4.10.0. AUnit and
+the production boundary still pass with them, and only the injected corruption detects them.
+
 ## Can a production binding be defended?
 
 Yes, under the contract above. Every path found ends in a native exception, clamped sampling, or a

@@ -25,6 +25,11 @@ struct opencv_video_pyramid_handle {
 void opencv_video_test_fault(int);
 void opencv_video_test_corrupt_flow(float *values, size_t count);
 void opencv_video_test_corrupt_ecc(float *warp, double *correlation);
+// Task 016 homography-only hooks. The first receives the private 3x3 Float32 warp (nine valid
+// positions); the second may replace the private warp through ordinary cv::Mat operations
+// to exercise the post-native schema/storage-identity checks without corrupting Mat memory.
+void opencv_video_test_corrupt_homography(float *warp, double *correlation);
+void opencv_video_test_homography_schema(cv::Mat &warp);
 #endif
 
 namespace {
@@ -998,7 +1003,8 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_homography(
             cv::noArray(), 5);
 #ifdef OPENCV_VIDEO_TEST_FAULTS
         opencv_video_test_fault(2);
-        opencv_video_test_corrupt_ecc(warp.ptr<float>(), &correlation);
+        opencv_video_test_corrupt_homography(warp.ptr<float>(), &correlation);
+        opencv_video_test_homography_schema(warp);
 #endif
         if (warp.data != storage || warp.dims != 2 || warp.rows != 3 || warp.cols != 3 ||
             warp.type() != CV_32FC1 || !warp.isContinuous())
