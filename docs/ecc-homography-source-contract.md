@@ -141,7 +141,10 @@ overflow with eight parameters and a measured peak of 1.88 GiB at the area limit
 1. Upstream OpenCV was not sanitizer-instrumented; the probes show behavior, not absence of UB. The
    NaN-to-int conversion in `warpPerspective` is clamped by `max/min`, but this was not verified under
    an instrumented OpenCV.
-2. 4.6.0 is unmeasured natively.
+2. 4.6.0 was unmeasured by the Checkpoint 1 probe. In Checkpoint 4 the full oracle, boundary,
+   fault and sanitizer campaign ran on 4.6.0 in a local Debian 12 container. Its 37 oracle lines are
+   byte-identical to 4.10.0; see `docs/task016-qualification.md`. The probe itself was not rerun on
+   4.6.0.
 3. Convergence basin from identity is small (about 2% scale/shear, 2 deg, a few pixels, perspective
    coefficients about 2e-4 at 128 px). Caller seeding is out of scope.
 4. Points with `D = 0` or near 0 are a property of the returned matrix, not of call memory safety. The
