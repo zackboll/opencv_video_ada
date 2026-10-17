@@ -228,4 +228,21 @@ package OpenCV.Video.Internal.C_API is
       Result                       : access ECC_Affine_Result) return Status
      with Import, Convention => C,
           External_Name => "opencv_video_estimate_ecc_affine_seeded";
+
+   function Estimate_ECC_Homography_Seeded
+     (Template_Image, Moving_Image : OpenCV.Core.Module_Interop.Input_Mat_Handle;
+      Maximum_Iterations           : Interfaces.Integer_32;
+      Epsilon                      : Interfaces.C.double;
+      Initial_H00                  : Interfaces.C.C_float;
+      Initial_H01                  : Interfaces.C.C_float;
+      Initial_H02                  : Interfaces.C.C_float;
+      Initial_H10                  : Interfaces.C.C_float;
+      Initial_H11                  : Interfaces.C.C_float;
+      Initial_H12                  : Interfaces.C.C_float;
+      Initial_H20                  : Interfaces.C.C_float;
+      Initial_H21                  : Interfaces.C.C_float;
+      Initial_H22                  : Interfaces.C.C_float;
+      Result                       : access ECC_Homography_Result) return Status
+     with Import, Convention => C,
+          External_Name => "opencv_video_estimate_ecc_homography_seeded";
 end OpenCV.Video.Internal.C_API;

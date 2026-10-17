@@ -384,6 +384,33 @@ opencv_video_status opencv_video_estimate_ecc_affine_seeded(
     float initial_m12,
     opencv_video_ecc_affine_result *result);
 
+/* Caller-seeded homography ECC (Task 017). Identical to opencv_video_estimate_ecc_homography
+ * except the private 3x3 Float32 warp starts from the nine row-major coefficients (native
+ * matrix storage order, NOT the native update-vector order). Seed domain (binding policy,
+ * docs/ecc-homography-seeded-source-contract.md), checked after the image envelope:
+ *   every coefficient finite; h22 exactly 1; h00,h01,h10,h11 magnitude <= 4;
+ *   h02,h12 magnitude <= 2^20;
+ *   fabs(h20)*(columns-1) + fabs(h21)*(rows-1) <= 0.5, evaluated in double.
+ * Violations return OPENCV_VIDEO_ERROR_INVALID_ARGUMENT before any native call. The seed is
+ * never transposed, negated, inverted, normalized or composed. The output policy is that of
+ * opencv_video_estimate_ecc_homography; the seed domain is not applied to the output.
+ * *result is unchanged on every failure. */
+opencv_video_status opencv_video_estimate_ecc_homography_seeded(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations,
+    double epsilon,
+    float initial_h00,
+    float initial_h01,
+    float initial_h02,
+    float initial_h10,
+    float initial_h11,
+    float initial_h12,
+    float initial_h20,
+    float initial_h21,
+    float initial_h22,
+    opencv_video_ecc_homography_result *result);
+
 #ifdef __cplusplus
 }
 #endif

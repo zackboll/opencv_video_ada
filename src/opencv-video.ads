@@ -478,6 +478,34 @@ package OpenCV.Video is
       Moving_Image   : OpenCV.Core.Mat;
       Options        : ECC_Homography_Options := (others => <>))
       return ECC_Homography_Result;
+
+   --  Caller-seeded ECC homography alignment (Task 017). The private native 3x3 warp starts
+   --  from Initial_Transform.Warp instead of the identity and is refined by the same
+   --  findTransformECC call (MOTION_HOMOGRAPHY, COUNT|EPS, no mask, Gaussian size 5). The
+   --  nine coefficients are placed in native matrix STORAGE order (H00 .. H22) with the
+   --  template-to-moving convention above; nothing is transposed, negated, inverted,
+   --  normalized, decomposed or composed. Initial_Transform.Correlation is IGNORED (never
+   --  read, validated, propagated or used as a threshold).
+   --
+   --  Seed domain (binding policy, docs/ecc-homography-seeded-source-contract.md), checked
+   --  after the image/option contract: every coefficient finite; H22 exactly 1.0 (native ECC
+   --  never updates H22 and its Jacobian assumes 1, so a seed is never rescaled); H00, H01,
+   --  H10, H11 at most 4.0 in magnitude; H02, H12 at most 2**20; and
+   --  |H20| * (Columns - 1) + |H21| * (Rows - 1) <= 0.5 in Long_Float, so the seed's
+   --  denominator stays within 0.5 .. 1.5 over the template. A violation raises
+   --  OpenCV_Error before any native call.
+   --
+   --  The output contract is that of the identity-initialized overload; the seed domain is
+   --  NOT applied to the result, so a returned result (seeded or not) may itself fall outside
+   --  the seed domain and be rejected if passed back as Initial_Transform. A good seed can
+   --  converge where the identity does not; a poor one may raise on nonconvergence or end at
+   --  a wrong finite optimum. Initial_Transform is not modified.
+   function Estimate_ECC_Homography
+     (Template_Image    : OpenCV.Core.Mat;
+      Moving_Image      : OpenCV.Core.Mat;
+      Options           : ECC_Homography_Options := (others => <>);
+      Initial_Transform : ECC_Homography_Result)
+      return ECC_Homography_Result;
 private
    type PyrLK_Pyramid is new Ada.Finalization.Limited_Controlled with record
       Handle : System.Address := System.Null_Address;
