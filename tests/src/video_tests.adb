@@ -9115,6 +9115,25 @@ package body Video_Tests is
               "seed translation bound still enforced");
       Assert (Hm_Outcome_Of (Pair, Good, False) = Accepted and then Hm_Outcome_Of (Pair, Good, True) = Accepted,
               "valid mask accepted in both modes");
+      --  Non-square geometry: 96 rows x 128 columns. The matching mask is accepted; the transposed
+      --  128 x 96 shape (same pixel count) is rejected in Ada and in the shim.
+      declare
+         Wide : constant ECC_Pair := (EF.Texture (96, 128), EF.Texture (96, 128, 2, 1));
+         Wide_Mask : OpenCV.Core.Mat := EF.Constant_Image (96, 128, 255);
+         Tall_Mask : constant OpenCV.Core.Mat := EF.Constant_Image (128, 96, 255);
+         R : ECC_Homography_Result;
+         Raised : Boolean;
+      begin
+         EF.Fill (Wide_Mask, 80, 8, 30, 20, 0);
+         Hm_Run (Wide, Wide_Mask, R, Raised);
+         Assert (not Raised and then abs (LF (R.Warp.H02) - 2.0) < 0.1 and then abs (LF (R.Warp.H12) - 1.0) < 0.1,
+                 "non-square masked translation");
+         Assert (Hm_Outcome_Of (Wide, Wide_Mask, True) = Accepted, "non-square seeded mask accepted");
+         Assert (Hm_Outcome_Of (Wide, Tall_Mask, False) = Preflight_Rejected
+                 and then Hm_Outcome_Of (Wide, Tall_Mask, True) = Preflight_Rejected,
+                 "transposed-shape mask must be rejected");
+         Assert (Contains (Hm_Message (Wide, Tall_Mask, False), "geometry"), "transposed-shape diagnostic");
+      end;
    end ECC_Homography_Masked_Validation;
 
    procedure ECC_Homography_Masked_Immutability_And_Regions (T : in out Fixture) is

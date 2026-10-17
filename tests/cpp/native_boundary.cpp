@@ -4007,6 +4007,25 @@ void run_ecc_homography_masked() {
         r = hom_sentinel();
         hm_rejected(hms_call(a.get(), b21.get(), hole.get(), den_seed, &r), r, "denominator", "seed geometry rule");
         check(rejected == 24, "mask rejection coverage");
+        // Non-square geometry: rows and columns are not interchangeable. 96 rows x 128 columns
+        // images accept a 96x128 mask and reject its 128x96 transpose (same pixel count).
+        const cv::Mat wide_a = ecc_fixture::texture(96, 128), wide_b = ecc_fixture::texture(96, 128, 2, 1);
+        auto wa = ecc_handle(wide_a), wb = ecc_handle(wide_b);
+        cv::Mat wide_mask(96, 128, CV_8UC1, cv::Scalar(255));
+        wide_mask(cv::Rect(80, 8, 30, 20)).setTo(0);
+        auto wm = ecc_handle(wide_mask);
+        auto transposed = ecc_handle(cv::Mat(wide_mask.t()));
+        check(output(transposed.get()).rows == 128 && output(transposed.get()).cols == 96, "transposed fixture");
+        check(hm_agrees(wa.get(), wb.get(), wm.get(), wide_a, wide_b, wide_mask, nullptr, "non-square mask"),
+              "non-square mask must converge");
+        check(hm_agrees(wa.get(), wb.get(), wm.get(), wide_a, wide_b, wide_mask, identity, "non-square seeded mask"),
+              "non-square seeded mask must converge");
+        r = hom_sentinel();
+        hm_rejected(hm_call(wa.get(), wb.get(), transposed.get(), &r), r, "geometry differs", "transposed-shape mask");
+        r = hom_sentinel();
+        hm_rejected(hms_call(wa.get(), wb.get(), transposed.get(), identity, &r), r, "geometry differs",
+                    "transposed-shape seeded mask");
+        agreements += 2;
     }
 
     // 6. Support that native erosion removes, and non-overlap after warping: the binding forwards
