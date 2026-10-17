@@ -16,6 +16,7 @@ VIDEO_ECC_AFFINE_ORACLE="$root/obj/oracle/ecc-affine.txt" \
 VIDEO_ECC_AFFINE_SEEDED_ORACLE="$root/obj/oracle/ecc-affine-seeded.txt" \
 VIDEO_ECC_HOMOGRAPHY_ORACLE="$root/obj/oracle/ecc-homography.txt" \
 VIDEO_ECC_HOMOGRAPHY_SEEDED_ORACLE="$root/obj/oracle/ecc-homography-seeded.txt" \
+VIDEO_ECC_HOMOGRAPHY_MASKED_ORACLE="$root/obj/oracle/ecc-homography-masked.txt" \
     alr -n -C tests exec -- sh ../scripts/run_native.sh bin/run_tests
 case "$(uname -s)" in
     Linux|Darwin) alr -n exec -- sh scripts/run_sanitizers.sh native ;;

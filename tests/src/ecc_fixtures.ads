@@ -33,4 +33,21 @@ package ECC_Fixtures is
    --  Position-weighted sum used to compare Ada and C++ fixtures and to detect mutation
    --  of a source or parent.
    function Checksum (Image : OpenCV.Core.Mat) return Long_Long_Integer;
+
+   --  Task 018 moving-image masks and occlusions, mirroring build_mask / occlude in
+   --  tests/cpp/ecc_homography_masked_oracle.cpp (Kind letters and parameters identical).
+   --  Masks are 128 x 128 UInt8 C1 in MOVING pixel coordinates (X = column, Y = row).
+   type Mask_Spec is record
+      Kind          : Character := 'F';
+      A, B, C, D    : Integer := 0;
+      V             : Natural := 255;
+   end record;
+   function Mask (Spec : Mask_Spec) return OpenCV.Core.Mat;
+   --  Sets Rows Y .. Y + H - 1, columns X .. X + W - 1 of Image to Value (clipped).
+   procedure Fill (Image : in out OpenCV.Core.Mat; X, Y, W, H : Integer; Value : Natural);
+   --  Replaces moving rectangle (X, Y, W, H) with 0 = constant 250, 1 = Noise (H, W, 1234),
+   --  2 = Texture (128, 128, -14, 9) content, 3 = Stripes (H, W, 0).
+   function Occlude (Moving : OpenCV.Core.Mat; X, Y, W, H, Kind : Natural) return OpenCV.Core.Mat;
+   --  Number of nonzero pixels.
+   function Nonzero (Image : OpenCV.Core.Mat) return Natural;
 end ECC_Fixtures;
