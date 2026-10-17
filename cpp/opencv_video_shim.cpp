@@ -5,9 +5,12 @@
 #include <opencv2/video/tracking.hpp>
 
 #include <cmath>
+#include <cstddef>
+#include <cstring>
 #include <exception>
 #include <cstdio>
 #include <limits>
+#include <type_traits>
 #include <utility>
 #include <memory>
 #include <vector>
@@ -978,6 +981,27 @@ constexpr double kEccHomographySeedMaximumLinear = 4.0;
 constexpr double kEccHomographySeedMaximumTranslation = 1048576.0;
 constexpr double kEccHomographySeedMaximumDenominatorDeviation = 0.5;
 
+// The 48-byte homography result has four padding bytes between h22 and correlation (offsets
+// 36-39, pinned by the layout assertions in opencv_video_shim.h). A member-wise store or a
+// structure copy leaves padding bytes unspecified, so the published representation is built
+// in a zero-filled byte buffer and copied once with std::memcpy.
+using EccHomographyResult = opencv_video_ecc_homography_result;
+constexpr std::size_t kEccHomographyPaddingBegin = offsetof(EccHomographyResult, h22) + sizeof(float);
+constexpr std::size_t kEccHomographyPaddingEnd = offsetof(EccHomographyResult, correlation);
+static_assert(std::is_trivially_copyable<EccHomographyResult>::value &&
+                  std::is_standard_layout<EccHomographyResult>::value,
+              "ECC homography result must be a trivially copyable standard-layout object");
+static_assert(kEccHomographyPaddingBegin == 36 && kEccHomographyPaddingEnd == 40 &&
+                  kEccHomographyPaddingEnd + sizeof(double) == sizeof(EccHomographyResult),
+              "ECC homography result padding must be exactly bytes 36-39");
+
+// Writes one field at its ABI offset into the byte representation.
+template <typename T>
+void put_ecc_homography_field(unsigned char (&bytes)[sizeof(EccHomographyResult)],
+                              std::size_t offset, T value) {
+    std::memcpy(bytes + offset, &value, sizeof value);
+}
+
 // Shared homography ECC entry. `seed` is nullptr for the identity-initialized path, otherwise
 // nine row-major coefficients h00 h01 h02 h10 h11 h12 h20 h21 h22 (native STORAGE order). Only
 // the private initial matrix differs; validation, native call, output checks and publication
@@ -1060,18 +1084,24 @@ opencv_video_status ecc_homography_entry(
         if (w[8] != 1.0f)
             return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC homography H22 is not exactly 1");
 
-        opencv_video_ecc_homography_result computed;
-        computed.h00 = w[0];
-        computed.h01 = w[1];
-        computed.h02 = w[2];
-        computed.h10 = w[3];
-        computed.h11 = w[4];
-        computed.h12 = w[5];
-        computed.h20 = w[6];
-        computed.h21 = w[7];
-        computed.h22 = w[8];
-        computed.correlation = correlation;
-        *result = computed;
+        // Every validation has passed. All 48 bytes are defined: the buffer starts zero-filled,
+        // nine Float32 coefficients occupy 0-35, padding 36-39 stays zero (cleared explicitly),
+        // correlation occupies 40-47. One publication; the caller's object is not touched earlier.
+        unsigned char computed[sizeof(EccHomographyResult)];
+        std::memset(computed, 0, sizeof computed);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h00), w[0]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h01), w[1]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h02), w[2]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h10), w[3]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h11), w[4]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h12), w[5]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h20), w[6]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h21), w[7]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h22), w[8]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, correlation), correlation);
+        std::memset(computed + kEccHomographyPaddingBegin, 0,
+                    kEccHomographyPaddingEnd - kEccHomographyPaddingBegin);
+        std::memcpy(static_cast<void *>(result), computed, sizeof computed);
         clear_error();
         return OPENCV_VIDEO_OK;
     } catch (const cv::Exception &e) {

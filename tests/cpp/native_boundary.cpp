@@ -2573,6 +2573,46 @@ void hom_unchanged(const opencv_video_ecc_homography_result &r, const char *mess
     check(std::memcmp(&r, &s, sizeof r) == 0, message);
 }
 
+// Task 017-R1: an alternative caller prefill. Every byte, including padding 36-39, is nonzero
+// and differs from hom_sentinel(), so a publication that leaves padding untouched, or copies
+// unspecified padding, is observable.
+opencv_video_ecc_homography_result hom_pattern(unsigned char seed) {
+    opencv_video_ecc_homography_result r;
+    unsigned char bytes[sizeof r];
+    for (size_t i = 0; i < sizeof r; ++i)
+        bytes[i] = static_cast<unsigned char>(((seed + i * 73) % 255) + 1);
+    std::memcpy(&r, bytes, sizeof r);
+    return r;
+}
+
+constexpr size_t kHomPaddingBegin = offsetof(opencv_video_ecc_homography_result, h22) + sizeof(float);
+constexpr size_t kHomPaddingEnd = offsetof(opencv_video_ecc_homography_result, correlation);
+static_assert(kHomPaddingBegin == 36 && kHomPaddingEnd == 40, "ECC homography padding offsets");
+
+// Reads the object representation through unsigned char (well-defined for any object).
+void hom_bytes(const opencv_video_ecc_homography_result &r, unsigned char out[48]) {
+    std::memcpy(out, &r, sizeof r);
+}
+
+bool hom_padding_is(const opencv_video_ecc_homography_result &r, bool zero) {
+    unsigned char b[sizeof r];
+    hom_bytes(r, b);
+    for (size_t i = kHomPaddingBegin; i < kHomPaddingEnd; ++i)
+        if ((b[i] == 0) != zero) return false;
+    return true;
+}
+
+void hom_padding_zero(const opencv_video_ecc_homography_result &r, const char *message) {
+    if (!hom_padding_is(r, true)) {
+        unsigned char b[sizeof r];
+        hom_bytes(r, b);
+        std::cerr << message << ": padding bytes 36-39 =";
+        for (size_t i = kHomPaddingBegin; i < kHomPaddingEnd; ++i) std::cerr << ' ' << int(b[i]);
+        std::cerr << '\n';
+        check(false, "ECC homography success published nonzero padding bytes 36-39");
+    }
+}
+
 opencv_video_status hom_call(const opencv_core_mat_handle *a, const opencv_core_mat_handle *b,
                              opencv_video_ecc_homography_result *r, int iterations = 50,
                              double epsilon = 1e-4) {
@@ -2619,6 +2659,7 @@ void hom_matches_direct(const opencv_video_ecc_homography_result &r, const HomDi
     check(std::memcmp(got, d.w, sizeof got) == 0 &&
           std::memcmp(&r.correlation, &d.rho, sizeof d.rho) == 0, message);
     check(r.h22 == 1.0f && d.w[8] == 1.0f, "ECC homography H22 is not exactly 1");
+    hom_padding_zero(r, message);
 }
 
 int64_t hom_checksum(const cv::Mat &m) {
@@ -2714,10 +2755,9 @@ void run_ecc_homography() {
         }
         check(hom_checksum(moving_image) == moving_sum &&
               cv::norm(output(moving.get()), moving_image, cv::NORM_INF) == 0, "homography changed moving image");
-        opencv_video_ecc_homography_result again = hom_sentinel();
+        opencv_video_ecc_homography_result again = hom_pattern(0x3C);
         check(hom_call(base.get(), moving.get(), &again) == OPENCV_VIDEO_OK &&
-              std::memcmp(&again, &r, offsetof(opencv_video_ecc_homography_result, h22) + 4) == 0 &&
-              again.correlation == r.correlation, "repeated homography call differs");
+              std::memcmp(&again, &r, sizeof r) == 0, "repeated homography call differs (48 bytes)");
     }
     // Affine-equivalent projective matrix (H20 = H21 = 0) agrees with the affine export to
     // within the optimizer's model difference; both see the same affine motion.
@@ -3018,6 +3058,7 @@ void run_ecc_homography() {
             check(std::memcmp(got, kHomInjected[mode - 30], sizeof got) == 0,
                   "ECC homography altered an injected finite matrix");
             check(r.correlation == reference.rho, "injected finite matrix changed the correlation");
+            hom_padding_zero(r, "injected finite homography matrix");
             check(std::strlen(opencv_video_last_error()) == 0, "stale diagnostic after accepted matrix");
         }
         // Schema / storage-identity mutations through well-defined cv::Mat operations.
@@ -3167,10 +3208,9 @@ void run_ecc_homography_seeded() {
                   "seeded refinement did not reduce the image residual");
             ++residual_checked;
         }
-        opencv_video_ecc_homography_result again = hom_sentinel();
+        opencv_video_ecc_homography_result again = hom_pattern(0x3C);
         check(hs_call(base.get(), moving.get(), c.seed, &again) == OPENCV_VIDEO_OK &&
-              std::memcmp(&again, &r, offsetof(opencv_video_ecc_homography_result, h22) + 4) == 0 &&
-              again.correlation == r.correlation, "repeated seeded homography call differs");
+              std::memcmp(&again, &r, sizeof r) == 0, "repeated seeded homography call differs (48 bytes)");
         check(hom_checksum(output(moving.get())) == moving_sum, "seeded homography changed moving image");
     }
     check(residual_checked >= 5, "too few residual-checked seeded fixtures");
@@ -3465,6 +3505,7 @@ void run_ecc_homography_seeded() {
             check(std::memcmp(got, kHomInjected[mode - 30], sizeof got) == 0,
                   "seeded ECC homography altered an injected finite matrix");
             check(r.correlation == reference.rho, "injected finite matrix changed the seeded correlation");
+            hom_padding_zero(r, "seeded injected finite homography matrix");
         }
         for (int mode = 1; mode <= 8; ++mode) {
             hom_schema_mode = mode;
@@ -3490,6 +3531,177 @@ void run_ecc_homography_seeded() {
     std::cout << "PASS: ECC homography seeded shim vs direct seeded findTransformECC, nine coefficients, "
                  "identity equivalence, seed domain, geometry rule, nonconvergence, aliases, Regions\n";
 }
+
+// Task 017-R1: deterministic 48-byte object representation for both homography exports.
+// Success: every byte is defined (padding 36-39 zero) and independent of the caller's prefill.
+// Failure: every caller byte, including padding, is preserved whatever the prefill was.
+void run_ecc_homography_padding() {
+    const int n = 128;
+    const cv::Mat base_image = ecc_fixture::texture(n, n);
+    auto base = ecc_handle(base_image);
+    const float identity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const opencv_video_ecc_homography_result prefills[] = {hom_sentinel(), hom_pattern(0x11),
+                                                          hom_pattern(0xC7)};
+    for (const auto &p : prefills)
+        check(hom_padding_is(p, false), "prefill padding must be nonzero to observe publication");
+    check(std::memcmp(&prefills[0], &prefills[1], 48) != 0 && std::memcmp(&prefills[1], &prefills[2], 48) != 0,
+          "prefill patterns must differ");
+
+    // Successful calls: identity export, identity seed, near seed (identity raises there).
+    int successes = 0;
+    {
+        const double pb[9] = {1, 0, 0, 0, 1, 0, 0.0002, -0.0002, 1};
+        const double strong[9] = {1, 0, 0, 0, 1, 0, 0.002, 0.002, 1};
+        const float near_strong[9] = {1, 0, 0, 0, 1, 0, 0.0018f, 0.0018f, 1};
+        const cv::Mat mv_pb = ecc_fixture::homography_texture(n, n, pb);
+        const cv::Mat mv_strong = ecc_fixture::homography_texture(n, n, strong);
+        auto h_pb = ecc_handle(mv_pb);
+        auto h_strong = ecc_handle(mv_strong);
+        struct Success {
+            const char *name;
+            const opencv_core_mat_handle *moving;
+            const cv::Mat *moving_image;
+            const float *seed;  // nullptr: identity-initialized export
+        };
+        const Success cases[] = {
+            {"identity export, same image", base.get(), &base_image, nullptr},
+            {"identity export, perspective", h_pb.get(), &mv_pb, nullptr},
+            {"identity seed, same image", base.get(), &base_image, identity},
+            {"identity seed, perspective", h_pb.get(), &mv_pb, identity},
+            {"near seed, strong perspective", h_strong.get(), &mv_strong, near_strong},
+        };
+        for (const auto &c : cases) {
+            const HomDirect d = c.seed == nullptr ? hom_direct(base_image, *c.moving_image)
+                                                  : hs_direct(base_image, *c.moving_image, c.seed);
+            unsigned char first[48];
+            for (size_t k = 0; k < sizeof prefills / sizeof prefills[0]; ++k) {
+                opencv_video_ecc_homography_result r = prefills[k];
+                const auto code = c.seed == nullptr ? hom_call(base.get(), c.moving, &r)
+                                                    : hs_call(base.get(), c.moving, c.seed, &r);
+                check(code == OPENCV_VIDEO_OK, c.name);
+                hom_matches_direct(r, d, c.name);  // nine coefficients, correlation, H22, padding
+                unsigned char bytes[48];
+                hom_bytes(r, bytes);
+                for (size_t i = kHomPaddingBegin; i < kHomPaddingEnd; ++i)
+                    check(bytes[i] == 0, "ECC homography padding byte not zero");
+                if (k == 0)
+                    std::memcpy(first, bytes, sizeof first);
+                else
+                    check(std::memcmp(first, bytes, sizeof first) == 0,
+                          "ECC homography 48-byte result depends on the caller's prefill");
+            }
+            ++successes;
+        }
+        // Identity seed and the identity-initialized export: identical complete representations,
+        // even when the two caller objects start from different prefills.
+        for (const auto *mv : {base.get(), h_pb.get()}) {
+            opencv_video_ecc_homography_result plain = prefills[1], seeded = prefills[2];
+            check(hom_call(base.get(), mv, &plain) == OPENCV_VIDEO_OK &&
+                  hs_call(base.get(), mv, identity, &seeded) == OPENCV_VIDEO_OK,
+                  "identity equivalence calls");
+            check(std::memcmp(&plain, &seeded, sizeof plain) == 0,
+                  "identity seed and identity export differ in their 48-byte representation");
+        }
+    }
+    check(successes == 5, "padding success coverage");
+
+    // Failures: every prefill is preserved byte for byte, for both exports.
+    int failures = 0;
+    {
+        const cv::Mat flat_image = ecc_fixture::constant(n, n, 128);
+        auto flat = ecc_handle(flat_image);
+        auto wrong = matrix(n, n, OPENCV_CORE_DEPTH_FLOAT32, 1);
+        float bad_h22[9];
+        std::memcpy(bad_h22, identity, sizeof bad_h22);
+        bad_h22[8] = 2.0f;
+        float nan_seed[9];
+        std::memcpy(nan_seed, identity, sizeof nan_seed);
+        nan_seed[4] = std::numeric_limits<float>::quiet_NaN();
+        float den_seed[9];
+        std::memcpy(den_seed, identity, sizeof den_seed);
+        den_seed[6] = 0.01f;
+        for (const auto &p : prefills) {
+            auto expect_kept = [&](opencv_video_status code, opencv_video_status expected,
+                                   const opencv_video_ecc_homography_result &r, const char *message) {
+                check(code == expected, message);
+                check(std::memcmp(&r, &p, sizeof r) == 0, message);
+                ++failures;
+            };
+            opencv_video_ecc_homography_result r = p;
+            // Input validation.
+            expect_kept(hom_call(nullptr, base.get(), &r), OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, r,
+                        "null image changed the prefill");
+            expect_kept(hom_call(base.get(), wrong.get(), &r), OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, r,
+                        "wrong depth changed the prefill");
+            expect_kept(hom_call(base.get(), base.get(), &r, 0), OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, r,
+                        "invalid iterations changed the prefill");
+            expect_kept(hs_call(base.get(), base.get(), identity, &r, 50, 0.0),
+                        OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, r, "invalid epsilon changed the prefill");
+            // Seed validation.
+            expect_kept(hs_call(base.get(), base.get(), bad_h22, &r), OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, r,
+                        "non-unit H22 seed changed the prefill");
+            expect_kept(hs_call(base.get(), base.get(), nan_seed, &r), OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, r,
+                        "nonfinite seed changed the prefill");
+            expect_kept(hs_call(base.get(), base.get(), den_seed, &r), OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, r,
+                        "denominator seed changed the prefill");
+            // Native OpenCV raises.
+            expect_kept(hom_call(flat.get(), flat.get(), &r), OPENCV_VIDEO_ERROR_OPENCV, r,
+                        "native failure changed the identity-export prefill");
+            expect_kept(hs_call(flat.get(), flat.get(), identity, &r), OPENCV_VIDEO_ERROR_OPENCV, r,
+                        "native failure changed the seeded prefill");
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+            // Injected exceptions, rejected coefficients/correlation, schema mutations: both exports.
+            for (int which = 0; which < 2; ++which) {
+                auto call = [&](opencv_video_ecc_homography_result *out) {
+                    return which == 0 ? hom_call(base.get(), base.get(), out)
+                                      : hs_call(base.get(), base.get(), identity, out);
+                };
+                for (int stage : {1, 2}) for (int kind : {1, 2, 4, 3}) {
+                    fault_stage = stage; fault_kind = kind;
+                    const auto code = call(&r);
+                    fault_stage = 0; fault_kind = 0;
+                    const auto expected = kind == 2 ? OPENCV_VIDEO_ERROR_OPENCV
+                                        : kind == 3 ? OPENCV_VIDEO_ERROR_UNKNOWN : OPENCV_VIDEO_ERROR_STANDARD;
+                    expect_kept(code, expected, r, "injected exception changed the prefill");
+                }
+                for (int mode = 1; mode <= 20; ++mode) {
+                    hom_corrupt_mode = mode;
+                    const auto code = call(&r);
+                    hom_corrupt_mode = 0;
+                    expect_kept(code, OPENCV_VIDEO_ERROR_OPENCV, r, "rejected corruption changed the prefill");
+                }
+                for (int mode = 1; mode <= 8; ++mode) {
+                    hom_schema_mode = mode;
+                    const auto code = call(&r);
+                    hom_schema_mode = 0;
+                    hom_schema_keep.release();
+                    hom_schema_wide.release();
+                    expect_kept(code, OPENCV_VIDEO_ERROR_OPENCV, r, "schema failure changed the prefill");
+                }
+                // Accepted finite injected matrices are published with zero padding.
+                for (int mode = 30; mode <= 34; ++mode) {
+                    opencv_video_ecc_homography_result ok = p;
+                    hom_corrupt_mode = mode;
+                    const auto code = call(&ok);
+                    hom_corrupt_mode = 0;
+                    check(code == OPENCV_VIDEO_OK, "injected finite matrix rejected");
+                    hom_padding_zero(ok, "injected finite matrix padding");
+                }
+            }
+#endif
+        }
+    }
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    const int expected_failures = 3 * (9 + 2 * (8 + 20 + 8));
+#else
+    const int expected_failures = 3 * 9;
+#endif
+    check(failures == expected_failures, "padding failure coverage");
+    std::cout << "PASS: ECC homography 48-byte representation: " << successes
+              << " success cases x 3 prefills with zero padding 36-39 and prefill-independent bytes, "
+                 "identity seed == identity export (48 bytes), "
+              << failures << " failures preserving every prefill byte\n";
+}
 }  // namespace
 
 
@@ -3514,6 +3726,7 @@ int main() {
         run_ecc_affine_seeded();
         run_ecc_homography();
         run_ecc_homography_seeded();
+        run_ecc_homography_padding();
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "FAIL: " << error.what() << '\n';
