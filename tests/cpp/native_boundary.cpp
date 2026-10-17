@@ -3045,6 +3045,453 @@ void run_ecc_homography() {
 }
 }  // namespace
 
+// ECC homography seeded (Task 017): the new export versus an independent direct seeded
+// findTransformECC(MOTION_HOMOGRAPHY) call, seed domain, atomicity, faults and corruption.
+namespace {
+opencv_video_status hs_call(const opencv_core_mat_handle *a, const opencv_core_mat_handle *b,
+                            const float s[9], opencv_video_ecc_homography_result *r,
+                            int iterations = 50, double epsilon = 1e-4) {
+    return opencv_video_estimate_ecc_homography_seeded(a, b, iterations, epsilon, s[0], s[1], s[2],
+                                                       s[3], s[4], s[5], s[6], s[7], s[8], r);
+}
+
+// Direct native call with the nine seed values in native storage order (no shim code).
+HomDirect hs_direct(const cv::Mat &a, const cv::Mat &b, const float s[9], int iterations = 50,
+                    double epsilon = 1e-4) {
+    HomDirect d{};
+    cv::Mat warp(3, 3, CV_32F);
+    for (int i = 0; i < 9; ++i) warp.ptr<float>()[i] = s[i];
+    try {
+        d.rho = cv::findTransformECC(a, b, warp, cv::MOTION_HOMOGRAPHY,
+            cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, iterations, epsilon),
+            cv::noArray(), 5);
+        d.ok = true;
+    } catch (const cv::Exception &) {
+        d.ok = false;
+    }
+    for (int i = 0; i < 9; ++i) d.w[i] = warp.ptr<float>()[i];
+    return d;
+}
+
+// The binding must agree with the same-build direct call: bitwise on success, an OpenCV
+// status with a diagnostic and all 48 bytes untouched on native failure.
+void hs_agrees(const opencv_core_mat_handle *ha, const opencv_core_mat_handle *hb, const cv::Mat &a,
+               const cv::Mat &b, const float s[9], const char *message, int iterations = 50,
+               double epsilon = 1e-4) {
+    const HomDirect d = hs_direct(a, b, s, iterations, epsilon);
+    opencv_video_ecc_homography_result r = hom_sentinel();
+    const auto code = hs_call(ha, hb, s, &r, iterations, epsilon);
+    if (d.ok) {
+        check(code == OPENCV_VIDEO_OK, message);
+        hom_matches_direct(r, d, message);
+        check(std::strlen(opencv_video_last_error()) == 0, "stale diagnostic after seeded success");
+    } else {
+        check(code == OPENCV_VIDEO_ERROR_OPENCV, message);
+        check(std::strlen(opencv_video_last_error()) > 0, "no diagnostic after seeded native failure");
+        hom_unchanged(r, message);
+    }
+}
+
+void run_ecc_homography_seeded() {
+    const int n = 128;
+    const cv::Mat base_image = ecc_fixture::texture(n, n);
+    auto base = ecc_handle(base_image);
+    const cv::Mat before_base = base_image.clone();
+    const int64_t base_sum = hom_checksum(base_image);
+    const float identity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const float inf = std::numeric_limits<float>::infinity();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+
+    // Identity seed is byte-identical to the identity-initialized export (success and failure).
+    {
+        const double pb[9] = {1, 0, 0, 0, 1, 0, 0.0002, -0.0002, 1};
+        const double strong[9] = {1, 0, 0, 0, 1, 0, 0.002, 0.002, 1};
+        const cv::Mat movings[] = {base_image.clone(), ecc_fixture::homography_texture(n, n, pb),
+                                   ecc_fixture::homography_texture(n, n, strong),
+                                   ecc_fixture::constant(n, n, 128)};
+        int successes = 0, failures = 0;
+        for (const auto &mv : movings) {
+            auto moving = ecc_handle(mv);
+            opencv_video_ecc_homography_result plain = hom_sentinel(), seeded = hom_sentinel();
+            const auto a = hom_call(base.get(), moving.get(), &plain);
+            const auto b = hs_call(base.get(), moving.get(), identity, &seeded);
+            check(a == b, "identity seed changed the native outcome");
+            check(std::memcmp(&plain, &seeded, sizeof plain) == 0, "identity seed differs from the identity export");
+            (a == OPENCV_VIDEO_OK ? successes : failures) += 1;
+        }
+        check(successes >= 2 && failures >= 2, "identity-equivalence coverage");
+    }
+
+    // Near seeds: identity raises, the seeded export converges and matches the direct call.
+    struct Case { const char *name; double t[9]; float seed[9]; };
+    const Case cases[] = {
+        {"strong perspective", {1, 0, 0, 0, 1, 0, 0.002, 0.002, 1}, {1, 0, 0, 0, 1, 0, 0.0018f, 0.0018f, 1}},
+        {"large translation", {1, 0, 40, 0, 1, 30, 0, 0, 1}, {1, 0, 38, 0, 1, 28, 0, 0, 1}},
+        {"translation and perspective", {1, 0, 12, 0, 1, -9, 0.0005, -0.0004, 1},
+         {1, 0, 11, 0, 1, -8, 0.0004f, -0.0003f, 1}},
+        {"reflection", {-1, 0, 127, 0, 1, 0, 0, 0, 1}, {-0.98f, 0.01f, 126, 0, 1, 0.1f, 0, 0, 1}},
+        {"scale and perspective", {1.15, 0.02, -4, -0.01, 1.12, 3, 0.0008, -0.0006, 1},
+         {1.12f, 0.01f, -3, 0, 1.10f, 2.5f, 0.0006f, -0.0005f, 1}},
+        {"shear and perspective", {1, 0.15, -3, 0.05, 1, 2, -0.0007, 0.0009, 1},
+         {1, 0.13f, -2.5f, 0.04f, 1, 1.6f, -0.0006f, 0.0008f, 1}},
+    };
+    int residual_checked = 0;
+    for (const auto &c : cases) {
+        const cv::Mat moving_image = ecc_fixture::homography_texture(n, n, c.t);
+        auto moving = ecc_handle(moving_image);
+        const int64_t moving_sum = hom_checksum(moving_image);
+        opencv_video_ecc_homography_result plain = hom_sentinel();
+        check(hom_call(base.get(), moving.get(), &plain) == OPENCV_VIDEO_ERROR_OPENCV,
+              "identity initialization unexpectedly converged");
+        const HomDirect d = hs_direct(base_image, moving_image, c.seed);
+        opencv_video_ecc_homography_result r = hom_sentinel();
+        check(hs_call(base.get(), moving.get(), c.seed, &r) == OPENCV_VIDEO_OK, c.name);
+        hom_matches_direct(r, d, "seeded export differs from the direct seeded native call");
+        float got[9];
+        hom_values(r, got);
+        for (int i = 0; i < 8; ++i) {
+            const double tol = (i == 2 || i == 5) ? 0.15 : (i >= 6 ? 5e-5 : 0.006);
+            if (!(std::fabs(got[i] - c.t[i]) < tol)) {
+                std::cerr << c.name << " coefficient " << i << " got " << got[i] << " want " << c.t[i] << '\n';
+                check(false, "seeded homography coefficient position, sign or magnitude");
+            }
+        }
+        check(std::memcmp(got, c.seed, sizeof got) != 0, "seeded result equals the seed");
+        check(r.correlation > 0.98, "seeded homography correlation");
+        // WARP_INVERSE_MAP direction: the residual collapses relative to the seed. The metric
+        // needs the 24-pixel interior to map inside the moving image; the 40/30-pixel shift
+        // does not, so it is covered by the coefficients only.
+        const double seed_residual = hom_residual(base_image, moving_image, c.seed);
+        if (seed_residual < 1e8) {
+            check(hom_residual(base_image, moving_image, got) < 0.1 * seed_residual,
+                  "seeded refinement did not reduce the image residual");
+            ++residual_checked;
+        }
+        opencv_video_ecc_homography_result again = hom_sentinel();
+        check(hs_call(base.get(), moving.get(), c.seed, &again) == OPENCV_VIDEO_OK &&
+              std::memcmp(&again, &r, offsetof(opencv_video_ecc_homography_result, h22) + 4) == 0 &&
+              again.correlation == r.correlation, "repeated seeded homography call differs");
+        check(hom_checksum(output(moving.get())) == moving_sum, "seeded homography changed moving image");
+    }
+    check(residual_checked >= 5, "too few residual-checked seeded fixtures");
+
+    // Seed position: transposing or swapping a seed must change the native input (no permutation).
+    {
+        const double t[9] = {1, 0, 12, 0, 1, -9, 0.0005, -0.0004, 1};
+        const cv::Mat mv = ecc_fixture::homography_texture(n, n, t);
+        auto moving = ecc_handle(mv);
+        const float seed[9] = {1, 0, 11, 0, 1, -8, 0.0004f, -0.0003f, 1};
+        const float swapped[9] = {1, 0, -8, 0, 1, 11, 0.0004f, -0.0003f, 1};
+        const float permuted[9] = {1, 0, 11, 0, 1, -8, -0.0003f, 0.0004f, 1};
+        hs_agrees(base.get(), moving.get(), base_image, mv, seed, "storage-order seed");
+        hs_agrees(base.get(), moving.get(), base_image, mv, swapped, "swapped translation seed");
+        hs_agrees(base.get(), moving.get(), base_image, mv, permuted, "swapped projective seed");
+        opencv_video_ecc_homography_result a = hom_sentinel(), b = hom_sentinel();
+        const auto ca = hs_call(base.get(), moving.get(), seed, &a);
+        const auto cb = hs_call(base.get(), moving.get(), swapped, &b);
+        check(ca == OPENCV_VIDEO_OK && (cb != OPENCV_VIDEO_OK || std::memcmp(&a, &b, 36) != 0),
+              "translation seed order has no effect");
+    }
+
+    // Option boundaries, domain-edge seeds and wrong seeds follow the same-build direct call.
+    {
+        const double pb[9] = {1, 0, 0, 0, 1, 0, 0.0002, -0.0002, 1};
+        const double strong[9] = {1, 0, 0, 0, 1, 0, 0.002, 0.002, 1};
+        const cv::Mat mpb = ecc_fixture::homography_texture(n, n, pb);
+        const cv::Mat mst = ecc_fixture::homography_texture(n, n, strong);
+        auto hpb = ecc_handle(mpb);
+        auto hst = ecc_handle(mst);
+        const float near[9] = {1, 0, 0, 0, 1, 0, 0.0018f, 0.0018f, 1};
+        struct Opt { int it; double eps; } opts[] = {{1, 1e-8}, {1, 0.1}, {100, 1e-8}, {100, 0.1}, {3, 1e-4}};
+        for (const auto &o : opts)
+            hs_agrees(base.get(), hst.get(), base_image, mst, near, "seeded option boundary", o.it, o.eps);
+        // Exact limits of the domain pass validation; their native outcome is whatever native does.
+        const float edges[][9] = {
+            {1, 0, 0, 0, 1, 0, 0.5f / 127, 0, 1},
+            {1, 0, 0, 0, 1, 0, 0, -0.5f / 127, 1},
+            {1, 0, 0, 0, 1, 0, 0.25f / 127, -0.25f / 127, 1},
+            {4, -4, 1048576, -4, 4, -1048576, 0, 0, 1},
+            {4, 4, 0, 4, 4, 0, 0, 0, 1},
+            {0, 0, 0, 0, 0, 0, 0, 0, 1},
+            {1e-6f, 0, 0, 0, 1e-6f, 0, 0, 0, 1},
+            {4, 0, 0, 0, 0.01f, 0, 0, 0, 1},
+            {1, 0, 0, 0, 1, 0, -0.0019f, 0.0019f, 1},
+            {0.8f, -0.2f, 6, 0.2f, 1.25f, -5, 0.001f, -0.001f, 1},
+        };
+        for (const auto &s : edges) {
+            hs_agrees(base.get(), hpb.get(), base_image, mpb, s, "domain-edge seed");
+            hs_agrees(base.get(), hst.get(), base_image, mst, s, "domain-edge seed (strong)");
+        }
+        // A wrong-but-finite seeded success is published bitwise (no correlation threshold).
+        const float wrong[9] = {1, 0, 0, 0, 1, 0, -0.0019f, 0.0019f, 1};
+        const HomDirect d = hs_direct(base_image, mpb, wrong, 1);
+        check(d.ok && d.rho < 0.5, "one-iteration wrong seed fixture changed");
+        hs_agrees(base.get(), hpb.get(), base_image, mpb, wrong, "wrong-but-finite seeded success", 1);
+        // The returned matrix may leave the seed domain; passing it back may be rejected.
+        float escaped = std::fabs(d.w[6]) * 127.0f + std::fabs(d.w[7]) * 127.0f;
+        check(escaped > 0.5f, "fixture no longer demonstrates an out-of-domain native output");
+        opencv_video_ecc_homography_result r = hom_sentinel();
+        check(hs_call(base.get(), hpb.get(), d.w, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+              "out-of-domain native output accepted as a seed");
+        hom_unchanged(r, "rejected reseed changed result");
+    }
+
+    // Seed-domain rejection before any native call (INVALID_ARGUMENT, 48 bytes untouched).
+    {
+        const double pb[9] = {1, 0, 0, 0, 1, 0, 0.0002, -0.0002, 1};
+        auto moving = ecc_handle(ecc_fixture::homography_texture(n, n, pb));
+        const float good[9] = {1.0f, 0.01f, 0.5f, -0.01f, 1.0f, -0.5f, 0.0001f, -0.0001f, 1.0f};
+        int rejected_count = 0;
+        auto rejected = [&](const float s[9], const char *fragment, const char *message) {
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            check(hs_call(base.get(), moving.get(), s, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, message);
+            if (std::strstr(opencv_video_last_error(), fragment) == nullptr)
+                std::cerr << message << " diagnostic: " << opencv_video_last_error() << '\n';
+            check(std::strstr(opencv_video_last_error(), fragment) != nullptr, "seed rejected for the wrong reason");
+            hom_unchanged(r, message);
+            ++rejected_count;
+        };
+        for (int i = 0; i < 9; ++i)
+            for (float bad : {nan, inf, -inf}) {
+                float s[9];
+                std::memcpy(s, good, sizeof s);
+                s[i] = bad;
+                rejected(s, "nonfinite", "nonfinite seed coefficient accepted");
+            }
+        for (float h22 : {0.0f, -1.0f, 2.0f, std::nextafter(1.0f, 2.0f), std::nextafter(1.0f, 0.0f), 1e-30f}) {
+            float s[9];
+            std::memcpy(s, good, sizeof s);
+            s[8] = h22;
+            rejected(s, "H22", "non-unit H22 seed accepted");
+        }
+        for (int i : {0, 1, 3, 4})
+            for (float bad : {std::nextafter(4.0f, 5.0f), -std::nextafter(4.0f, 5.0f), 1e30f,
+                              std::numeric_limits<float>::max()}) {
+                float s[9];
+                std::memcpy(s, good, sizeof s);
+                s[i] = bad;
+                rejected(s, "linear", "linear seed coefficient beyond 4 accepted");
+            }
+        for (int i : {2, 5})
+            for (float bad : {std::nextafter(1048576.0f, 2e6f), -std::nextafter(1048576.0f, 2e6f),
+                              -std::numeric_limits<float>::max()}) {
+                float s[9];
+                std::memcpy(s, good, sizeof s);
+                s[i] = bad;
+                rejected(s, "translation", "translation seed beyond 2^20 accepted");
+            }
+        // Denominator rule on 128x128: |H20|*127 + |H21|*127 <= 0.5, evaluated in double.
+        const float just_over = std::nextafter(0.5f / 127.0f, 1.0f);
+        const float den_bad[][2] = {{just_over, 0}, {0, -just_over}, {0.003f, 0.001f}, {-0.0025f, -0.0025f},
+                                    {0.01f, 0}, {1e30f, 0}, {0, std::numeric_limits<float>::max()}};
+        for (const auto &p : den_bad) {
+            float s[9];
+            std::memcpy(s, good, sizeof s);
+            s[6] = p[0];
+            s[7] = p[1];
+            rejected(s, "denominator", "denominator deviation above 0.5 accepted");
+        }
+        check(rejected_count == 27 + 6 + 16 + 6 + 7, "not every seed rejection executed");
+        // The rule is geometry dependent: a seed valid at 128x128 is rejected on a 256-wide image.
+        {
+            const float s[9] = {1, 0, 0, 0, 1, 0, 0.0035f, 0, 1};
+            check(std::fabs(double(s[6])) * 127.0 <= 0.5, "geometry fixture is not valid at 128");
+            const cv::Mat a = ecc_fixture::texture(n, 256), b = ecc_fixture::texture(n, 256, 2, 1);
+            auto ha = ecc_handle(a);
+            auto hb = ecc_handle(b);
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            check(hs_call(ha.get(), hb.get(), s, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                  "denominator rule ignored the template width");
+            hom_unchanged(r, "geometry rejection changed result");
+            const float tall[9] = {1, 0, 0, 0, 1, 0, 0, 0.0035f, 1};
+            const cv::Mat c = ecc_fixture::texture(256, n), e = ecc_fixture::texture(256, n, 2, 1);
+            auto hc = ecc_handle(c);
+            auto he = ecc_handle(e);
+            check(hs_call(hc.get(), he.get(), tall, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                  "denominator rule ignored the template height");
+            check(hs_call(ha.get(), hb.get(), tall, &r) != OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                  "denominator rule mixed up rows and columns");
+        }
+        // Image/option validation still precedes the seed (and a bad seed never masks it).
+        float bad_seed[9];
+        std::memcpy(bad_seed, good, sizeof bad_seed);
+        bad_seed[0] = nan;
+        opencv_video_ecc_homography_result r = hom_sentinel();
+        check(hs_call(nullptr, moving.get(), good, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT &&
+              hs_call(base.get(), moving.get(), good, nullptr) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT &&
+              hs_call(base.get(), moving.get(), good, &r, 0) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT &&
+              hs_call(base.get(), moving.get(), good, &r, 50, 0.0) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+              "seeded argument validation");
+        check(hs_call(base.get(), moving.get(), bad_seed, &r, 101) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT &&
+              std::strstr(opencv_video_last_error(), "Invalid ECC options") != nullptr,
+              "option validation must precede seed validation");
+        hom_unchanged(r, "rejected seeded arguments changed result");
+        // A valid call after rejections.
+        check(hs_call(base.get(), moving.get(), good, &r) == OPENCV_VIDEO_OK, "valid call after seed rejections");
+    }
+
+    // Nonconvergence, aliases and Regions.
+    {
+        const float mild[9] = {1, 0.01f, 1, 0, 1, 0.5f, 0.00004f, -0.00003f, 1};
+        auto flat = ecc_handle(ecc_fixture::constant(n, n, 128));
+        opencv_video_ecc_homography_result r = hom_sentinel();
+        check(hs_call(flat.get(), flat.get(), mild, &r) == OPENCV_VIDEO_ERROR_OPENCV, "constant images accepted");
+        hom_unchanged(r, "constant-image failure changed result");
+        auto n1 = ecc_handle(ecc_fixture::noise(n, n, 3));
+        auto n2 = ecc_handle(ecc_fixture::noise(n, n, 9));
+        check(hs_call(n1.get(), n2.get(), mild, &r) == OPENCV_VIDEO_ERROR_OPENCV, "uncorrelated noise accepted");
+        hom_unchanged(r, "noise failure changed result");
+
+        check(hs_call(base.get(), base.get(), mild, &r) == OPENCV_VIDEO_OK, "same-handle seeded call");
+        hom_matches_direct(r, hs_direct(base_image, base_image, mild), "same-handle seeded differs from direct");
+        auto alias = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(alias.get()) = output(base.get());
+        opencv_video_ecc_homography_result a = hom_sentinel();
+        check(hs_call(base.get(), alias.get(), mild, &a) == OPENCV_VIDEO_OK &&
+              std::memcmp(&a, &r, 36) == 0 && a.correlation == r.correlation, "seeded shared-allocation headers");
+
+        const double h[9] = {1.0, 0.01, 1.0, -0.005, 1.0, 0.5, 0.00005, -0.00004, 1.0};
+        const cv::Mat parent_a = ecc_fixture::texture(160, 160);
+        const cv::Mat parent_b = ecc_fixture::homography_texture(160, 160, h);
+        const cv::Mat saved_a = parent_a.clone(), saved_b = parent_b.clone();
+        const cv::Rect roi(16, 16, n, n);
+        auto h_a = ecc_handle(parent_a);
+        auto h_b = ecc_handle(parent_b);
+        auto region_a = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        auto region_b = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(region_a.get()) = output(h_a.get())(roi);
+        output(region_b.get()) = output(h_b.get())(roi);
+        check(!output(region_a.get()).isContinuous() && !output(region_b.get()).isContinuous(),
+              "seeded fixture Region is contiguous");
+        opencv_video_ecc_homography_result g = hom_sentinel();
+        check(hs_call(region_a.get(), region_b.get(), mild, &g) == OPENCV_VIDEO_OK, "seeded Region call failed");
+        hom_matches_direct(g, hs_direct(parent_a(roi), parent_b(roi), mild), "seeded Region differs from direct");
+        auto clone_a = ecc_handle(parent_a(roi).clone());
+        auto clone_b = ecc_handle(parent_b(roi).clone());
+        opencv_video_ecc_homography_result c = hom_sentinel();
+        check(hs_call(clone_a.get(), clone_b.get(), mild, &c) == OPENCV_VIDEO_OK &&
+              std::memcmp(&c, &g, 36) == 0 && c.correlation == g.correlation, "seeded Region and clone differ");
+        check(cv::norm(output(h_a.get()), saved_a, cv::NORM_INF) == 0 &&
+              cv::norm(output(h_b.get()), saved_b, cv::NORM_INF) == 0, "seeded homography changed Region parents");
+        // The domain uses the Region's geometry (128), not the parent's (160).
+        const float region_edge[9] = {1, 0, 0, 0, 1, 0, 0.5f / 127, 0, 1};
+        opencv_video_ecc_homography_result e = hom_sentinel();
+        check(hs_call(region_a.get(), region_b.get(), region_edge, &e) != OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+              "seed domain used the Region parent geometry");
+    }
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    {
+        const double t[9] = {1, 0, 0, 0, 1, 0, 0.002, 0.002, 1};
+        const float s[9] = {1, 0, 0, 0, 1, 0, 0.0018f, 0.0018f, 1};
+        const cv::Mat mv = ecc_fixture::homography_texture(n, n, t);
+        auto moving = ecc_handle(mv);
+        const int64_t moving_sum = hom_checksum(mv);
+        const HomDirect reference = hs_direct(base_image, mv, s);
+        check(reference.ok, "seeded fault fixture no longer converges natively");
+        auto inputs_unchanged = [&](const char *message) {
+            check(hom_checksum(output(base.get())) == base_sum && hom_checksum(output(moving.get())) == moving_sum,
+                  message);
+        };
+        auto valid_again = [&](const char *message) {
+            opencv_video_ecc_homography_result ok = hom_sentinel();
+            check(hs_call(base.get(), moving.get(), s, &ok) == OPENCV_VIDEO_OK, message);
+            hom_matches_direct(ok, reference, message);
+        };
+        int executed = 0;
+        for (int stage : {1, 2}) for (int kind : {1, 2, 4, 3}) {
+            fault_stage = stage; fault_kind = kind;
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            const auto code = hs_call(base.get(), moving.get(), s, &r);
+            fault_stage = 0; fault_kind = 0;
+            const auto expected = kind == 2 ? OPENCV_VIDEO_ERROR_OPENCV
+                                : kind == 3 ? OPENCV_VIDEO_ERROR_UNKNOWN : OPENCV_VIDEO_ERROR_STANDARD;
+            check(code == expected, "seeded ECC homography injected exception mapped to the wrong status");
+            check(std::strlen(opencv_video_last_error()) > 0, "no diagnostic after injected seeded exception");
+            hom_unchanged(r, "seeded ECC homography injected failure changed result");
+            inputs_unchanged("seeded ECC homography injected failure changed an input");
+            valid_again("valid seeded call after injected exception");
+            ++executed;
+        }
+        check(executed == 8, "not all seeded homography exception injections executed");
+        // Seed rejection precedes the native fault hook.
+        for (int stage : {1, 2}) {
+            fault_stage = stage; fault_kind = 2;
+            float bad[9];
+            std::memcpy(bad, s, sizeof bad);
+            bad[8] = 2.0f;
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            const auto code = hs_call(base.get(), moving.get(), bad, &r);
+            fault_stage = 0; fault_kind = 0;
+            check(code == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "invalid seed reached the fault hook");
+            hom_unchanged(r, "rejected seed changed result");
+        }
+        // Generic 2x3 corruption modes are not consulted by the seeded homography export.
+        for (int mode : {1, 2, 3, 4, 9, 21, 22, 23, 24, 25, 26}) {
+            ecc_corrupt_mode = mode;
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            const auto code = hs_call(base.get(), moving.get(), s, &r);
+            ecc_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_OK, "generic ECC corruption hook reached the seeded homography export");
+            hom_matches_direct(r, reference, "generic ECC corruption altered the seeded homography result");
+        }
+        int rejected = 0;
+        for (int mode = 1; mode <= 20; ++mode) {
+            hom_corrupt_mode = mode;
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            const auto code = hs_call(base.get(), moving.get(), s, &r);
+            hom_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_ERROR_OPENCV, "seeded ECC homography corrupted native output accepted");
+            const char *expected_text = (mode >= 12 && mode <= 14) ? "nonfinite correlation"
+                : (mode == 10 || mode == 11 || mode >= 18) ? "H22 is not exactly 1"
+                : "nonfinite warp entry";
+            check(std::strstr(opencv_video_last_error(), expected_text) != nullptr,
+                  "seeded homography corruption rejected for the wrong reason");
+            hom_unchanged(r, "seeded ECC homography corrupted output was partially published");
+            inputs_unchanged("seeded ECC homography corruption changed an input");
+            ++rejected;
+        }
+        check(rejected == 20, "not all seeded homography corruption modes executed");
+        // Finite projective outputs are published exactly, including ones far outside the seed
+        // domain (mode 34): the seed domain is not an output policy.
+        for (int mode = 30; mode <= 34; ++mode) {
+            hom_corrupt_mode = mode;
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            const auto code = hs_call(base.get(), moving.get(), s, &r);
+            hom_corrupt_mode = 0;
+            check(code == OPENCV_VIDEO_OK, "seeded ECC homography rejected an injected finite projective matrix");
+            float got[9];
+            hom_values(r, got);
+            check(std::memcmp(got, kHomInjected[mode - 30], sizeof got) == 0,
+                  "seeded ECC homography altered an injected finite matrix");
+            check(r.correlation == reference.rho, "injected finite matrix changed the seeded correlation");
+        }
+        for (int mode = 1; mode <= 8; ++mode) {
+            hom_schema_mode = mode;
+            const int applied = hom_schema_applied;
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            const auto code = hs_call(base.get(), moving.get(), s, &r);
+            hom_schema_mode = 0;
+            hom_schema_keep.release();
+            hom_schema_wide.release();
+            check(hom_schema_applied == applied + 1, "seeded homography schema hook did not complete");
+            check(code == OPENCV_VIDEO_ERROR_OPENCV, "seeded ECC homography accepted a changed native warp schema");
+            check(std::strstr(opencv_video_last_error(), "unexpected ECC warp schema") != nullptr,
+                  "seeded schema rejection has the wrong diagnostic");
+            hom_unchanged(r, "seeded ECC homography schema failure changed result");
+        }
+        valid_again("valid seeded call after corruption campaign");
+        std::cout << "PASS: ECC homography seeded faults: 8 exception injections, 20 rejected corruptions, "
+                     "5 accepted finite projective matrices, 8 schema mutations, seed rejection before hooks\n";
+    }
+#endif
+    check(cv::norm(output(base.get()), before_base, cv::NORM_INF) == 0 &&
+          hom_checksum(output(base.get())) == base_sum, "seeded homography changed an input");
+    std::cout << "PASS: ECC homography seeded shim vs direct seeded findTransformECC, nine coefficients, "
+                 "identity equivalence, seed domain, geometry rule, nonconvergence, aliases, Regions\n";
+}
+}  // namespace
+
 
 int main() {
     try {
@@ -3066,6 +3513,7 @@ int main() {
         run_ecc_affine();
         run_ecc_affine_seeded();
         run_ecc_homography();
+        run_ecc_homography_seeded();
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "FAIL: " << error.what() << '\n';
