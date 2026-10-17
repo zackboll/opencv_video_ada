@@ -5,6 +5,7 @@ with OpenCV.Core.UInt8_Access;
 package body ECC_Fixtures is
    package Math renames Ada.Numerics.Long_Elementary_Functions;
    use type Interfaces.Unsigned_32;
+   use type OpenCV.UInt8_Value;
 
    function Signal (X, Y : Long_Float) return Long_Float is
       function Blob (CX, CY, A, S : Long_Float) return Long_Float is
@@ -198,4 +199,107 @@ package body ECC_Fixtures is
       end loop;
       return Sum;
    end Checksum;
+
+   procedure Fill (Image : in out OpenCV.Core.Mat; X, Y, W, H : Integer; Value : Natural) is
+   begin
+      for R in Y .. Y + H - 1 loop
+         for C in X .. X + W - 1 loop
+            if R in 0 .. Image.Rows - 1 and then C in 0 .. Image.Columns - 1 then
+               OpenCV.Core.UInt8_Access.Set (Image, R, C, OpenCV.UInt8_Value (Value));
+            end if;
+         end loop;
+      end loop;
+   end Fill;
+
+   function Mask (Spec : Mask_Spec) return OpenCV.Core.Mat is
+      N     : constant := 128;
+      State : Interfaces.Unsigned_32 := Interfaces.Unsigned_32 (Spec.V);
+   begin
+      return Result : OpenCV.Core.Mat := Constant_Image (N, N, 0) do
+         case Spec.Kind is
+            when 'F' => Fill (Result, 0, 0, N, N, Spec.V);
+            when 'H' =>
+               Fill (Result, 0, 0, N, N, Spec.V);
+               Fill (Result, Spec.A, Spec.B, Spec.C, Spec.D, 0);
+            when 'A' =>
+               Fill (Result, 0, 0, N, N, 255);
+               if Spec.C > 0 then
+                  Fill (Result, Spec.A, Spec.B, Spec.C, Spec.D, 0);
+               end if;
+               for R in 0 .. N - 1 loop
+                  for C in 0 .. N - 1 loop
+                     State := State * 1664525 + 1013904223;
+                     if OpenCV.Core.UInt8_Access.Get (Result, R, C) /= 0 then
+                        OpenCV.Core.UInt8_Access.Set
+                          (Result, R, C,
+                           OpenCV.UInt8_Value (1 + Interfaces.Shift_Right (State, 24) mod 255));
+                     end if;
+                  end loop;
+               end loop;
+            when 'M' =>
+               Fill (Result, 0, 0, N, N, Spec.V);
+               Fill (Result, 8, 90, 30, 20, 0);
+               Fill (Result, 70, 10, 40, 30, 0);
+               Fill (Result, 96, 80, 24, 40, 0);
+            when 'P' => Fill (Result, Spec.A, Spec.B, 1, 1, Spec.V);
+            when 'G' =>
+               for R in 0 .. N - 1 loop
+                  for C in 0 .. N - 1 loop
+                     if R mod Spec.A = 0 and then C mod Spec.A = 0 then
+                        OpenCV.Core.UInt8_Access.Set (Result, R, C, OpenCV.UInt8_Value (Spec.V));
+                     end if;
+                  end loop;
+               end loop;
+            when 'S' => Fill (Result, 0, Spec.A, N, Spec.B, Spec.V);
+            when 'B' => Fill (Result, Spec.A, Spec.B, Spec.C, Spec.C, Spec.V);
+            when 'D' =>
+               State := 7;
+               for R in 0 .. N - 1 loop
+                  for C in 0 .. N - 1 loop
+                     State := State * 1664525 + 1013904223;
+                     if Integer (Interfaces.Shift_Right (State, 8) mod 100) < Spec.A then
+                        OpenCV.Core.UInt8_Access.Set (Result, R, C, OpenCV.UInt8_Value (Spec.V));
+                     end if;
+                  end loop;
+               end loop;
+            when 'L' => Fill (Result, 0, 0, Spec.A, N, Spec.V);
+            when 'Z' => null;
+            when 'Q' => Fill (Result, 24, 24, 42, 42, Spec.V);
+            when others => raise Constraint_Error with "unknown mask kind";
+         end case;
+      end return;
+   end Mask;
+
+   function Occlude (Moving : OpenCV.Core.Mat; X, Y, W, H, Kind : Natural) return OpenCV.Core.Mat is
+      Source : constant OpenCV.Core.Mat :=
+        (case Kind is
+            when 0 => Constant_Image (H, W, 250),
+            when 1 => Noise (H, W, 1234),
+            when 2 => Texture (128, 128, -14, 9).Region
+                        ((OpenCV.Point_Coordinate (X), OpenCV.Point_Coordinate (Y),
+                          OpenCV.Size_Coordinate (W), OpenCV.Size_Coordinate (H))),
+            when others => Stripes (H, W, 0));
+   begin
+      return Result : OpenCV.Core.Mat := Moving.Clone do
+         for R in 0 .. H - 1 loop
+            for C in 0 .. W - 1 loop
+               OpenCV.Core.UInt8_Access.Set
+                 (Result, Y + R, X + C, OpenCV.Core.UInt8_Access.Get (Source, R, C));
+            end loop;
+         end loop;
+      end return;
+   end Occlude;
+
+   function Nonzero (Image : OpenCV.Core.Mat) return Natural is
+      Count : Natural := 0;
+   begin
+      for R in 0 .. Image.Rows - 1 loop
+         for C in 0 .. Image.Columns - 1 loop
+            if OpenCV.Core.UInt8_Access.Get (Image, R, C) /= 0 then
+               Count := Count + 1;
+            end if;
+         end loop;
+      end loop;
+      return Count;
+   end Nonzero;
 end ECC_Fixtures;

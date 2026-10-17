@@ -1,5 +1,104 @@
 # OpenCV Video for Ada
 
+### Moving-image-masked ECC homography alignment (Task 018)
+
+```ada
+Alignment : constant OpenCV.Video.ECC_Homography_Result :=
+  OpenCV.Video.Estimate_ECC_Homography
+    (Template_Image    => Previous_Image,
+     Moving_Image      => Current_Image,
+     Moving_Mask       => Valid_Moving_Pixels,
+     Initial_Transform => Predicted_Homography);
+```
+
+A complete identity-initialized example, excluding a region of the current frame that the caller
+already knows is unreliable (for example a moving vehicle or a lens obstruction):
+
+```ada
+with OpenCV.Core;
+with OpenCV.Video;
+
+procedure Align_With_Mask
+  (Previous_Image, Current_Image : OpenCV.Core.Mat;
+   Alignment                     : out OpenCV.Video.ECC_Homography_Result)
+is
+   --  One byte per CURRENT (moving) image pixel; same rows and columns as Current_Image.
+   Valid_Moving_Pixels : OpenCV.Core.Mat :=
+     OpenCV.Core.Create
+       (Current_Image.Rows, Current_Image.Columns, (Depth => OpenCV.Core.UInt8, Channels => 1));
+begin
+   Valid_Moving_Pixels.Set_To ((others => 255.0));   --  every pixel eligible
+   declare
+      --  Exclude columns 400 .. 559, rows 120 .. 279 of the CURRENT image (caller policy).
+      --  The Region shares the mask's storage.
+      Excluded : OpenCV.Core.Mat :=
+        Valid_Moving_Pixels.Region ((X => 400, Y => 120, Width => 160, Height => 160));
+   begin
+      Excluded.Set_To ((others => 0.0));
+   end;
+
+   --  Raises OpenCV.OpenCV_Error for an invalid mask, native nonconvergence or no remaining
+   --  eligible support; no result is fabricated.
+   Alignment := OpenCV.Video.Estimate_ECC_Homography
+     (Template_Image => Previous_Image,
+      Moving_Image   => Current_Image,
+      Moving_Mask    => Valid_Moving_Pixels);
+end Align_With_Mask;
+```
+
+Both overloads call the common seven-argument `cv::findTransformECC` with `MOTION_HOMOGRAPHY`,
+`COUNT | EPS`, Gaussian size 5 and the caller's mask as the native **input (moving-image) mask**.
+There is no template mask, and OpenCV 5.0's `findTransformECCWithMask` is not used. Matrix
+convention, H22 rule, options, output checks and result type are those of Tasks 016/017; the seeded
+overload keeps the Task 017 seed domain unchanged.
+
+* **Coordinate frame.** `Moving_Mask (row, column)` describes `Moving_Image (row, column)`. The mask
+  is not a second transform: native ECC warps it with the moving image (nearest neighbour,
+  `WARP_INVERSE_MAP`), so a template pixel contributes only if the moving pixel it maps to is
+  eligible. A mask drawn in template coordinates is a different mask; for large motion it gives
+  wrong results (qualified by tests with asymmetric, transposed and template-frame masks).
+* **Values.** Zero excludes; any nonzero value includes. 1, 255 and other nonzero values give
+  bitwise identical results. An all-included mask gives exactly the unmasked result, on every
+  qualified version.
+* **Valid input domain** (checked in Ada and again in C before any native call; violations raise
+  `OpenCV_Error`, nothing is converted or clamped): nonempty 2-D UInt8 C1 Mat; exactly the moving
+  image's rows and columns; at least one nonzero pixel. Regions (including non-contiguous ones) are
+  accepted. The images keep the Task 011 envelope (32 .. 16384 per side, at most `2**24` pixels).
+* **Native mask processing.** OpenCV binarizes the mask and erodes it with a 5 x 5 Gaussian
+  (`0.5/0.95` threshold): a pixel stays eligible only if essentially its whole 3 x 3 neighbourhood is
+  eligible. Isolated pixels, pixel grids, strips up to 4 pixels wide and blocks up to 4 x 4
+  contribute nothing. Moving-image gradients are masked as well.
+* **Insufficient support.** If no eligible pixel remains under the warped template (eroded away,
+  or no overlap after warping), native ECC raises "NaN encountered"; the binding propagates
+  `OpenCV_Error` and never fabricates a result. Very small surviving support (for example a 12 x 12
+  block) can also return a **finite but meaningless** matrix with a high correlation; it is
+  published unchanged. The outcome of such marginal masks differs between OpenCV versions.
+* **Ownership.** The mask, both images, all Region parents and `Initial_Transform` are never
+  modified. The result is a plain Ada value with no native resource.
+* **Why masking helps, and its limits.** Excluding pixels that do not follow the scene motion removes
+  them from the correlation, the Hessian and the update. In the oracle's occlusion fixtures a
+  misleading occluder moved the unmasked estimate by 1.7-5.6 pixels at interior reference points
+  (or made native ECC raise), while the masked estimate stayed within 0.02-0.15 pixels, on all four
+  qualified versions. A mask never guarantees convergence or correctness: it
+  reduces the available signal, can remove the texture that constrains the motion, and cannot repair
+  a wrong seed. Choosing what to exclude is the caller's policy; the binding does not detect moving
+  objects, occlusions or unreliable pixels.
+* **Correlation and nonconvergence.** The correlation is the native value over the eligible pixels
+  only (not comparable with an unmasked correlation) and is not a confidence. Nonconvergence raises.
+* **Memory.** Mask processing adds no measurable peak beyond the caller's mask itself: about 1.88 GiB
+  at `2**24` pixels, versus 1.86 GiB unmasked (the difference is the 16 MiB caller mask).
+
+**Safety gate.** `SAFETY_GATE_ESTABLISHED` was recorded (commit `f9d3db9`) before any production
+code, from a four-version source review, direct-native probes, OpenCV builds instrumented with
+ASan/UBSan/`float-cast-overflow` and diagnostic copies of `ecc.cpp`.
+
+Production ABI: 25 exports. The new exports are `opencv_video_estimate_ecc_homography_masked` and
+`opencv_video_estimate_ecc_homography_masked_seeded` (one extra `const opencv_core_mat_handle *`;
+48-byte result reused, padding bytes 36-39 zero on success, caller object untouched on failure).
+AUnit has 198 registrations. See the [task note](docs/tasks/018-masked-ecc-homography.md), the
+[source contract](docs/ecc-homography-masked-source-contract.md) and the
+[qualification](docs/task018-qualification.md). The new code has not yet run on Windows.
+
 ### Caller-seeded ECC homography alignment (Task 017)
 
 ```ada
@@ -770,9 +869,9 @@ The first slice does not bind:
 
 - forward/backward prebuilt-pyramid composition;
 - DIS dense optical flow and Farneback options beyond the Task 009/010 subset (Gaussian, UMat);
-- masked and multiscale ECC registration (translation, Euclidean, seeded Euclidean,
-  identity-initialized and seeded affine, and identity-initialized and seeded homography ECC are
-  bound);
+- template masks, dual-mask ECC, masks for translation/Euclidean/affine ECC, and multiscale ECC
+  registration (translation, Euclidean, seeded Euclidean, identity-initialized and seeded affine,
+  and identity-initialized, seeded and moving-image-masked homography ECC are bound);
 - KalmanFilter;
 - CamShift / meanShift;
 - UMat/OpenCL overloads;

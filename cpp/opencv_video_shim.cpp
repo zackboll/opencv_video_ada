@@ -1002,12 +1002,33 @@ void put_ecc_homography_field(unsigned char (&bytes)[sizeof(EccHomographyResult)
     std::memcpy(bytes + offset, &value, sizeof value);
 }
 
-// Shared homography ECC entry. `seed` is nullptr for the identity-initialized path, otherwise
-// nine row-major coefficients h00 h01 h02 h10 h11 h12 h20 h21 h22 (native STORAGE order). Only
-// the private initial matrix differs; validation, native call, output checks and publication
-// are shared. The seed check needs the image geometry, so it runs after input validation.
+// Task 018 moving-image mask domain (docs/ecc-homography-masked-source-contract.md). Native
+// ECC treats an empty mask as "no mask", accepts 3-D Mats on 4.x only and other depths on 5.0
+// only, so the binding pins one domain: non-empty 2-D CV_8UC1, the moving image's exact rows
+// and columns, an int-sized row step, and at least one nonzero pixel. The mask is only read.
+opencv_video_status validate_ecc_moving_mask(const cv::Mat &mask, const cv::Mat &moving) {
+    if (mask.empty() || mask.dims != 2 || mask.type() != CV_8UC1)
+        return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                    "ECC moving mask must be a nonempty 2-D UInt8 C1 Mat");
+    if (mask.rows != moving.rows || mask.cols != moving.cols ||
+        mask.step[0] > size_t(std::numeric_limits<int>::max()))
+        return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                    "ECC moving mask geometry differs from the moving image");
+    if (cv::countNonZero(mask) == 0)
+        return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                    "ECC moving mask excludes every pixel");
+    return OPENCV_VIDEO_OK;
+}
+
+// Shared homography ECC entry for all four homography exports. `seed` is nullptr for the
+// identity-initialized path, otherwise nine row-major coefficients h00 h01 h02 h10 h11 h12 h20
+// h21 h22 (native STORAGE order). `moving_mask` is nullptr for the unmasked exports (native
+// cv::noArray()), otherwise the Task 018 moving-image mask handle. Only the private initial
+// matrix and the native inputMask differ; validation order is images/options, mask, seed, and
+// the native call, output checks and publication are shared.
 opencv_video_status ecc_homography_entry(
     const opencv_core_mat_handle *template_image, const opencv_core_mat_handle *moving_image,
+    const opencv_core_mat_handle *moving_mask, bool masked,
     int32_t maximum_iterations, double epsilon, const float *seed,
     opencv_video_ecc_homography_result *result) {
     try {
@@ -1019,6 +1040,13 @@ opencv_video_status ecc_homography_entry(
         auto status = validate_ecc_inputs(template_image, moving_image, maximum_iterations,
                                           epsilon, &tmpl, &moving);
         if (status != OPENCV_VIDEO_OK) return status;
+        const cv::Mat *mask = nullptr;
+        if (masked) {
+            status = resolve_input(moving_mask, &mask, "ECC moving mask");
+            if (status != OPENCV_VIDEO_OK) return status;
+            status = validate_ecc_moving_mask(*mask, *moving);
+            if (status != OPENCV_VIDEO_OK) return status;
+        }
         if (seed != nullptr) {
             for (int i = 0; i < 9; ++i)
                 if (!std::isfinite(seed[i]))
@@ -1060,11 +1088,19 @@ opencv_video_status ecc_homography_entry(
 #ifdef OPENCV_VIDEO_TEST_FAULTS
         opencv_video_test_fault(1);
 #endif
-        double correlation = cv::findTransformECC(
-            *tmpl, *moving, warp, cv::MOTION_HOMOGRAPHY,
-            cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS,
-                             maximum_iterations, epsilon),
-            cv::noArray(), 5);
+        // The validated caller mask is passed by const reference (read-only InputArray); the
+        // unmasked exports keep cv::noArray() exactly as before Task 018.
+        double correlation = mask != nullptr
+            ? cv::findTransformECC(
+                  *tmpl, *moving, warp, cv::MOTION_HOMOGRAPHY,
+                  cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS,
+                                   maximum_iterations, epsilon),
+                  *mask, 5)
+            : cv::findTransformECC(
+                  *tmpl, *moving, warp, cv::MOTION_HOMOGRAPHY,
+                  cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS,
+                                   maximum_iterations, epsilon),
+                  cv::noArray(), 5);
 #ifdef OPENCV_VIDEO_TEST_FAULTS
         opencv_video_test_fault(2);
         opencv_video_test_corrupt_homography(warp.ptr<float>(), &correlation);
@@ -1119,8 +1155,8 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_homography(
     const opencv_core_mat_handle *moving_image,
     int32_t maximum_iterations, double epsilon,
     opencv_video_ecc_homography_result *result) {
-    return ecc_homography_entry(template_image, moving_image, maximum_iterations, epsilon,
-                                nullptr, result);
+    return ecc_homography_entry(template_image, moving_image, nullptr, false, maximum_iterations,
+                                epsilon, nullptr, result);
 }
 
 extern "C" opencv_video_status opencv_video_estimate_ecc_affine_seeded(
@@ -1147,6 +1183,32 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_homography_seeded(
     const float seed[9] = {initial_h00, initial_h01, initial_h02,
                            initial_h10, initial_h11, initial_h12,
                            initial_h20, initial_h21, initial_h22};
-    return ecc_homography_entry(template_image, moving_image, maximum_iterations, epsilon,
-                                seed, result);
+    return ecc_homography_entry(template_image, moving_image, nullptr, false, maximum_iterations,
+                                epsilon, seed, result);
+}
+
+extern "C" opencv_video_status opencv_video_estimate_ecc_homography_masked(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    const opencv_core_mat_handle *moving_mask,
+    int32_t maximum_iterations, double epsilon,
+    opencv_video_ecc_homography_result *result) {
+    return ecc_homography_entry(template_image, moving_image, moving_mask, true,
+                                maximum_iterations, epsilon, nullptr, result);
+}
+
+extern "C" opencv_video_status opencv_video_estimate_ecc_homography_masked_seeded(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    const opencv_core_mat_handle *moving_mask,
+    int32_t maximum_iterations, double epsilon,
+    float initial_h00, float initial_h01, float initial_h02,
+    float initial_h10, float initial_h11, float initial_h12,
+    float initial_h20, float initial_h21, float initial_h22,
+    opencv_video_ecc_homography_result *result) {
+    const float seed[9] = {initial_h00, initial_h01, initial_h02,
+                           initial_h10, initial_h11, initial_h12,
+                           initial_h20, initial_h21, initial_h22};
+    return ecc_homography_entry(template_image, moving_image, moving_mask, true,
+                                maximum_iterations, epsilon, seed, result);
 }

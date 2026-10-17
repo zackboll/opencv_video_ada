@@ -411,6 +411,49 @@ opencv_video_status opencv_video_estimate_ecc_homography_seeded(
     float initial_h22,
     opencv_video_ecc_homography_result *result);
 
+/* Moving-image-masked homography ECC (Task 018). Identical to
+ * opencv_video_estimate_ecc_homography except that moving_mask is passed as the native
+ * inputMask of the seven-argument cv::findTransformECC (no template mask). The mask is in
+ * MOVING-image pixel coordinates (it is warped natively with the moving image): nonzero pixels
+ * are eligible, zero pixels are excluded; values 1 and 255 are equivalent. Requirements,
+ * checked after the image/option envelope and before any native call
+ * (docs/ecc-homography-masked-source-contract.md): non-empty 2-D CV_8UC1 Mat with exactly the
+ * moving image's rows and columns, row step <= INT_MAX, at least one nonzero pixel.
+ * Non-contiguous Regions are accepted; the caller's mask is never written, converted or
+ * normalized. Native ECC erodes the mask (Gaussian 5x5); a mask whose support vanishes or
+ * stops overlapping the warped template raises natively (OPENCV_VIDEO_ERROR_OPENCV). A mask
+ * does not guarantee convergence or a correct result. Output policy, H22 rule and the 48-byte
+ * representation (zero padding bytes 36-39) are those of the unmasked export; *result is
+ * unchanged on every failure. */
+opencv_video_status opencv_video_estimate_ecc_homography_masked(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    const opencv_core_mat_handle *moving_mask,
+    int32_t maximum_iterations,
+    double epsilon,
+    opencv_video_ecc_homography_result *result);
+
+/* Caller-seeded, moving-image-masked homography ECC (Task 018): the mask contract of
+ * opencv_video_estimate_ecc_homography_masked combined with the unchanged seed domain of
+ * opencv_video_estimate_ecc_homography_seeded (nine row-major storage-order coefficients).
+ * The seed is validated after the mask. *result is unchanged on every failure. */
+opencv_video_status opencv_video_estimate_ecc_homography_masked_seeded(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    const opencv_core_mat_handle *moving_mask,
+    int32_t maximum_iterations,
+    double epsilon,
+    float initial_h00,
+    float initial_h01,
+    float initial_h02,
+    float initial_h10,
+    float initial_h11,
+    float initial_h12,
+    float initial_h20,
+    float initial_h21,
+    float initial_h22,
+    opencv_video_ecc_homography_result *result);
+
 #ifdef __cplusplus
 }
 #endif

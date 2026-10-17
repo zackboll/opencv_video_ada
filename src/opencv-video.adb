@@ -1222,21 +1222,16 @@ package body OpenCV.Video is
          Correlation => OpenCV.Float64_Value (Native.Correlation));
    end Estimate_ECC_Affine;
 
-   function Estimate_ECC_Homography
-     (Template_Image    : OpenCV.Core.Mat;
-      Moving_Image      : OpenCV.Core.Mat;
-      Options           : ECC_Homography_Options := (others => <>);
-      Initial_Transform : ECC_Homography_Result)
-      return ECC_Homography_Result
+   --  Task 017 seed domain, shared by the unmasked and masked seeded overloads (messages
+   --  unchanged). Runs after the image/option (and, when masked, mask) preflight.
+   procedure Validate_Homography_Seed
+     (Template_Image : OpenCV.Core.Mat; Initial_Transform : ECC_Homography_Result)
    is
       Maximum_Linear      : constant OpenCV.Float32_Value := 4.0;
       Maximum_Translation : constant OpenCV.Float32_Value := 2.0 ** 20;
       Maximum_Deviation   : constant Long_Float := 0.5;
-      Seed   : ECC_Homography_Warp renames Initial_Transform.Warp;
-      Native : aliased C.ECC_Homography_Result;
-      Code   : C.Status := C.Success;
+      Seed : ECC_Homography_Warp renames Initial_Transform.Warp;
    begin
-      Validate_ECC_Arguments (Template_Image, Moving_Image, Options);
       --  Initial_Transform.Correlation is deliberately never read.
       if not (Is_Finite (Seed.H00) and then Is_Finite (Seed.H01) and then Is_Finite (Seed.H02)
               and then Is_Finite (Seed.H10) and then Is_Finite (Seed.H11)
@@ -1266,6 +1261,34 @@ package body OpenCV.Video is
          raise OpenCV.OpenCV_Error with
            "ECC homography seed |H20|*(Columns-1) + |H21|*(Rows-1) must be <= 0.5";
       end if;
+   end Validate_Homography_Seed;
+
+   function To_Homography_Result (Native : C.ECC_Homography_Result) return ECC_Homography_Result is
+     (Warp        =>
+        (H00 => OpenCV.Float32_Value (Native.H00),
+         H01 => OpenCV.Float32_Value (Native.H01),
+         H02 => OpenCV.Float32_Value (Native.H02),
+         H10 => OpenCV.Float32_Value (Native.H10),
+         H11 => OpenCV.Float32_Value (Native.H11),
+         H12 => OpenCV.Float32_Value (Native.H12),
+         H20 => OpenCV.Float32_Value (Native.H20),
+         H21 => OpenCV.Float32_Value (Native.H21),
+         H22 => OpenCV.Float32_Value (Native.H22)),
+      Correlation => OpenCV.Float64_Value (Native.Correlation));
+
+   function Estimate_ECC_Homography
+     (Template_Image    : OpenCV.Core.Mat;
+      Moving_Image      : OpenCV.Core.Mat;
+      Options           : ECC_Homography_Options := (others => <>);
+      Initial_Transform : ECC_Homography_Result)
+      return ECC_Homography_Result
+   is
+      Seed   : ECC_Homography_Warp renames Initial_Transform.Warp;
+      Native : aliased C.ECC_Homography_Result;
+      Code   : C.Status := C.Success;
+   begin
+      Validate_ECC_Arguments (Template_Image, Moving_Image, Options);
+      Validate_Homography_Seed (Template_Image, Initial_Transform);
 
       declare
          procedure Template_Callback (Template_Handle : Bridge.Input_Mat_Handle) is
@@ -1306,5 +1329,111 @@ package body OpenCV.Video is
             H21 => OpenCV.Float32_Value (Native.H21),
             H22 => OpenCV.Float32_Value (Native.H22)),
          Correlation => OpenCV.Float64_Value (Native.Correlation));
+   end Estimate_ECC_Homography;
+
+   --  Task 018 mask metadata preflight (the C shim repeats it and also rejects a mask with no
+   --  nonzero pixel). The mask is only read.
+   procedure Validate_Moving_Mask (Moving_Image, Moving_Mask : OpenCV.Core.Mat) is
+   begin
+      if Moving_Mask.Is_Empty then
+         raise OpenCV.OpenCV_Error with "ECC moving mask must be nonempty";
+      end if;
+      if Moving_Mask.Dimension_Count /= 2 then
+         raise OpenCV.OpenCV_Error with "ECC moving mask must be 2-D";
+      end if;
+      if Moving_Mask.Depth /= OpenCV.Core.UInt8 or else Moving_Mask.Channels /= 1 then
+         raise OpenCV.OpenCV_Error with "ECC moving mask must be UInt8 C1";
+      end if;
+      if Moving_Mask.Rows /= Moving_Image.Rows
+        or else Moving_Mask.Columns /= Moving_Image.Columns
+      then
+         raise OpenCV.OpenCV_Error with "ECC moving mask geometry differs from the moving image";
+      end if;
+   end Validate_Moving_Mask;
+
+   function Estimate_ECC_Homography
+     (Template_Image : OpenCV.Core.Mat;
+      Moving_Image   : OpenCV.Core.Mat;
+      Moving_Mask    : OpenCV.Core.Mat;
+      Options        : ECC_Homography_Options := (others => <>))
+      return ECC_Homography_Result
+   is
+      Native : aliased C.ECC_Homography_Result;
+      Code   : C.Status := C.Success;
+   begin
+      Validate_ECC_Arguments (Template_Image, Moving_Image, Options);
+      Validate_Moving_Mask (Moving_Image, Moving_Mask);
+
+      declare
+         procedure Template_Callback (Template_Handle : Bridge.Input_Mat_Handle) is
+            procedure Moving_Callback (Moving_Handle : Bridge.Input_Mat_Handle) is
+               procedure Mask_Callback (Mask_Handle : Bridge.Input_Mat_Handle) is
+               begin
+                  Code := C.Estimate_ECC_Homography_Masked
+                    (Template_Handle, Moving_Handle, Mask_Handle,
+                     Interfaces.Integer_32 (Options.Maximum_Iterations),
+                     Interfaces.C.double (Options.Epsilon),
+                     Native'Access);
+               end Mask_Callback;
+            begin
+               Bridge.With_Input_Handle (Moving_Mask, Mask_Callback'Access);
+            end Moving_Callback;
+         begin
+            Bridge.With_Input_Handle (Moving_Image, Moving_Callback'Access);
+         end Template_Callback;
+      begin
+         Bridge.With_Input_Handle (Template_Image, Template_Callback'Access);
+      end;
+      C.Check (Code, "Video.Estimate_ECC_Homography");
+      return To_Homography_Result (Native);
+   end Estimate_ECC_Homography;
+
+   function Estimate_ECC_Homography
+     (Template_Image    : OpenCV.Core.Mat;
+      Moving_Image      : OpenCV.Core.Mat;
+      Moving_Mask       : OpenCV.Core.Mat;
+      Options           : ECC_Homography_Options := (others => <>);
+      Initial_Transform : ECC_Homography_Result)
+      return ECC_Homography_Result
+   is
+      Seed   : ECC_Homography_Warp renames Initial_Transform.Warp;
+      Native : aliased C.ECC_Homography_Result;
+      Code   : C.Status := C.Success;
+   begin
+      Validate_ECC_Arguments (Template_Image, Moving_Image, Options);
+      Validate_Moving_Mask (Moving_Image, Moving_Mask);
+      Validate_Homography_Seed (Template_Image, Initial_Transform);
+
+      declare
+         procedure Template_Callback (Template_Handle : Bridge.Input_Mat_Handle) is
+            procedure Moving_Callback (Moving_Handle : Bridge.Input_Mat_Handle) is
+               procedure Mask_Callback (Mask_Handle : Bridge.Input_Mat_Handle) is
+               begin
+                  Code := C.Estimate_ECC_Homography_Masked_Seeded
+                    (Template_Handle, Moving_Handle, Mask_Handle,
+                     Interfaces.Integer_32 (Options.Maximum_Iterations),
+                     Interfaces.C.double (Options.Epsilon),
+                     Interfaces.C.C_float (Seed.H00),
+                     Interfaces.C.C_float (Seed.H01),
+                     Interfaces.C.C_float (Seed.H02),
+                     Interfaces.C.C_float (Seed.H10),
+                     Interfaces.C.C_float (Seed.H11),
+                     Interfaces.C.C_float (Seed.H12),
+                     Interfaces.C.C_float (Seed.H20),
+                     Interfaces.C.C_float (Seed.H21),
+                     Interfaces.C.C_float (Seed.H22),
+                     Native'Access);
+               end Mask_Callback;
+            begin
+               Bridge.With_Input_Handle (Moving_Mask, Mask_Callback'Access);
+            end Moving_Callback;
+         begin
+            Bridge.With_Input_Handle (Moving_Image, Moving_Callback'Access);
+         end Template_Callback;
+      begin
+         Bridge.With_Input_Handle (Template_Image, Template_Callback'Access);
+      end;
+      C.Check (Code, "Video.Estimate_ECC_Homography");
+      return To_Homography_Result (Native);
    end Estimate_ECC_Homography;
 end OpenCV.Video;

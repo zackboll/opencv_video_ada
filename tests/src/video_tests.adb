@@ -8725,6 +8725,959 @@ package body Video_Tests is
       Ada.Directories.Delete_File (Scratch);
    end ECC_Homography_Seeded_Oracle_Integrity;
 
+   ---------------------------------------------------------------------
+   --  Task 018: moving-image-masked ECC homography
+   ---------------------------------------------------------------------
+   subtype Hm_Mask is EF.Mask_Spec;
+
+   function Mask_Full (V : Natural := 255) return Hm_Mask is (Kind => 'F', V => V, others => 0);
+   function Mask_Hole (X, Y, W, H : Integer; V : Natural := 255) return Hm_Mask is
+     (Kind => 'H', A => X, B => Y, C => W, D => H, V => V);
+   --  The asymmetric reference hole: columns 70 .. 109, rows 10 .. 39 of the MOVING image.
+   Hm_Hole       : constant Hm_Mask := Mask_Hole (70, 10, 40, 30);
+   Hm_Hole_Swap  : constant Hm_Mask := Mask_Hole (10, 70, 30, 40);
+   Hm_Multi      : constant Hm_Mask := (Kind => 'M', V => 255, others => 0);
+   Hm_Zero       : constant Hm_Mask := (Kind => 'Z', V => 0, others => 0);
+   --  Occluder rectangles (moving pixels) and the masks excluding them grown by 3 pixels.
+   Hm_Occ_T      : constant OpenCV.Rect := (64, 8, 56, 48);
+   Hm_Occ_P      : constant OpenCV.Rect := (60, 4, 64, 52);
+   Hm_Mask_T     : constant Hm_Mask := Mask_Hole (61, 5, 62, 54);
+   Hm_Mask_P     : constant Hm_Mask := Mask_Hole (57, 1, 70, 58);
+
+   type Hm_Mask_Array is array (Positive range <>) of Hm_Mask;
+
+   function Hm_Mat (Spec : Hm_Mask) return OpenCV.Core.Mat is (EF.Mask (Spec));
+
+   function Hm_Occluded (Truth : HM; Area : OpenCV.Rect; Kind : Natural) return ECC_Pair is
+     (Template => EF.Texture (128, 128),
+      Moving   => EF.Occlude (EF.Homography_Texture (128, 128, Truth),
+                              Natural (Area.X), Natural (Area.Y),
+                              Natural (Area.Width), Natural (Area.Height), Kind));
+
+   procedure Hm_Run
+     (Pair : ECC_Pair; Mask : OpenCV.Core.Mat;
+      Result : out ECC_Homography_Result; Raised : out Boolean;
+      Options : ECC_Homography_Options := (others => <>)) is
+   begin
+      Result := Estimate_ECC_Homography (Pair.Template, Pair.Moving, Mask, Options);
+      Raised := False;
+   exception
+      when OpenCV.OpenCV_Error => Result := (others => <>); Raised := True;
+   end Hm_Run;
+
+   procedure Hm_Run_Seeded
+     (Pair : ECC_Pair; Mask : OpenCV.Core.Mat; Initial : ECC_Homography_Result;
+      Result : out ECC_Homography_Result; Raised : out Boolean;
+      Options : ECC_Homography_Options := (others => <>)) is
+   begin
+      Result := Estimate_ECC_Homography (Pair.Template, Pair.Moving, Mask, Options, Initial);
+      Raised := False;
+   exception
+      when OpenCV.OpenCV_Error => Result := (others => <>); Raised := True;
+   end Hm_Run_Seeded;
+
+   --  Preflight versus native-layer classification (native messages carry the C.Check prefix).
+   function Hm_Outcome_Of
+     (Pair : ECC_Pair; Mask : OpenCV.Core.Mat; Seeded : Boolean;
+      Initial : ECC_Homography_Result := Hs_Identity_Seed;
+      Options : ECC_Homography_Options := (others => <>)) return Sd_Outcome
+   is
+      Marker : constant String := "Video.Estimate_ECC_Homography";
+      Unused : ECC_Homography_Result;
+   begin
+      if Seeded then
+         Unused := Estimate_ECC_Homography (Pair.Template, Pair.Moving, Mask, Options, Initial);
+      else
+         Unused := Estimate_ECC_Homography (Pair.Template, Pair.Moving, Mask, Options);
+      end if;
+      return Accepted;
+   exception
+      when Error : OpenCV.OpenCV_Error =>
+         declare
+            Text : constant String := Ada.Exceptions.Exception_Message (Error);
+         begin
+            return (if Text'Length >= Marker'Length
+                      and then Text (Text'First .. Text'First + Marker'Length - 1) = Marker
+                    then Native_Failed else Preflight_Rejected);
+         end;
+   end Hm_Outcome_Of;
+
+   function Hm_Message
+     (Pair : ECC_Pair; Mask : OpenCV.Core.Mat; Seeded : Boolean;
+      Initial : ECC_Homography_Result := Hs_Identity_Seed) return String
+   is
+      Unused : ECC_Homography_Result;
+   begin
+      if Seeded then
+         Unused := Estimate_ECC_Homography (Pair.Template, Pair.Moving, Mask, (others => <>), Initial);
+      else
+         Unused := Estimate_ECC_Homography (Pair.Template, Pair.Moving, Mask);
+      end if;
+      return "";
+   exception
+      when Error : OpenCV.OpenCV_Error => return Ada.Exceptions.Exception_Message (Error);
+   end Hm_Message;
+
+   function Contains (Text, Fragment : String) return Boolean is
+     (Ada.Strings.Fixed.Index (Text, Fragment) > 0);
+
+   --  Same outcome; on success bitwise-equal coefficients and correlation (Ada "=" on Float32 and
+   --  Float64 is exact for finite values, which are the only values the binding publishes).
+   function Hm_Same
+     (A : ECC_Homography_Result; A_Raised : Boolean;
+      B : ECC_Homography_Result; B_Raised : Boolean) return Boolean is
+     (A_Raised = B_Raised and then (A_Raised or else A = B));
+
+   procedure ECC_Homography_Masked_Full_Equivalence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pairs : constant array (1 .. 5) of ECC_Pair :=
+        [(EF.Texture (128, 128), EF.Texture (128, 128)), Hom_Pair (K_T21), Hom_Pair (K_PM),
+         Hom_Pair (Hs_Scp_Truth), (EF.Constant_Image (128, 128, 128), EF.Constant_Image (128, 128, 128))];
+      Masks : constant array (1 .. 4) of OpenCV.Core.Mat :=
+        [Hm_Mat (Mask_Full (255)), Hm_Mat (Mask_Full (1)), Hm_Mat (Mask_Full (7)),
+         Hm_Mat ((Kind => 'A', V => 99, others => 0))];
+      Plain, Masked, Seeded_Plain, Seeded_Masked : ECC_Homography_Result;
+      P_Raised, M_Raised, SP_Raised, SM_Raised : Boolean;
+      Successes, Failures : Natural := 0;
+   begin
+      for Pair of Pairs loop
+         Hs_Run_Plain (Pair, Plain, P_Raised);
+         Hs_Run (Pair, Hs_Scp_Near, Seeded_Plain, SP_Raised);
+         if P_Raised then Failures := Failures + 1; else Successes := Successes + 1; end if;
+         for Mask of Masks loop
+            Hm_Run (Pair, Mask, Masked, M_Raised);
+            Assert (Hm_Same (Plain, P_Raised, Masked, M_Raised),
+                    "all-included mask differs from the unmasked identity-initialized call");
+            Hm_Run_Seeded (Pair, Mask, Hs_Scp_Near, Seeded_Masked, SM_Raised);
+            Assert (Hm_Same (Seeded_Plain, SP_Raised, Seeded_Masked, SM_Raised),
+                    "all-included mask differs from the unmasked seeded call");
+         end loop;
+      end loop;
+      Assert (Successes >= 3 and then Failures >= 1, "full-mask equivalence needs both outcomes");
+   end ECC_Homography_Masked_Full_Equivalence;
+
+   procedure ECC_Homography_Masked_Value_Semantics (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pair : constant ECC_Pair := Hom_Pair (K_T21);
+      Plain, R255, R1, RA, RM, RSeed255, RSeed1 : ECC_Homography_Result;
+      P_Raised, Raised : Boolean;
+   begin
+      Hs_Run_Plain (Pair, Plain, P_Raised);
+      Hm_Run (Pair, Hm_Mat (Hm_Hole), R255, Raised);
+      Assert (not P_Raised and then not Raised, "reference hole fixture must converge");
+      Hm_Run (Pair, Hm_Mat (Mask_Hole (70, 10, 40, 30, 1)), R1, Raised);
+      Assert (not Raised and then R1 = R255, "mask values 1 and 255 must be equivalent");
+      Hm_Run (Pair, Hm_Mat ((Kind => 'A', A => 70, B => 10, C => 40, D => 30, V => 5)), RA, Raised);
+      Assert (not Raised and then RA = R255, "arbitrary nonzero mask values must be equivalent to 255");
+      Assert (R255 /= Plain, "an excluded rectangle must change the native result");
+      Assert (R255.Warp.H22 = 1.0 and then Hom_Near (R255, K_T21), "masked translation is not near (2, 1)");
+      Hm_Run (Pair, Hm_Mat (Hm_Multi), RM, Raised);
+      Assert (not Raised and then RM /= R255 and then RM /= Plain and then Hom_Near (RM, K_T21),
+              "several disjoint excluded regions");
+      Hm_Run_Seeded (Hom_Pair (Hs_LTP_Truth), Hm_Mat (Hm_Hole), Hs_LTP_Near, RSeed255, Raised);
+      Assert (not Raised, "seeded hole fixture must converge");
+      Hm_Run_Seeded (Hom_Pair (Hs_LTP_Truth), Hm_Mat (Mask_Hole (70, 10, 40, 30, 1)), Hs_LTP_Near, RSeed1, Raised);
+      Assert (not Raised and then RSeed1 = RSeed255, "seeded: mask values 1 and 255 must be equivalent");
+   end ECC_Homography_Masked_Value_Semantics;
+
+   --  Occlusion: excluding the occluded rectangle measurably improves the alignment relative to
+   --  the same image pair without a mask (identity start).
+   procedure ECC_Homography_Masked_Occlusion_Improves (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Shifted : constant ECC_Pair := Hm_Occluded (K_T21, Hm_Occ_T, 2);
+      Mild    : constant ECC_Pair := Hm_Occluded (K_PM, Hm_Occ_P, 2);
+      Block   : constant ECC_Pair := Hm_Occluded (K_T21, Hm_Occ_T, 0);
+      Clean, Plain, Masked : ECC_Homography_Result;
+      C_Raised, P_Raised, M_Raised : Boolean;
+   begin
+      Hs_Run_Plain (Hom_Pair (K_T21), Clean, C_Raised);
+      Hs_Run_Plain (Shifted, Plain, P_Raised);
+      Hm_Run (Shifted, Hm_Mat (Hm_Mask_T), Masked, M_Raised);
+      Assert (not C_Raised and then not P_Raised and then not M_Raised, "occlusion fixture outcomes");
+      --  Measured (4.1.0 .. 5.0.0): unmasked 2.9 px, masked 0.02-0.07 px at the reference points.
+      Assert (Hom_Map_Error (Coeffs (Plain.Warp), K_T21) > 2.0,
+              "misleading occluder must corrupt the unmasked estimate");
+      Assert (Hom_Map_Error (Coeffs (Masked.Warp), K_T21) < 0.2 and then Hom_Near (Masked, K_T21),
+              "masking the occluder must recover the translation");
+      Assert (Hom_Map_Error (Coeffs (Masked.Warp), K_T21) * 10.0 < Hom_Map_Error (Coeffs (Plain.Warp), K_T21),
+              "masked estimate must be an order of magnitude better");
+      Assert (Masked.Correlation > Plain.Correlation, "masked correlation is not higher");
+      Hs_Run_Plain (Mild, Plain, P_Raised);
+      Hm_Run (Mild, Hm_Mat (Hm_Mask_P), Masked, M_Raised);
+      Assert (not P_Raised and then not M_Raised, "perspective occlusion outcomes");
+      Assert (Hom_Map_Error (Coeffs (Masked.Warp), K_PM) < 0.3
+              and then Hom_Map_Error (Coeffs (Plain.Warp), K_PM) > 3.0,
+              "perspective occlusion: masked must be accurate and unmasked wrong");
+      --  A saturated block makes unmasked ECC raise natively; the masked call converges.
+      Hs_Run_Plain (Block, Plain, P_Raised);
+      Hm_Run (Block, Hm_Mat (Hm_Mask_T), Masked, M_Raised);
+      Assert (P_Raised and then not M_Raised and then Hom_Near (Masked, K_T21),
+              "block occluder: unmasked raises, masked recovers");
+   end ECC_Homography_Masked_Occlusion_Improves;
+
+   procedure ECC_Homography_Masked_Seeded_Occlusion (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Block   : constant ECC_Pair := Hm_Occluded (Hs_LTP_Truth, Hm_Occ_P, 0);
+      Shifted : constant ECC_Pair := Hm_Occluded (Hs_LTP_Truth, Hm_Occ_P, 2);
+      Scp     : constant ECC_Pair := Hm_Occluded (Hs_Scp_Truth, Hm_Occ_P, 2);
+      Plain, Masked, Id_Masked : ECC_Homography_Result;
+      P_Raised, M_Raised, I_Raised : Boolean;
+   begin
+      Hs_Run (Block, Hs_LTP_Near, Plain, P_Raised);
+      Hm_Run_Seeded (Block, Hm_Mat (Hm_Mask_P), Hs_LTP_Near, Masked, M_Raised);
+      Assert (P_Raised, "seeded block occluder: unmasked must raise natively");
+      Assert (not M_Raised and then Hom_Map_Error (Coeffs (Masked.Warp), Hs_LTP_Truth) < 0.5,
+              "seeded block occluder: masked must recover the homography");
+      --  The initial estimate is required: the same mask from identity does not converge.
+      Hm_Run (Block, Hm_Mat (Hm_Mask_P), Id_Masked, I_Raised);
+      Assert (I_Raised or else Hom_Map_Error (Coeffs (Id_Masked.Warp), Hs_LTP_Truth) > 1.0,
+              "identity start must not reach the seeded masked result");
+      Hs_Run (Shifted, Hs_LTP_Near, Plain, P_Raised);
+      Hm_Run_Seeded (Shifted, Hm_Mat (Hm_Mask_P), Hs_LTP_Near, Masked, M_Raised);
+      Assert (not P_Raised and then not M_Raised, "seeded shifted occluder outcomes");
+      Assert (Hom_Map_Error (Coeffs (Masked.Warp), Hs_LTP_Truth) < 0.5
+              and then Hom_Map_Error (Coeffs (Plain.Warp), Hs_LTP_Truth) > 3.0,
+              "seeded shifted occluder: masked must improve the estimate");
+      Hs_Run (Scp, Hs_Scp_Near, Plain, P_Raised);
+      Hm_Run_Seeded (Scp, Hm_Mat (Hm_Mask_P), Hs_Scp_Near, Masked, M_Raised);
+      Assert (not P_Raised and then not M_Raised
+              and then Hom_Map_Error (Coeffs (Masked.Warp), Hs_Scp_Truth) * 5.0
+                       < Hom_Map_Error (Coeffs (Plain.Warp), Hs_Scp_Truth),
+              "seeded scale+perspective occluder: masked must improve the estimate");
+   end ECC_Homography_Masked_Seeded_Occlusion;
+
+   --  The mask is interpreted in MOVING coordinates: the same rectangle placed in the template
+   --  frame (moving minus the LTP translation) or transposed gives a measurably different result.
+   procedure ECC_Homography_Masked_Coordinate_Frame (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Block : constant ECC_Pair := Hm_Occluded (Hs_LTP_Truth, Hm_Occ_P, 0);
+      Shift : constant ECC_Pair := Hm_Occluded (K_T21, Hm_Occ_T, 2);
+      Right, Template_Frame, Transposed : ECC_Homography_Result;
+      R_Raised, F_Raised, X_Raised : Boolean;
+      Pair : constant ECC_Pair := Hom_Pair (K_T21);
+      Hole, Swap : ECC_Homography_Result;
+   begin
+      Hm_Run_Seeded (Block, Hm_Mat (Hm_Mask_P), Hs_LTP_Near, Right, R_Raised);
+      Hm_Run_Seeded (Block, Hm_Mat (Mask_Hole (45, 10, 70, 58)), Hs_LTP_Near, Template_Frame, F_Raised);
+      Assert (not R_Raised and then Hom_Map_Error (Coeffs (Right.Warp), Hs_LTP_Truth) < 0.5,
+              "moving-frame mask recovers the homography");
+      Assert (F_Raised or else Hom_Map_Error (Coeffs (Template_Frame.Warp), Hs_LTP_Truth) > 2.0,
+              "template-frame mask must not behave like the moving-frame mask");
+      Hm_Run (Shift, Hm_Mat (Hm_Mask_T), Right, R_Raised);
+      Hm_Run (Shift, Hm_Mat (Mask_Hole (5, 61, 54, 62)), Transposed, X_Raised);
+      Assert (not R_Raised and then Hom_Near (Right, K_T21), "moving-frame occlusion mask");
+      Assert (X_Raised or else Hom_Map_Error (Coeffs (Transposed.Warp), K_T21) > 3.0,
+              "transposed (rows/columns swapped) mask must not recover the translation");
+      Hm_Run (Pair, Hm_Mat (Hm_Hole), Hole, R_Raised);
+      Hm_Run (Pair, Hm_Mat (Hm_Hole_Swap), Swap, X_Raised);
+      Assert (not R_Raised and then not X_Raised and then Hole /= Swap,
+              "an asymmetric hole and its transpose must give different results");
+   end ECC_Homography_Masked_Coordinate_Frame;
+
+   procedure ECC_Homography_Masked_Numerics (T : in out Fixture) is
+      pragma Unreferenced (T);
+      R : ECC_Homography_Result;
+      Raised : Boolean;
+      Identity_Pair : constant ECC_Pair := (EF.Texture (128, 128), EF.Texture (128, 128));
+      One, Many : ECC_Homography_Result;
+      O_Raised, M_Raised : Boolean;
+      Truths : constant array (1 .. 6) of HM := [K_T21, K_Tm, K_AC, K_SHX, K_PM, K_SP];
+   begin
+      Hm_Run (Identity_Pair, Hm_Mat (Hm_Hole), R, Raised);
+      Assert (not Raised and then Hom_Near (R, K_Identity) and then R.Correlation > 0.999,
+              "masked identity alignment");
+      for Truth of Truths loop
+         Hm_Run (Hom_Pair (Truth), Hm_Mat (Hm_Hole), R, Raised);
+         --  Task 017 tolerances: excluding 1200 pixels costs up to 0.1 px of translation (K_SP).
+         Assert (not Raised and then Hs_Near (R, Truth), "masked translation/affine/perspective fixture");
+         Assert (R.Correlation > 0.9 and then R.Correlation <= 1.0, "masked correlation range");
+      end loop;
+      --  Seeded perspective that needs the initial estimate.
+      Hm_Run (Hom_Pair (Hs_Strong_Truth), Hm_Mat (Hm_Hole), R, Raised);
+      Assert (Raised or else not Hs_Near (R, Hs_Strong_Truth), "strong perspective must need a seed");
+      Hm_Run_Seeded (Hom_Pair (Hs_Strong_Truth), Hm_Mat (Hm_Hole), Hs_Strong_Near, R, Raised);
+      Assert (not Raised and then Hs_Near (R, Hs_Strong_Truth), "seeded masked strong perspective");
+      --  Options reach the masked native call.
+      Hm_Run (Hom_Pair (K_T21), Hm_Mat (Hm_Hole), One, O_Raised, (Maximum_Iterations => 1, Epsilon => 0.0001));
+      Hm_Run (Hom_Pair (K_T21), Hm_Mat (Hm_Hole), Many, M_Raised);
+      Assert (not O_Raised and then not M_Raised and then One /= Many
+              and then Hom_Map_Error (Coeffs (Many.Warp), K_T21) < Hom_Map_Error (Coeffs (One.Warp), K_T21),
+              "masked iteration option has no effect");
+      Assert (Estimate_ECC_Homography (Hom_Pair (K_T21).Template, Hom_Pair (K_T21).Moving, Hm_Mat (Hm_Hole)) = Many,
+              "masked call is not repeatable");
+   end ECC_Homography_Masked_Numerics;
+
+   procedure ECC_Homography_Masked_Support (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pair : constant ECC_Pair := Hom_Pair (K_T21);
+      Shift_60 : constant ECC_Homography_Result := Hk (1.0, 0.0, 60.0, 0.0, 1.0, 0.0, 0.0, 0.0);
+      Left : constant OpenCV.Core.Mat := Hm_Mat ((Kind => 'L', A => 24, V => 255, others => 0));
+      Eroded : constant Hm_Mask_Array :=
+        [(Kind => 'P', A => 64, B => 64, V => 255, others => 0),
+         (Kind => 'G', A => 2, V => 255, others => 0),
+         (Kind => 'S', A => 60, B => 4, V => 255, others => 0),
+         (Kind => 'B', A => 50, B => 40, C => 5, V => 255, others => 0),
+         (Kind => 'D', A => 50, V => 255, others => 0)];
+      R : ECC_Homography_Result;
+      Raised : Boolean;
+   begin
+      --  Entirely excluded: rejected by the binding before native execution (both modes).
+      Assert (Hm_Outcome_Of (Pair, Hm_Mat (Hm_Zero), False) = Native_Failed
+              and then Contains (Hm_Message (Pair, Hm_Mat (Hm_Zero), False), "excludes every pixel"),
+              "all-zero mask must be rejected with the binding diagnostic");
+      Assert (Contains (Hm_Message (Pair, Hm_Mat (Hm_Zero), True, Hs_LTP_Near), "excludes every pixel"),
+              "seeded all-zero mask must be rejected with the binding diagnostic");
+      --  Nonzero support that native erosion removes: native nonconvergence (NaN), not a fake result.
+      for Spec of Eroded loop
+         Assert (EF.Nonzero (Hm_Mat (Spec)) > 0, "sparse fixture must have nonzero pixels");
+         Assert (Hm_Outcome_Of (Pair, Hm_Mat (Spec), False) = Native_Failed
+                 and then Contains (Hm_Message (Pair, Hm_Mat (Spec), False), "NaN encountered"),
+                 "eroded-away sparse mask must raise native nonconvergence");
+      end loop;
+      --  Very sparse but surviving support: native success (possibly inaccurate); never invented.
+      Hm_Run (Pair, Hm_Mat ((Kind => 'D', A => 90, V => 255, others => 0)), R, Raised);
+      Assert (not Raised and then R.Warp.H22 = 1.0, "90% density mask converges natively");
+      --  Valid moving region that no longer overlaps after warping.
+      --  A narrow valid band still overlaps from the identity start: native success, but the
+      --  estimate is finite and inaccurate (measured 2.3 px); the binding does not hide that.
+      Hm_Run (Pair, Left, R, Raised);
+      Assert (not Raised and then R.Warp.H22 = 1.0 and then Hom_Map_Error (Coeffs (R.Warp), K_T21) > 0.5,
+              "left band with identity start: finite, inaccurate native result expected");
+      Assert (Hm_Outcome_Of (Pair, Left, True, Shift_60) = Native_Failed
+              and then Contains (Hm_Message (Pair, Left, True, Shift_60), "NaN encountered"),
+              "non-overlapping valid region must raise natively");
+      Assert (Hm_Outcome_Of (Pair, Left, True, Shift_60, (Maximum_Iterations => 1, Epsilon => 0.0001))
+              = Native_Failed, "non-overlap after the first warp");
+      --  Constant valid support and constant images.
+      declare
+         K : ECC_Pair := Hom_Pair (K_T21);
+      begin
+         EF.Fill (K.Template, 20, 20, 50, 50, 100);
+         EF.Fill (K.Moving, 20, 20, 50, 50, 100);
+         Assert (Hm_Outcome_Of (K, Hm_Mat ((Kind => 'Q', V => 255, others => 0)), False) = Native_Failed,
+                 "constant intensity over the valid support must raise");
+      end;
+      Assert (Hm_Outcome_Of ((EF.Constant_Image (128, 128, 128), EF.Constant_Image (128, 128, 128)),
+                             Hm_Mat (Mask_Full), False) = Native_Failed, "constant images with a full mask");
+      Assert (Hm_Outcome_Of ((EF.Noise (128, 128, 3), EF.Noise (128, 128, 9)), Hm_Mat (Hm_Hole), False)
+              = Native_Failed, "noise with a hole mask");
+   end ECC_Homography_Masked_Support;
+
+   procedure ECC_Homography_Masked_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pair  : constant ECC_Pair := Hom_Pair (K_T21);
+      Good  : constant OpenCV.Core.Mat := Hm_Mat (Hm_Hole);
+      function M (Rows, Columns : Positive; Depth : OpenCV.Core.Depth_Type := OpenCV.Core.UInt8;
+                  Channels : OpenCV.Core.Channel_Count := 1) return OpenCV.Core.Mat is
+        (OpenCV.Core.Create (Rows, Columns, (Depth => Depth, Channels => Channels)));
+      Empty : OpenCV.Core.Mat;
+      Wrong : constant array (1 .. 12) of OpenCV.Core.Mat :=
+        [Empty, M (128, 128, OpenCV.Core.Int8), M (128, 128, OpenCV.Core.UInt16),
+         M (128, 128, OpenCV.Core.Float32), M (128, 128, OpenCV.Core.Float64),
+         M (128, 128, OpenCV.Core.UInt8, 2), M (128, 128, OpenCV.Core.UInt8, 3),
+         M (127, 128), M (128, 127), M (129, 128), M (64, 64), M (1, 1)];
+      Three_D : constant OpenCV.Core.Mat :=
+        OpenCV.Core.Create (OpenCV.Core.Dimension_Array'[128, 128, 1], (Depth => OpenCV.Core.UInt8, Channels => 1));
+      Bad_Seed : constant ECC_Homography_Result := Hk (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.01, 0.0);
+      Non_Unit : constant ECC_Homography_Result :=
+        (Hs_Identity_Seed with delta Warp => (Hs_Identity_Seed.Warp with delta H22 => 2.0));
+   begin
+      for Mask of Wrong loop
+         Assert (Hm_Outcome_Of (Pair, Mask, False) = Preflight_Rejected, "invalid mask must be rejected in Ada");
+         Assert (Hm_Outcome_Of (Pair, Mask, True) = Preflight_Rejected, "invalid seeded mask must be rejected in Ada");
+      end loop;
+      Assert (Hm_Outcome_Of (Pair, Three_D, False) = Preflight_Rejected, "3-D mask must be rejected");
+      Assert (Contains (Hm_Message (Pair, Empty, False), "nonempty"), "empty mask diagnostic");
+      Assert (Contains (Hm_Message (Pair, M (128, 128, OpenCV.Core.Float32), False), "UInt8 C1"), "depth diagnostic");
+      Assert (Contains (Hm_Message (Pair, M (128, 128, OpenCV.Core.UInt8, 3), False), "UInt8 C1"), "channel diagnostic");
+      Assert (Contains (Hm_Message (Pair, M (127, 128), False), "geometry"), "row geometry diagnostic");
+      Assert (Contains (Hm_Message (Pair, M (128, 127), False), "geometry"), "column geometry diagnostic");
+      --  Image/option contract first, then mask, then seed (all preflight).
+      Assert (Contains (Hm_Message ((EF.Texture (128, 128), EF.Texture (64, 64)), Empty, False), "ECC image"),
+              "image validation precedes mask validation");
+      begin
+         declare
+            Unused : constant ECC_Homography_Result :=
+              Estimate_ECC_Homography (Pair.Template, Pair.Moving, Empty, (Maximum_Iterations => 101, Epsilon => 0.0001));
+         begin
+            Assert (False, "invalid options accepted");
+         end;
+      exception
+         when Error : OpenCV.OpenCV_Error =>
+            Assert (Contains (Ada.Exceptions.Exception_Message (Error), "Maximum_Iterations"),
+                    "option validation precedes mask validation");
+      end;
+      Assert (Contains (Hm_Message (Pair, Empty, True, Bad_Seed), "moving mask"),
+              "mask validation precedes seed validation");
+      Assert (Contains (Hm_Message (Pair, Good, True, Bad_Seed), "<= 0.5"), "seed domain still enforced");
+      Assert (Contains (Hm_Message (Pair, Good, True, Non_Unit), "H22"), "seed H22 still enforced");
+      Assert (Hm_Outcome_Of (Pair, Good, True, Hk (1.0, 0.0, 2.0E6, 0.0, 1.0, 0.0, 0.0, 0.0)) = Preflight_Rejected,
+              "seed translation bound still enforced");
+      Assert (Hm_Outcome_Of (Pair, Good, False) = Accepted and then Hm_Outcome_Of (Pair, Good, True) = Accepted,
+              "valid mask accepted in both modes");
+      --  Non-square geometry: 96 rows x 128 columns. The matching mask is accepted; the transposed
+      --  128 x 96 shape (same pixel count) is rejected in Ada and in the shim.
+      declare
+         Wide : constant ECC_Pair := (EF.Texture (96, 128), EF.Texture (96, 128, 2, 1));
+         Wide_Mask : OpenCV.Core.Mat := EF.Constant_Image (96, 128, 255);
+         Tall_Mask : constant OpenCV.Core.Mat := EF.Constant_Image (128, 96, 255);
+         R : ECC_Homography_Result;
+         Raised : Boolean;
+      begin
+         EF.Fill (Wide_Mask, 80, 8, 30, 20, 0);
+         Hm_Run (Wide, Wide_Mask, R, Raised);
+         Assert (not Raised and then abs (LF (R.Warp.H02) - 2.0) < 0.1 and then abs (LF (R.Warp.H12) - 1.0) < 0.1,
+                 "non-square masked translation");
+         Assert (Hm_Outcome_Of (Wide, Wide_Mask, True) = Accepted, "non-square seeded mask accepted");
+         Assert (Hm_Outcome_Of (Wide, Tall_Mask, False) = Preflight_Rejected
+                 and then Hm_Outcome_Of (Wide, Tall_Mask, True) = Preflight_Rejected,
+                 "transposed-shape mask must be rejected");
+         Assert (Contains (Hm_Message (Wide, Tall_Mask, False), "geometry"), "transposed-shape diagnostic");
+      end;
+   end ECC_Homography_Masked_Validation;
+
+   procedure ECC_Homography_Masked_Immutability_And_Regions (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Window : constant OpenCV.Rect := (16, 16, 128, 128);
+      Pair   : constant ECC_Pair := Hom_Pair (K_PM);
+      Mask   : constant OpenCV.Core.Mat := Hm_Mat (Hm_Hole);
+      Mask_Sum : constant Long_Long_Integer := EF.Checksum (Mask);
+      T_Sum  : constant Long_Long_Integer := EF.Checksum (Pair.Template);
+      M_Sum  : constant Long_Long_Integer := EF.Checksum (Pair.Moving);
+      Contiguous, From_Region, Seeded_Contiguous, Seeded_Region : ECC_Homography_Result;
+      Raised : Boolean;
+      Initial : constant ECC_Homography_Result := (Hs_Mild_Near with delta Correlation => 0.25);
+      Initial_Copy : constant ECC_Homography_Result := Initial;
+   begin
+      Hm_Run (Pair, Mask, Contiguous, Raised);
+      Assert (not Raised, "reference masked call");
+      Hm_Run_Seeded (Pair, Mask, Initial, Seeded_Contiguous, Raised);
+      Assert (not Raised, "reference seeded masked call");
+      Assert (EF.Checksum (Mask) = Mask_Sum and then EF.Checksum (Pair.Template) = T_Sum
+              and then EF.Checksum (Pair.Moving) = M_Sum and then Initial = Initial_Copy,
+              "mask, images or Initial_Transform were modified");
+      --  Non-contiguous Region mask (and images) over larger parents: bitwise equal results; the
+      --  parents, including their margins, are unchanged.
+      declare
+         Mask_Parent : OpenCV.Core.Mat := EF.Constant_Image (160, 160, 0);
+         Region_Pair : ECC_Pair;
+      begin
+         for R in 0 .. 127 loop
+            for C in 0 .. 127 loop
+               OpenCV.Core.UInt8_Access.Set
+                 (Mask_Parent, 16 + R, 16 + C, OpenCV.Core.UInt8_Access.Get (Mask, R, C));
+            end loop;
+         end loop;
+         declare
+            Parent_Sum  : constant Long_Long_Integer := EF.Checksum (Mask_Parent);
+            Mask_Region : constant OpenCV.Core.Mat := Mask_Parent.Region (Window);
+            Moving_Parent : constant OpenCV.Core.Mat := EF.Constant_Image (160, 160, 9);
+         begin
+            Assert (not Mask_Region.Is_Continuous, "mask Region fixture is contiguous");
+            Hm_Run (Pair, Mask_Region, From_Region, Raised);
+            Assert (not Raised and then From_Region = Contiguous, "non-contiguous Region mask differs");
+            Hm_Run_Seeded (Pair, Mask_Region, Initial, Seeded_Region, Raised);
+            Assert (not Raised and then Seeded_Region = Seeded_Contiguous, "seeded Region mask differs");
+            Assert (EF.Checksum (Mask_Parent) = Parent_Sum, "mask Region parent modified");
+            --  All three inputs as Regions of independent parents.
+            Region_Pair := (EF.Texture (160, 160).Region (Window),
+                            EF.Homography_Texture (160, 160, K_PM).Region (Window));
+            Hm_Run (Region_Pair, Mask_Region, From_Region, Raised);
+            Assert (not Raised and then From_Region.Warp.H22 = 1.0, "all-Region masked call");
+            --  Wrong Region geometry from the same parent is rejected.
+            Assert (Hm_Outcome_Of (Pair, Mask_Parent.Region ((16, 16, 127, 128)), False) = Preflight_Rejected,
+                    "short Region mask accepted");
+            Assert (EF.Checksum (Moving_Parent) = EF.Checksum (EF.Constant_Image (160, 160, 9)),
+                    "unrelated parent changed");
+         end;
+      end;
+      --  Region parent lifetime: the Region alone keeps the storage alive.
+      declare
+         function Detached_Mask return OpenCV.Core.Mat is
+            Parent : OpenCV.Core.Mat := EF.Constant_Image (160, 160, 0);
+         begin
+            for R in 0 .. 127 loop
+               for C in 0 .. 127 loop
+                  OpenCV.Core.UInt8_Access.Set
+                    (Parent, 16 + R, 16 + C, OpenCV.Core.UInt8_Access.Get (Mask, R, C));
+               end loop;
+            end loop;
+            return Parent.Region (Window);
+         end Detached_Mask;
+         Survivor : constant OpenCV.Core.Mat := Detached_Mask;
+      begin
+         Hm_Run (Pair, Survivor, From_Region, Raised);
+         Assert (not Raised and then From_Region = Contiguous, "Region outliving its parent handle differs");
+      end;
+      --  Aliasing: the moving image itself as the mask (texture pixels are all nonzero, so
+      --  this is an all-included mask) and the same Mat as template and moving.
+      declare
+         Plain, Aliased_Result : ECC_Homography_Result;
+         P_Raised, A_Raised : Boolean;
+         Same : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+      begin
+         Assert (EF.Nonzero (Pair.Moving) = 128 * 128, "aliasing fixture has zero pixels");
+         Hs_Run_Plain (Pair, Plain, P_Raised);
+         Hm_Run (Pair, Pair.Moving, Aliased_Result, A_Raised);
+         Assert (Hm_Same (Plain, P_Raised, Aliased_Result, A_Raised), "moving image used as its own mask");
+         Assert (EF.Checksum (Pair.Moving) = M_Sum, "aliased moving image modified");
+         Hm_Run ((Same, Same), Mask, Aliased_Result, A_Raised);
+         Assert (not A_Raised and then Hom_Near (Aliased_Result, K_Identity), "same Mat as template and moving");
+      end;
+   end ECC_Homography_Masked_Immutability_And_Regions;
+
+   --  Existing overloads are source- and behavior-compatible: the unmasked identity and seeded
+   --  calls still match their Task 016 / 017 oracles (re-verified by those tests); here they are
+   --  checked against masked calls with all-included masks and against each other.
+   procedure ECC_Homography_Masked_Existing_Unchanged (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pair : constant ECC_Pair := Hom_Pair (K_SP);
+      Plain, Seeded_Identity, Masked_Full, Masked_Hole : ECC_Homography_Result;
+   begin
+      Plain := Estimate_ECC_Homography (Pair.Template, Pair.Moving);
+      Seeded_Identity := Estimate_ECC_Homography (Pair.Template, Pair.Moving, (others => <>), Hs_Identity_Seed);
+      Masked_Full := Estimate_ECC_Homography (Pair.Template, Pair.Moving, Hm_Mat (Mask_Full));
+      Masked_Hole := Estimate_ECC_Homography (Pair.Template, Pair.Moving, Hm_Mat (Hm_Hole));
+      Assert (Plain = Seeded_Identity and then Plain = Masked_Full, "unmasked/seeded/full-mask disagree");
+      Assert (Masked_Hole /= Plain, "hole mask has no effect");
+      Assert (Estimate_ECC_Homography (Pair.Template, Pair.Moving) = Plain, "unmasked call changed after masked calls");
+   end ECC_Homography_Masked_Existing_Unchanged;
+
+   ---------------------------------------------------------------------
+   --  Task 018: independent masked homography oracle (ecc-homography-masked-oracle 1)
+   ---------------------------------------------------------------------
+   type Hm_Occlusion is record
+      X, Y, W, H, Kind : Natural := 0;
+      Present          : Boolean := False;
+   end record;
+
+   type Hm_Spec is record
+      Name       : String (1 .. 26);
+      Image      : Character;
+      Truth      : HM;
+      Occ        : Hm_Occlusion;
+      Seed       : ECC_Homography_Warp;
+      Mask       : Hm_Mask;
+      Iterations : Positive;
+      Epsilon    : Long_Float;
+   end record;
+
+   No_Occ : constant Hm_Occlusion := (others => <>);
+   function Occ_T (Kind : Natural) return Hm_Occlusion is (64, 8, 56, 48, Kind, True);
+   function Occ_P (Kind : Natural) return Hm_Occlusion is (60, 4, 64, 52, Kind, True);
+
+   function Hq
+     (Name : String; Image : Character; Truth : HM; Occ : Hm_Occlusion;
+      Seed : ECC_Homography_Result; Mask : Hm_Mask;
+      Iterations : Positive := 50; Epsilon : Long_Float := 1.0E-4) return Hm_Spec is
+     (Name => Ada.Strings.Fixed.Head (Name, 26), Image => Image, Truth => Truth, Occ => Occ,
+      Seed => Seed.Warp, Mask => Mask, Iterations => Iterations, Epsilon => Epsilon);
+
+   function Mk (Kind : Character; A, B, C, D : Integer := 0; V : Natural := 255) return Hm_Mask is
+     (Kind => Kind, A => A, B => B, C => C, D => D, V => V);
+
+   Hm_Seed60 : constant ECC_Homography_Result := Hk (1.0, 0.0, 60.0, 0.0, 1.0, 0.0, 0.0, 0.0);
+
+   Expected_Hm_Oracle_Fixtures : constant := 53;
+
+   --  Mirrors fixtures() in tests/cpp/ecc_homography_masked_oracle.cpp, in order.
+   Hm_Table : constant array (1 .. Expected_Hm_Oracle_Fixtures) of Hm_Spec :=
+     [Hq ("identity-full", 'T', K_Identity, No_Occ, Hs_Identity_Seed, Mask_Full),
+      Hq ("trans-full255", 'T', K_T21, No_Occ, Hs_Identity_Seed, Mask_Full),
+      Hq ("trans-full1", 'T', K_T21, No_Occ, Hs_Identity_Seed, Mask_Full (1)),
+      Hq ("trans-full7", 'T', K_T21, No_Occ, Hs_Identity_Seed, Mask_Full (7)),
+      Hq ("trans-full-arbitrary", 'T', K_T21, No_Occ, Hs_Identity_Seed, Mk ('A', V => 99)),
+      Hq ("trans-hole255", 'T', K_T21, No_Occ, Hs_Identity_Seed, Hm_Hole),
+      Hq ("trans-hole1", 'T', K_T21, No_Occ, Hs_Identity_Seed, Mask_Hole (70, 10, 40, 30, 1)),
+      Hq ("trans-hole-arbitrary", 'T', K_T21, No_Occ, Hs_Identity_Seed, Mk ('A', 70, 10, 40, 30, 5)),
+      Hq ("trans-hole-transposed", 'T', K_T21, No_Occ, Hs_Identity_Seed, Hm_Hole_Swap),
+      Hq ("trans-multi-holes", 'T', K_T21, No_Occ, Hs_Identity_Seed, Hm_Multi),
+      Hq ("mild-full", 'T', K_PM, No_Occ, Hs_Identity_Seed, Mask_Full),
+      Hq ("mild-hole", 'T', K_PM, No_Occ, Hs_Identity_Seed, Hm_Hole),
+      Hq ("occ-trans-shifted-full", 'O', K_T21, Occ_T (2), Hs_Identity_Seed, Mask_Full),
+      Hq ("occ-trans-shifted-masked", 'O', K_T21, Occ_T (2), Hs_Identity_Seed, Hm_Mask_T),
+      Hq ("occ-trans-shifted-transp", 'O', K_T21, Occ_T (2), Hs_Identity_Seed, Mask_Hole (5, 61, 54, 62)),
+      Hq ("occ-trans-block-full", 'O', K_T21, Occ_T (0), Hs_Identity_Seed, Mask_Full),
+      Hq ("occ-trans-block-masked", 'O', K_T21, Occ_T (0), Hs_Identity_Seed, Hm_Mask_T),
+      Hq ("occ-mild-shifted-full", 'O', K_PM, Occ_P (2), Hs_Identity_Seed, Mask_Full),
+      Hq ("occ-mild-shifted-masked", 'O', K_PM, Occ_P (2), Hs_Identity_Seed, Hm_Mask_P),
+      Hq ("occ-mild-noise-masked", 'O', K_PM, Occ_P (1), Hs_Identity_Seed, Hm_Mask_P),
+      Hq ("occ-mild-stripes-masked", 'O', K_PM, Occ_P (3), Hs_Identity_Seed, Hm_Mask_P),
+      Hq ("ltp-near-full", 'T', Hs_LTP_Truth, No_Occ, Hs_LTP_Near, Mask_Full),
+      Hq ("ltp-near-hole", 'T', Hs_LTP_Truth, No_Occ, Hs_LTP_Near, Hm_Hole),
+      Hq ("ltp-id-hole", 'T', Hs_LTP_Truth, No_Occ, Hs_Identity_Seed, Hm_Hole),
+      Hq ("occ-ltp-block-full", 'O', Hs_LTP_Truth, Occ_P (0), Hs_LTP_Near, Mask_Full),
+      Hq ("occ-ltp-block-masked", 'O', Hs_LTP_Truth, Occ_P (0), Hs_LTP_Near, Hm_Mask_P),
+      Hq ("occ-ltp-block-tmplframe", 'O', Hs_LTP_Truth, Occ_P (0), Hs_LTP_Near, Mask_Hole (45, 10, 70, 58)),
+      Hq ("occ-ltp-shifted-full", 'O', Hs_LTP_Truth, Occ_P (2), Hs_LTP_Near, Mask_Full),
+      Hq ("occ-ltp-shifted-masked", 'O', Hs_LTP_Truth, Occ_P (2), Hs_LTP_Near, Hm_Mask_P),
+      Hq ("occ-scp-shifted-full", 'O', Hs_Scp_Truth, Occ_P (2), Hs_Scp_Near, Mask_Full),
+      Hq ("occ-scp-shifted-masked", 'O', Hs_Scp_Truth, Occ_P (2), Hs_Scp_Near, Hm_Mask_P),
+      Hq ("scp-near-multi-holes", 'T', Hs_Scp_Truth, No_Occ, Hs_Scp_Near, Hm_Multi),
+      Hq ("strong-near-hole", 'T', Hs_Strong_Truth, No_Occ, Hs_Strong_Near, Hm_Hole),
+      Hq ("all-zero", 'T', K_T21, No_Occ, Hs_Identity_Seed, Hm_Zero),
+      Hq ("single-pixel", 'T', K_T21, No_Occ, Hs_Identity_Seed, Mk ('P', 64, 64)),
+      Hq ("grid-2", 'T', K_T21, No_Occ, Hs_Identity_Seed, Mk ('G', 2)),
+      Hq ("row-strip-4", 'T', K_T21, No_Occ, Hs_Identity_Seed, Mk ('S', 60, 4)),
+      Hq ("row-strip-5", 'T', K_T21, No_Occ, Hs_Identity_Seed, Mk ('S', 60, 5)),
+      Hq ("block-5", 'T', K_T21, No_Occ, Hs_Identity_Seed, Mk ('B', 50, 40, 5)),
+      Hq ("block-12", 'T', K_T21, No_Occ, Hs_Identity_Seed, Mk ('B', 50, 40, 12)),
+      Hq ("density-50", 'T', K_T21, No_Occ, Hs_Identity_Seed, Mk ('D', 50)),
+      Hq ("density-90", 'T', K_T21, No_Occ, Hs_Identity_Seed, Mk ('D', 90)),
+      Hq ("left-band-id", 'T', K_T21, No_Occ, Hs_Identity_Seed, Mk ('L', 24)),
+      Hq ("left-band-seed60", 'T', K_T21, No_Occ, Hm_Seed60, Mk ('L', 24)),
+      Hq ("left-band-seed60-it1", 'T', K_T21, No_Occ, Hm_Seed60, Mk ('L', 24), 1),
+      Hq ("constant-support", 'K', K_T21, No_Occ, Hs_Identity_Seed, Mk ('Q')),
+      Hq ("constant-full", 'C', K_Identity, No_Occ, Hs_Identity_Seed, Mask_Full),
+      Hq ("noise-hole", 'N', K_Identity, No_Occ, Hs_Identity_Seed, Hm_Hole),
+      Hq ("trans-hole-it1", 'T', K_T21, No_Occ, Hs_Identity_Seed, Hm_Hole, 1),
+      Hq ("trans-hole-it100-e8", 'T', K_T21, No_Occ, Hs_Identity_Seed, Hm_Hole, 100, 1.0E-8),
+      Hq ("trans-hole-e0.1", 'T', K_T21, No_Occ, Hs_Identity_Seed, Hm_Hole, 50, 0.1),
+      Hq ("region-mild-hole", 'R', K_PM, No_Occ, Hs_Identity_Seed, Hm_Hole),
+      Hq ("region-ltp-near-hole", 'R', Hs_LTP_Truth, No_Occ, Hs_LTP_Near, Hm_Hole)];
+
+   function Hm_Name (I : Positive) return String is
+     (Ada.Strings.Fixed.Trim (Hm_Table (I).Name, Ada.Strings.Both));
+
+   type Hm_Inputs is record
+      Pair : ECC_Pair;
+      Mask : OpenCV.Core.Mat;
+   end record;
+
+   function Hm_Build (Spec : Hm_Spec) return Hm_Inputs is
+      use type EF.Homography_Matrix;
+      Window : constant OpenCV.Rect := (16, 16, 128, 128);
+      Mask   : constant OpenCV.Core.Mat := Hm_Mat (Spec.Mask);
+   begin
+      case Spec.Image is
+         when 'C' =>
+            return ((EF.Constant_Image (128, 128, 128), EF.Constant_Image (128, 128, 128)), Mask);
+         when 'N' => return ((EF.Noise (128, 128, 3), EF.Noise (128, 128, 9)), Mask);
+         when 'K' =>
+            declare
+               P : ECC_Pair := Hom_Pair (Spec.Truth);
+            begin
+               EF.Fill (P.Template, 20, 20, 50, 50, 100);
+               EF.Fill (P.Moving, 20, 20, 50, 50, 100);
+               return (P, Mask);
+            end;
+         when 'R' =>
+            declare
+               Parent : OpenCV.Core.Mat := EF.Constant_Image (160, 160, 0);
+            begin
+               for R in 0 .. 127 loop
+                  for C in 0 .. 127 loop
+                     OpenCV.Core.UInt8_Access.Set
+                       (Parent, 16 + R, 16 + C, OpenCV.Core.UInt8_Access.Get (Mask, R, C));
+                  end loop;
+               end loop;
+               return ((EF.Texture (160, 160).Region (Window),
+                        EF.Homography_Texture (160, 160, Spec.Truth).Region (Window)),
+                       Parent.Region (Window));
+            end;
+         when others =>
+            declare
+               P : ECC_Pair :=
+                 (if Spec.Truth = K_Identity then (EF.Texture (128, 128), EF.Texture (128, 128))
+                  else Hom_Pair (Spec.Truth));
+            begin
+               if Spec.Image = 'O' then
+                  P.Moving := EF.Occlude (P.Moving, Spec.Occ.X, Spec.Occ.Y, Spec.Occ.W, Spec.Occ.H,
+                                          Spec.Occ.Kind);
+               end if;
+               return (P, Mask);
+            end;
+      end case;
+   end Hm_Build;
+
+   function Hm_Oracle_Path return String is
+     (Ada.Environment_Variables.Value
+        ("VIDEO_ECC_HOMOGRAPHY_MASKED_ORACLE", "../obj/oracle/ecc-homography-masked.txt"));
+
+   function Hex_Value (Text : String) return Interfaces.Unsigned_64 is
+      use type Interfaces.Unsigned_64;
+      Value : Interfaces.Unsigned_64 := 0;
+   begin
+      if Text'Length = 0 or else Text'Length > 16 then
+         raise Constraint_Error with "hex token";
+      end if;
+      for Ch of Text loop
+         Value := Value * 16 +
+           (case Ch is
+               when '0' .. '9' => Character'Pos (Ch) - Character'Pos ('0'),
+               when 'a' .. 'f' => Character'Pos (Ch) - Character'Pos ('a') + 10,
+               when others => raise Constraint_Error with "hex digit");
+      end loop;
+      return Value;
+   end Hex_Value;
+
+   function F32_Bits (V : OpenCV.Float32_Value) return Interfaces.Unsigned_32 is
+      function To is new Ada.Unchecked_Conversion (OpenCV.Float32_Value, Interfaces.Unsigned_32);
+   begin
+      return To (V);
+   end F32_Bits;
+
+   function F64_Bits (V : OpenCV.Float64_Value) return Interfaces.Unsigned_64 is
+      function To is new Ada.Unchecked_Conversion (OpenCV.Float64_Value, Interfaces.Unsigned_64);
+   begin
+      return To (V);
+   end F64_Bits;
+
+   type Hm_Bits is array (0 .. 8) of Interfaces.Unsigned_32;
+
+   function Warp_Bits (W : ECC_Homography_Warp) return Hm_Bits is
+     [F32_Bits (W.H00), F32_Bits (W.H01), F32_Bits (W.H02), F32_Bits (W.H10), F32_Bits (W.H11),
+      F32_Bits (W.H12), F32_Bits (W.H20), F32_Bits (W.H21), F32_Bits (W.H22)];
+
+   function Hex8 (V : Interfaces.Unsigned_32) return String is
+      use type Interfaces.Unsigned_32;
+      Digits_Of : constant String := "0123456789abcdef";
+      Result    : String (1 .. 8);
+      X         : Interfaces.Unsigned_32 := V;
+   begin
+      for I in reverse Result'Range loop
+         Result (I) := Digits_Of (Integer (X mod 16) + 1);
+         X := X / 16;
+      end loop;
+      return Result;
+   end Hex8;
+
+   --  Fixture record tokens: 1 fixture, 2 name, 3 iterations, 4 epsilon, 5..13 seed bits,
+   --  14 OK|EXC, 15..23 result bits, 24 correlation bits, 25 template checksum, 26 moving
+   --  checksum, 27 mask checksum, 28 mask nonzero count, 29 unmasked-equal, 30 error class.
+   function Hm_Compare
+     (Tok : Hs_Token_Array; Spec : Hm_Spec; Name : String;
+      Succeeded, Raised, Effect, Seeded : in out Natural) return String
+   is
+      use type Interfaces.Unsigned_32;
+      use type Interfaces.Unsigned_64;
+      function Tk (I : Positive) return String is (Hs_Tok (Tok, I));
+      Outcome : constant String := Tk (14);
+      Class   : constant String := Tk (30);
+      Inputs  : constant Hm_Inputs := Hm_Build (Spec);
+      Options : constant ECC_Homography_Options :=
+        (Maximum_Iterations => Spec.Iterations, Epsilon => OpenCV.Float64_Value (Spec.Epsilon));
+      Initial : constant ECC_Homography_Result := (Warp => Spec.Seed, Correlation => 0.0);
+      Is_Identity_Seed : constant Boolean := Spec.Seed = Hs_Identity_Seed.Warp;
+      Seed_Bits : constant Hm_Bits := Warp_Bits (Spec.Seed);
+      Label   : constant array (0 .. 8) of String (1 .. 3) :=
+        ["H00", "H01", "H02", "H10", "H11", "H12", "H20", "H21", "H22"];
+      R, Via_Seed : ECC_Homography_Result;
+      Binding_Raised, Seed_Raised : Boolean;
+   begin
+      if Integer'Value (Tk (3)) /= Spec.Iterations
+        or else abs (Long_Float'Value (Tk (4)) - Spec.Epsilon) > 1.0E-15
+      then
+         return "fixture options differ: " & Name;
+      end if;
+      if Outcome /= "OK" and then Outcome /= "EXC" then return "outcome token: " & Name; end if;
+      if Tk (29) /= "0" and then Tk (29) /= "1" then return "unmasked-equal token: " & Name; end if;
+      if Class /= "NONE" and then Class /= "NAN" and then Class /= "LAMBDA" and then Class /= "OTHER" then
+         return "error class token: " & Name;
+      end if;
+      if (Outcome = "OK") /= (Class = "NONE") then return "error class inconsistent: " & Name; end if;
+      for K in 0 .. 8 loop
+         if Interfaces.Unsigned_32 (Hex_Value (Tk (5 + K))) /= Seed_Bits (K) then
+            return "seed " & Label (K) & " differs: " & Name;
+         end if;
+      end loop;
+      if Long_Long_Integer'Value (Tk (25)) /= EF.Checksum (Inputs.Pair.Template)
+        or else Long_Long_Integer'Value (Tk (26)) /= EF.Checksum (Inputs.Pair.Moving)
+      then
+         return "fixture checksum differs: " & Name;
+      end if;
+      if Long_Long_Integer'Value (Tk (27)) /= EF.Checksum (Inputs.Mask)
+        or else Natural'Value (Tk (28)) /= EF.Nonzero (Inputs.Mask)
+      then
+         return "mask checksum differs: " & Name;
+      end if;
+      if Spec.Image = 'R' and then Inputs.Mask.Is_Continuous then
+         return "Region mask fixture is contiguous: " & Name;
+      end if;
+      if Tk (29) = "0" then Effect := Effect + 1; end if;
+      if not Is_Identity_Seed then
+         Seeded := Seeded + 1;
+         Hm_Run_Seeded (Inputs.Pair, Inputs.Mask, Initial, R, Binding_Raised, Options);
+      else
+         Hm_Run (Inputs.Pair, Inputs.Mask, R, Binding_Raised, Options);
+         --  The identity seed through the masked seeded overload is the same native call.
+         Hm_Run_Seeded (Inputs.Pair, Inputs.Mask, Initial, Via_Seed, Seed_Raised, Options);
+         if not Hm_Same (R, Binding_Raised, Via_Seed, Seed_Raised) then
+            return "masked identity seed differs from the masked identity overload: " & Name;
+         end if;
+      end if;
+      if Outcome = "OK" then
+         if Binding_Raised then return "binding raised where native succeeded: " & Name; end if;
+         Succeeded := Succeeded + 1;
+         declare
+            B : constant Hm_Bits := Warp_Bits (R.Warp);
+         begin
+            for K in 0 .. 8 loop
+               if Interfaces.Unsigned_32 (Hex_Value (Tk (15 + K))) /= B (K) then
+                  return Label (K) & " differs: " & Name;
+               end if;
+            end loop;
+            if R.Warp.H22 /= 1.0 then return "H22 is not exactly 1: " & Name; end if;
+         end;
+         if Hex_Value (Tk (24)) /= F64_Bits (R.Correlation) then
+            return "correlation differs: " & Name;
+         end if;
+      else
+         if not Binding_Raised then return "binding succeeded where native raised: " & Name; end if;
+         Raised := Raised + 1;
+      end if;
+      return "";
+   end Hm_Compare;
+
+   function Verify_Hm_Oracle
+     (Path : String; Succeeded, Raised, Effect, Seeded : out Natural) return String
+   is
+      Lines  : Hom_Line_Array;
+      N      : Natural;
+      Tok    : Hs_Token_Array;
+      TC     : Natural;
+      Native : constant String := Interfaces.C.Strings.Value (Hom_Native_Version);
+      function Line (I : Positive) return String is (Ada.Strings.Unbounded.To_String (Lines (I)));
+   begin
+      Succeeded := 0; Raised := 0; Effect := 0; Seeded := 0;
+      begin
+         Hom_Read_Lines (Path, Lines, N);
+      exception
+         when others => return "oracle missing or unreadable";
+      end;
+      if N = 0 then return "oracle is empty"; end if;
+      if Line (1) /= "ecc-homography-masked-oracle 1" then return "oracle magic or format version"; end if;
+      if N < 2 or else Line (2) /= "version " & Native then return "oracle OpenCV version differs"; end if;
+      if N < 3 or else Ada.Strings.Fixed.Head (Line (N), 4) /= "end " then
+         return "oracle truncated (no end record)";
+      end if;
+      if Line (N) /= "end" & Integer'Image (Expected_Hm_Oracle_Fixtures) then
+         return "oracle record count";
+      end if;
+      if N - 3 /= Expected_Hm_Oracle_Fixtures then return "oracle fixture record count"; end if;
+      for I in 1 .. Expected_Hm_Oracle_Fixtures loop
+         Hs_Split (Line (I + 2), Tok, TC);
+         if TC /= 30 or else Hs_Tok (Tok, 1) /= "fixture" then
+            return "malformed fixture record";
+         end if;
+         if Hs_Tok (Tok, 2) /= Hm_Name (I) then
+            return "fixture identity or order: " & Hm_Name (I);
+         end if;
+         declare
+            Defect : constant String :=
+              Hm_Compare (Tok, Hm_Table (I), Hm_Name (I), Succeeded, Raised, Effect, Seeded);
+         begin
+            if Defect /= "" then return Defect; end if;
+         end;
+      end loop;
+      return "";
+   exception
+      when others => return "oracle parse error";
+   end Verify_Hm_Oracle;
+
+   procedure ECC_Homography_Masked_Direct_Oracle (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Succeeded, Raised, Effect, Seeded : Natural;
+      Defect : constant String := Verify_Hm_Oracle (Hm_Oracle_Path, Succeeded, Raised, Effect, Seeded);
+   begin
+      Assert (Defect = "", "masked homography oracle: " & Defect);
+      Assert (Succeeded + Raised = Expected_Hm_Oracle_Fixtures, "masked homography oracle accounting");
+      Assert (Succeeded >= 30 and then Raised >= 10, "masked homography oracle must cover both outcomes");
+      Assert (Effect >= 30, "masked homography oracle: too few fixtures where the mask changes the result");
+      Assert (Seeded >= 12, "masked homography oracle: too few caller-seeded fixtures");
+   end ECC_Homography_Masked_Direct_Oracle;
+
+   procedure ECC_Homography_Masked_Oracle_Integrity (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Original : constant String := Hm_Oracle_Path;
+      Scratch  : constant String := Original & ".tampered";
+      Lines    : Hom_Line_Array;
+      Count    : Natural;
+      A, B, C, D : Natural;
+
+      function Line_Of (Name : String) return Positive is
+      begin
+         for I in 1 .. Expected_Hm_Oracle_Fixtures loop
+            if Hm_Name (I) = Name then return I + 2; end if;
+         end loop;
+         raise Constraint_Error with "no such masked homography oracle fixture " & Name;
+      end Line_Of;
+
+      procedure Expect_Rejected (Label, Fragment : String; Edited : Hom_Line_Array; Edited_Count : Natural) is
+      begin
+         Hom_Write_Lines (Scratch, Edited, Edited_Count);
+         declare
+            Defect : constant String := Verify_Hm_Oracle (Scratch, A, B, C, D);
+         begin
+            Assert (Defect /= "", "tampered masked homography oracle accepted: " & Label);
+            Assert (Ada.Strings.Fixed.Index (Defect, Fragment) > 0,
+                    "tampered masked homography oracle (" & Label & ") rejected for the wrong reason: " & Defect);
+         end;
+      end Expect_Rejected;
+
+      function Swap_Lines (L : Hom_Line_Array; I, J : Positive) return Hom_Line_Array is
+         Result : Hom_Line_Array := L;
+      begin
+         Result (I) := L (J);
+         Result (J) := L (I);
+         return Result;
+      end Swap_Lines;
+
+      --  The hex token with its least significant bit flipped (a one-ulp change).
+      function Flip_Last_Bit (Line_Index, Token_Index : Positive) return String is
+         use type Interfaces.Unsigned_64;
+         Tok : Hs_Token_Array;
+         TC  : Natural;
+         V   : Interfaces.Unsigned_64;
+      begin
+         Hs_Split (Ada.Strings.Unbounded.To_String (Lines (Line_Index)), Tok, TC);
+         V := Hex_Value (Hs_Tok (Tok, Token_Index));
+         return Hex8 (Interfaces.Unsigned_32 (if V mod 2 = 0 then V + 1 else V - 1));
+      end Flip_Last_Bit;
+
+      Seeded_Line, Hole_Line : Positive;
+   begin
+      Hom_Read_Lines (Original, Lines, Count);
+      Seeded_Line := Line_Of ("occ-ltp-block-masked");
+      Hole_Line := Line_Of ("trans-hole255");
+      Assert (Count = Expected_Hm_Oracle_Fixtures + 3, "masked homography oracle line count");
+      Assert (Verify_Hm_Oracle (Original, A, B, C, D) = "", "pristine masked homography oracle rejected");
+      Assert (Verify_Hm_Oracle (Original & ".does-not-exist", A, B, C, D) = "oracle missing or unreadable",
+              "missing masked homography oracle accepted");
+      Expect_Rejected ("empty", "empty", Lines, 0);
+      Expect_Rejected ("truncated", "truncated", Lines, Count - 1);
+      Expect_Rejected ("truncated mid-record", "truncated", Lines, Count - 7);
+      Expect_Rejected ("wrong magic", "format version", Hs_With_Token (Lines, 1, 1, "ecc-homography-seeded-oracle"), Count);
+      Expect_Rejected ("wrong format version", "format version", Hs_With_Token (Lines, 1, 2, "2"), Count);
+      Expect_Rejected ("wrong OpenCV version", "OpenCV version", Hs_With_Token (Lines, 2, 2, "0.0.0"), Count);
+      Expect_Rejected ("wrong declared count", "record count", Hs_With_Token (Lines, Count, 2, "52"), Count);
+      Expect_Rejected ("reordered records", "fixture identity or order", Swap_Lines (Lines, Hole_Line, Hole_Line + 1), Count);
+      Expect_Rejected ("renamed fixture", "fixture identity", Hs_With_Token (Lines, Seeded_Line, 2, "occ-ltp-block-maskedX"), Count);
+      Expect_Rejected ("dropped token", "malformed", Hs_With_Token (Lines, Seeded_Line, 30, "NONE extra"), Count);
+      Expect_Rejected ("altered options", "options", Hs_With_Token (Lines, Seeded_Line, 3, "49"), Count);
+      Expect_Rejected ("altered template checksum", "fixture checksum", Hs_With_Token (Lines, Seeded_Line, 25, "1"), Count);
+      Expect_Rejected ("altered moving checksum", "fixture checksum", Hs_With_Token (Lines, Seeded_Line, 26, "1"), Count);
+      Expect_Rejected ("altered mask checksum", "mask checksum", Hs_With_Token (Lines, Seeded_Line, 27, "1"), Count);
+      Expect_Rejected ("altered mask count", "mask checksum", Hs_With_Token (Lines, Seeded_Line, 28, "12325"), Count);
+      Expect_Rejected ("altered seed H02", "seed H02", Hs_With_Token (Lines, Seeded_Line, 7, "41100000"), Count);
+      Expect_Rejected ("swapped seed H02 and H12", "seed H02", Hs_Swap_Tokens (Lines, Seeded_Line, 7, 10), Count);
+      Expect_Rejected ("swapped output H02 and H20", "differs", Hs_Swap_Tokens (Lines, Seeded_Line, 17, 21), Count);
+      Expect_Rejected ("transposed output H01/H10", "differs", Hs_Swap_Tokens (Lines, Seeded_Line, 16, 18), Count);
+      Expect_Rejected ("altered output H11 last bit", "H11 differs",
+                       Hs_With_Token (Lines, Hole_Line, 19, Flip_Last_Bit (Hole_Line, 19)), Count);
+      Expect_Rejected ("altered correlation", "correlation differs", Hs_With_Token (Lines, Hole_Line, 24, "3fe0000000000000"), Count);
+      Expect_Rejected ("success recorded as exception", "binding succeeded where native raised",
+                       Hs_With_Token (Hs_With_Token (Lines, Hole_Line, 14, "EXC"), Hole_Line, 30, "NAN"), Count);
+      Expect_Rejected ("exception recorded as success", "binding raised where native succeeded",
+                       Hs_With_Token (Hs_With_Token (Lines, Line_Of ("single-pixel"), 14, "OK"), Line_Of ("single-pixel"), 30, "NONE"),
+                       Count);
+      Expect_Rejected ("inconsistent error class", "error class inconsistent",
+                       Hs_With_Token (Lines, Hole_Line, 30, "NAN"), Count);
+      Expect_Rejected ("unknown outcome token", "outcome token", Hs_With_Token (Lines, Hole_Line, 14, "MAYBE"), Count);
+      Expect_Rejected ("malformed hex", "parse error", Hs_With_Token (Lines, Hole_Line, 15, "zz"), Count);
+      Ada.Directories.Delete_File (Scratch);
+   end ECC_Homography_Masked_Oracle_Integrity;
+
    function Suite return AUnit.Test_Suites.Access_Test_Suite is
       Result : constant AUnit.Test_Suites.Access_Test_Suite := AUnit.Test_Suites.New_Suite;
    begin
@@ -8914,6 +9867,18 @@ package body Video_Tests is
       Result.Add_Test (Caller.Create ("ECC_Homography_Seeded_Nonconvergence", ECC_Homography_Seeded_Nonconvergence'Access));
       Result.Add_Test (Caller.Create ("ECC_Homography_Seeded_Direct_Oracle", ECC_Homography_Seeded_Direct_Oracle'Access));
       Result.Add_Test (Caller.Create ("ECC_Homography_Seeded_Oracle_Integrity", ECC_Homography_Seeded_Oracle_Integrity'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Masked_Full_Equivalence", ECC_Homography_Masked_Full_Equivalence'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Masked_Value_Semantics", ECC_Homography_Masked_Value_Semantics'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Masked_Occlusion_Improves", ECC_Homography_Masked_Occlusion_Improves'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Masked_Seeded_Occlusion", ECC_Homography_Masked_Seeded_Occlusion'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Masked_Coordinate_Frame", ECC_Homography_Masked_Coordinate_Frame'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Masked_Numerics", ECC_Homography_Masked_Numerics'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Masked_Support", ECC_Homography_Masked_Support'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Masked_Validation", ECC_Homography_Masked_Validation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Masked_Immutability_And_Regions", ECC_Homography_Masked_Immutability_And_Regions'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Masked_Existing_Unchanged", ECC_Homography_Masked_Existing_Unchanged'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Masked_Direct_Oracle", ECC_Homography_Masked_Direct_Oracle'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Masked_Oracle_Integrity", ECC_Homography_Masked_Oracle_Integrity'Access));
       return Result;
    end Suite;
 end Video_Tests;
