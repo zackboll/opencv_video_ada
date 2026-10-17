@@ -20,7 +20,9 @@
 | oracle/AUnit | `f203786` | 53-fixture oracle, 12 AUnit registrations |
 | boundary | `86bad70` | native boundary, schema, support, faults, padding |
 | docs | `4fa2048` | task note, README (compiled example) |
-| report | this commit | this file |
+| report | `211f1c5` | this file (without the mutation table) |
+| mutation fix | `aac66a5` | non-square mask geometry tests (kills mutant 16; test-only) |
+| mutation table | this commit | mutation results, final campaign |
 
 ## Safety gate
 
@@ -105,16 +107,17 @@ does not detect it. Correlations of masked successes are over the eligible pixel
 
 `run_ecc_homography_masked()` (production and `OPENCV_VIDEO_TEST_FAULTS` builds):
 
-* 22 same-build agreements with independent direct masked `findTransformECC` calls (identity and
+* 24 same-build agreements with independent direct masked `findTransformECC` calls (identity and
   seeded, translation, transposed hole, occlusion in moving and template frame, sparse supports,
   non-overlap at 1 and 50 iterations, all-Region inputs, full aliasing, options 1/3/100 and
-  `1e-8`/`0.1`, constant images).
+  `1e-8`/`0.1`, constant images, a non-square 96x128 pair in both modes).
 * Mask consumption on both exports; full masks 1/7/255 byte-identical to both unmasked exports on
   success and failure; values 1/255/arbitrary byte-identical; an independent direct-level check that
   a full mask equals `noArray()` and a hole does not.
 * 24 rejections (12 masks × 2 exports: empty, Float32, Int8, UInt16, 2 and 3 channels, 3-D, rows±1,
-  columns+1, 64x64, all-zero), each with its diagnostic and all 48 bytes untouched; null mask, null
-  result; ordering images → options → mask → seed; seed domain unchanged.
+  columns+1, 64x64, all-zero), each with its diagnostic and all 48 bytes untouched; the transposed
+  128x96 shape of a 96x128 mask (same pixel count) rejected on both exports; null mask, null result;
+  ordering images → options → mask → seed; seed domain unchanged.
 * Regions (non-contiguous mask bitwise equal to compact, parent unchanged, short Region rejected);
   caller mask, images unchanged.
 * Three prefills: success bytes prefill-independent with zero padding 36-39; failures preserve every
@@ -130,12 +133,44 @@ Production archive: 25 `T opencv_video_*` symbols, 0 `test_` symbols (`nm`), eve
 
 ## Mutation campaign
 
-Run on scratch clones of `86bad70` (never on the worktree); every edit pattern was required to match
-exactly once. Each mutant was rebuilt and checked with both boundary builds (C mutants) and the full
-AUnit suite against pristine oracle files. A mutant is KILLED only if it built, ran and a named
-check failed. The table is completed in the follow-up commit once every mutant has run.
+Run on scratch `git clone --no-local` copies (never on the worktree); every edit pattern was required
+to match exactly once. Each mutant was rebuilt and checked with both native boundary builds (shim
+mutants) and the full AUnit suite against pristine oracle files. A mutant counts as KILLED only if it
+built, ran and a named check failed. Three mutants first failed to compile only because
+`-Werror`/`-gnatwe` flagged an unused name; they were rewritten to keep the name referenced and
+rerun (rows marked †). Mutant 16 survived on `86bad70` (square fixtures only); commit `aac66a5`
+added non-square mask geometry checks and it was rerun.
 
-MUTATION_ROWS
+| # | Mutant | Boundary | AUnit | First named failure |
+|---|---|---|---|---|
+| 1 | mask omitted (`noArray()` on masked path) | killed | killed | boundary `masked translation`; `Masked_Value_Semantics`: excluded rectangle must change the result |
+| 2 | moving image passed as mask | killed | killed | same |
+| 3 | template passed as mask | killed | killed | same |
+| 4 | mask and moving image swapped | killed | killed | boundary `masked translation`; `Masked_Full_Equivalence` |
+| 5 | mask transposed | killed | killed | boundary `masked translation`; `Masked_Occlusion_Improves` |
+| 6 | mask inverted (`mask == 0`) | killed | killed | boundary `masked translation`; `Masked_Full_Equivalence` |
+| 7 | unmasked export uses a mask | killed | killed | boundary `noise-vs-texture`; Task 016 `ECC_Homography_Direct_Oracle` |
+| 8 | masked export runs unmasked | killed | killed | boundary `masked translation`; `Masked_Value_Semantics` |
+| 9† | masked seeded export drops the seed | killed | killed | boundary `masked seeded translation+perspective`; `Masked_Full_Equivalence` (seeded) |
+| 10 | no mask type check (C) | killed | survived | boundary `Float32 mask` (Ada preflight independently rejects) |
+| 11 | no mask 2-D check (C) | killed | survived | boundary `3-D mask` (Ada preflight) |
+| 12 | no empty-mask check (C) | killed | survived | boundary `empty mask` (Ada preflight) |
+| 13 | no row check (C) | killed | survived | boundary `rows+1 mask` (Ada preflight) |
+| 14 | no column check (C) | killed | survived | boundary `columns+1 mask` (Ada preflight) |
+| 15 | no all-zero check | killed | killed | boundary `all-zero mask`; `Masked_Support` diagnostic |
+| 16 | rows/columns swapped in the geometry check | killed (rerun) | killed (rerun) | boundary `non-square mask`; `Masked_Validation` non-square translation |
+| 17† | mask validation bypassed entirely (C) | killed | killed | boundary `empty mask`; `Masked_Support` all-zero diagnostic |
+| 18 | mask validated after the seed | killed | survived | boundary `mask before seed` (Ada preflight orders them) |
+| 19 | shim overwrites the caller mask | killed | killed | boundary `full alias`; `Masked_Immutability_And_Regions` |
+| 20 | Ada: no depth/channel check | n/a | killed | `Masked_Validation`: invalid mask must be rejected in Ada |
+| 21† | Ada: no geometry check | n/a | killed | `Masked_Validation`: invalid mask must be rejected in Ada |
+| 22 | Ada: moving image handle passed as mask | n/a | killed | `Masked_Value_Semantics` |
+| 23 | Ada seeded: moving handle passed as mask | n/a | killed | `Masked_Seeded_Occlusion` |
+| 24 | Ada: mask and moving handles swapped | n/a | killed | `Masked_Full_Equivalence` |
+
+**Result: 24/24 killed.** The C-validation mutants 10-14 and 18 survive AUnit by design, because the Ada
+preflight rejects the same inputs first; the raw C boundary kills each of them. Survivors in a single
+layer are therefore defended by the other layer, and the C ABI is independently qualified.
 
 ## Memory
 
@@ -155,8 +190,10 @@ measurable peak.
 
 ## Version campaigns
 
-Each campaign ran in an independent `git clone --no-local` of `86bad70` (the last code commit;
-later commits change only documentation), rebuilt from source. Steps: development, validation and
+Each campaign ran in an independent `git clone --no-local`, rebuilt from source: first on `86bad70`,
+then again on `aac66a5` (the final code commit, which adds the non-square geometry tests; later
+commits change documentation only). Both runs gave the results below; the boundary line reads
+22 agreements on `86bad70` and 24 on `aac66a5`. Steps: development, validation and
 release builds; repository checker; configuration tests; `sh -n` on every script; `git diff --check`;
 `scripts/test.sh` (all oracles, AUnit, uninstrumented boundary); instrumented
 `scripts/run_sanitizers.sh`; `homography_smoke`; `ecc_smoke`; examples build and `lk_synthetic`.
