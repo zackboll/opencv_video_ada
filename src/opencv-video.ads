@@ -506,6 +506,45 @@ package OpenCV.Video is
       Options           : ECC_Homography_Options := (others => <>);
       Initial_Transform : ECC_Homography_Result)
       return ECC_Homography_Result;
+
+   --  Moving-image-masked ECC homography alignment (Task 018). The same findTransformECC call
+   --  as the overloads above, with Moving_Mask passed as the native moving-image mask (the
+   --  seven-argument API; there is no template mask). Moving_Mask is expressed in MOVING-image
+   --  pixel coordinates (row, column of Moving_Image): nonzero pixels are eligible for
+   --  alignment and zero pixels are excluded; 1, 255 and any other nonzero value are
+   --  equivalent. The mask introduces no transform or coordinate system of its own: native ECC
+   --  warps it with the moving image, so template pixels whose warped location falls on an
+   --  excluded moving pixel do not contribute.
+   --
+   --  Moving_Mask must be a nonempty 2-D UInt8 C1 Mat with exactly the moving image's Rows
+   --  and Columns (Regions accepted) and at least one nonzero pixel; violations raise
+   --  OpenCV_Error before any native call. The mask, both images and any Region parents are
+   --  never modified, converted or normalized. Native ECC erodes the mask (Gaussian 5 x 5:
+   --  isolated pixels and strips or blocks up to about 4 pixels wide contribute nothing); if no
+   --  eligible pixel remains under the warped template, native ECC raises and OpenCV_Error is
+   --  propagated. A mask that keeps very little support may also yield a finite but
+   --  meaningless matrix, which is returned unchanged. Masking is a caller policy for
+   --  excluding pixels the caller already knows to be unreliable; the binding does not detect
+   --  moving objects or unreliable pixels, and a mask never guarantees convergence or a correct
+   --  alignment. An all-included mask gives exactly the unmasked result.
+   --  Output contract, H22 rule and options are those of the unmasked overload.
+   function Estimate_ECC_Homography
+     (Template_Image : OpenCV.Core.Mat;
+      Moving_Image   : OpenCV.Core.Mat;
+      Moving_Mask    : OpenCV.Core.Mat;
+      Options        : ECC_Homography_Options := (others => <>))
+      return ECC_Homography_Result;
+
+   --  Caller-seeded and moving-image-masked (Task 018): the mask contract above combined with
+   --  the unchanged Task 017 seed domain and Initial_Transform rules (Correlation ignored).
+   --  The mask is validated before the seed.
+   function Estimate_ECC_Homography
+     (Template_Image    : OpenCV.Core.Mat;
+      Moving_Image      : OpenCV.Core.Mat;
+      Moving_Mask       : OpenCV.Core.Mat;
+      Options           : ECC_Homography_Options := (others => <>);
+      Initial_Transform : ECC_Homography_Result)
+      return ECC_Homography_Result;
 private
    type PyrLK_Pyramid is new Ada.Finalization.Limited_Controlled with record
       Handle : System.Address := System.Null_Address;
