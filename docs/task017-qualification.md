@@ -181,3 +181,75 @@ uninstrumented Release builds (instrumented OpenCV was used for the safety-gate 
 * **IEC 60559 reliance** is explicit; non-IEC targets are not qualified.
 * **Windows.** The new code has not run on Windows; it first runs in the push-to-main Windows job.
   Hosted CI results for the final head are recorded in the PR conversation, not pre-claimed here.
+
+## Task 017-R1 — Deterministic C ABI padding correction
+
+**Root cause and original behavior.** `opencv_video_ecc_homography_result` is 48 bytes: nine
+Float32 coefficients at 0-35, four padding bytes at 36-39, Float64 correlation at 40-47. Up to
+`97e0ef2`, the shared `ecc_homography_entry` (used by both the Task 016 identity-initialized
+export and the Task 017 seeded export) assigned the ten members of an uninitialized local object
+and published it with `*result = computed`. A structure copy need not preserve, initialize or
+even copy padding, so bytes 36-39 of a successful result were unspecified. The existing tests
+compared only bytes 0-35 and the correlation on success, so they did not observe this.
+
+**Correction (`fa7303c`).** After every input, seed, native and output-schema check has passed,
+the shim builds the representation in a local `unsigned char[48]`. It zero-fills that buffer,
+writes each field with `std::memcpy` at its `offsetof` offset, clears bytes 36-39 explicitly, and
+publishes all 48 bytes with one `std::memcpy`. New compile-time checks require the type to be
+trivially copyable and standard-layout, and require padding to be exactly `[offsetof(h22) + 4,
+offsetof(correlation)) = [36, 40)`. These are in addition to the existing layout assertions in
+`opencv_video_shim.h`. The ABI, the Ada record, offsets, alignment and numerical values are
+unchanged. The affine, Euclidean and translation results were not changed.
+
+**Guarantees.**
+* **Success:** all 48 bytes are defined, and bytes 36-39 are zero. The bytes depend only on the
+  coefficients and correlation, not on the caller's prior buffer contents.
+* **Failure:** the caller's object is not written at all. The only write to `*result` is the
+  final publication, and nothing zeroes or prefills it before validation.
+
+**Tests (`tests/cpp/native_boundary.cpp`).**
+* `hom_matches_direct`, used by every success comparison in both homography test functions,
+  now also requires bytes 36-39 to be zero. The repeat-call checks compare all 48 bytes after a
+  different prefill, where before they compared 36 bytes plus the correlation.
+* Both injected-finite loops (modes 30-34) require zero padding.
+* New `run_ecc_homography_padding()`:
+  * Five successful cases (identity export on two pairs, identity seed on two pairs, and a near
+    seed where identity raises), each run with three distinct prefills whose padding bytes are
+    all nonzero. Each run matches the direct native call bitwise, has zero padding, and produces
+    the same 48 bytes as the other prefills.
+  * The identity seed and the identity export give identical 48 bytes from different prefills.
+  * Every prefill is preserved byte for byte on input-validation, seed-validation and native
+    failures (27 cases). The fault build adds 8 injected exceptions, 20 rejected corruptions and
+    8 schema mutations on both exports, for 243 cases in total.
+* **Negative control.** The unchanged boundary test linked against the shim from `97e0ef2`
+  fails in both the production and fault builds:
+  `identity: padding bytes 36-39 = 145 252 219 6` (GCC 14.2, `-O2`). The bytes are unspecified,
+  not a stable value. With the correction, the same tests pass.
+
+**Qualification of `fa7303c`.**
+
+Clean-clone campaign (`git clone --no-local`, same `campaign.sh` steps as above) of
+`fa7303c75df65b21ebafef5daf5af1407464ccde`:
+
+| OpenCV | Builds D/V/R | Checker, config, `sh -n`, diff | AUnit run/ok/fail/err | Task 016 oracle | Seeded oracle | Sanitizer step (ASan/UBSan/LSan) | R1 boundary: production / fault build | Smoke, `lk_synthetic` |
+|---|---|---|---|---|---|---|---|---|
+| 4.1.0 | 0/0/0 | 0/0/0/0 | 186/186/0/0 | 28 OK / 9 EXC | 20 OK / 15 EXC | rc 0, 0 findings | PASS (27 failures) / PASS (243 failures) | 0, 0 |
+| 4.6.0 | 0/0/0 | 0/0/0/0 | 186/186/0/0 | 30 OK / 7 EXC | 20 OK / 15 EXC | rc 0, 0 findings | PASS (27) / PASS (243) | 0, 0 |
+| 4.10.0 | 0/0/0 | 0/0/0/0 | 186/186/0/0 | 30 OK / 7 EXC | 20 OK / 15 EXC | rc 0, 0 findings | PASS (27) / PASS (243) | 0, 0 |
+| 5.0.0 | 0/0/0 | 0/0/0/0 | 186/186/0/0 | 28 OK / 9 EXC | 19 OK / 16 EXC | rc 0, 0 findings | PASS (27) / PASS (243) | 0, 0 |
+
+Each row passed with five success cases times three prefills. `ldd` showed the selected library
+on every version. The seeded-oracle output files are byte-identical to the pre-R1 campaign of
+`523b957` on every version, and the 4.6.0 output equals 4.10.0 after the version line. The
+correction did not change numerical behavior. The production archive exports 23
+`T opencv_video_*` symbols and 0 test symbols, and the checker still reports 23 exports and 186
+AUnit registrations. The native boundary tests are built and run only by
+`scripts/run_sanitizers.sh`, so the R1 checks ran instrumented.
+
+No MemorySanitizer or Valgrind run was made (neither clang++ nor valgrind is installed on the
+qualification host). The evidence is the explicit byte-level tests and the negative control.
+
+**Platform limitations.** The tests prove zero padding for the shim build on each tested
+toolchain (Linux GCC locally; Linux and macOS in hosted CI). The correction does not depend on
+the compiler preserving padding through copies. Windows has not run the new code; it first runs
+in the push-to-main Windows workflow.
