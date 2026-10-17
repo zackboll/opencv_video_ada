@@ -3705,6 +3705,517 @@ void run_ecc_homography_padding() {
 }  // namespace
 
 
+// ECC homography masked (Task 018): both masked exports versus independent direct
+// findTransformECC calls that pass the moving-image mask themselves; mask schema, support,
+// coordinate frame, Regions, aliasing, immutability, atomicity, padding, faults and corruption.
+namespace {
+opencv_video_status hm_call(const opencv_core_mat_handle *a, const opencv_core_mat_handle *b,
+                            const opencv_core_mat_handle *m, opencv_video_ecc_homography_result *r,
+                            int iterations = 50, double epsilon = 1e-4) {
+    return opencv_video_estimate_ecc_homography_masked(a, b, m, iterations, epsilon, r);
+}
+
+opencv_video_status hms_call(const opencv_core_mat_handle *a, const opencv_core_mat_handle *b,
+                             const opencv_core_mat_handle *m, const float s[9],
+                             opencv_video_ecc_homography_result *r, int iterations = 50,
+                             double epsilon = 1e-4) {
+    return opencv_video_estimate_ecc_homography_masked_seeded(a, b, m, iterations, epsilon, s[0], s[1],
+                                                              s[2], s[3], s[4], s[5], s[6], s[7], s[8], r);
+}
+
+// Direct native call with its own warp and the caller's mask (no shim code). `mask` empty means
+// cv::noArray() so the unmasked direct call is the same helper.
+HomDirect hm_direct(const cv::Mat &a, const cv::Mat &b, const cv::Mat &mask, const float s[9],
+                    int iterations = 50, double epsilon = 1e-4) {
+    HomDirect d{};
+    cv::Mat warp(3, 3, CV_32F);
+    for (int i = 0; i < 9; ++i) warp.ptr<float>()[i] = s[i];
+    try {
+        const cv::TermCriteria tc(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, iterations, epsilon);
+        d.rho = mask.empty() ? cv::findTransformECC(a, b, warp, cv::MOTION_HOMOGRAPHY, tc, cv::noArray(), 5)
+                             : cv::findTransformECC(a, b, warp, cv::MOTION_HOMOGRAPHY, tc, mask, 5);
+        d.ok = true;
+    } catch (const cv::Exception &) {
+        d.ok = false;
+    }
+    for (int i = 0; i < 9; ++i) d.w[i] = warp.ptr<float>()[i];
+    return d;
+}
+
+bool hm_same_direct(const HomDirect &x, const HomDirect &y) {
+    return x.ok == y.ok && (!x.ok || (std::memcmp(x.w, y.w, sizeof x.w) == 0 &&
+                                      std::memcmp(&x.rho, &y.rho, sizeof x.rho) == 0));
+}
+
+cv::Mat hm_mask_hole(int n, cv::Rect hole, unsigned char value = 255) {
+    cv::Mat m(n, n, CV_8UC1, cv::Scalar(value));
+    m(hole & cv::Rect(0, 0, n, n)).setTo(0);
+    return m;
+}
+
+// Agreement of one export (seed == nullptr: identity-initialized masked export) with the
+// direct call using the same mask: bitwise on success with zero padding, OpenCV status and an
+// untouched caller object on native failure. Returns whether native succeeded.
+bool hm_agrees(const opencv_core_mat_handle *ha, const opencv_core_mat_handle *hb,
+               const opencv_core_mat_handle *hm, const cv::Mat &a, const cv::Mat &b, const cv::Mat &m,
+               const float *seed, const char *message, int iterations = 50, double epsilon = 1e-4) {
+    static const float identity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const HomDirect d = hm_direct(a, b, m, seed ? seed : identity, iterations, epsilon);
+    opencv_video_ecc_homography_result r = hom_sentinel();
+    const auto code = seed ? hms_call(ha, hb, hm, seed, &r, iterations, epsilon)
+                           : hm_call(ha, hb, hm, &r, iterations, epsilon);
+    if (d.ok) {
+        check(code == OPENCV_VIDEO_OK, message);
+        hom_matches_direct(r, d, message);
+        check(std::strlen(opencv_video_last_error()) == 0, "stale diagnostic after masked success");
+    } else {
+        check(code == OPENCV_VIDEO_ERROR_OPENCV, message);
+        check(std::strlen(opencv_video_last_error()) > 0, "no diagnostic after masked native failure");
+        hom_unchanged(r, message);
+    }
+    return d.ok;
+}
+
+void hm_rejected(opencv_video_status code, const opencv_video_ecc_homography_result &r,
+                 const char *fragment, const char *message) {
+    check(code == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, message);
+    check(std::strstr(opencv_video_last_error(), fragment) != nullptr, message);
+    hom_unchanged(r, message);
+}
+
+void run_ecc_homography_masked() {
+    const int n = 128;
+    const float identity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const double t21[9] = {1, 0, 2, 0, 1, 1, 0, 0, 1};
+    const double ltp[9] = {1, 0, 12, 0, 1, -9, 0.0005, -0.0004, 1};
+    const float ltp_near[9] = {1, 0, 11, 0, 1, -8, 0.0004f, -0.0003f, 1};
+    const cv::Mat a_image = ecc_fixture::texture(n, n);
+    const cv::Mat t21_image = ecc_fixture::homography_texture(n, n, t21);
+    const cv::Mat ltp_image = ecc_fixture::homography_texture(n, n, ltp);
+    auto a = ecc_handle(a_image);
+    auto b21 = ecc_handle(t21_image);
+    auto bltp = ecc_handle(ltp_image);
+    const cv::Rect hole_rect(70, 10, 40, 30);  // asymmetric, moving pixels
+    const cv::Mat hole_image = hm_mask_hole(n, hole_rect);
+    auto hole = ecc_handle(hole_image);
+    const int64_t hole_sum = hom_checksum(hole_image);
+    int agreements = 0;
+
+    // 1. Accepted masks reach the optimizer: agreement with the direct masked call, and the
+    //    result differs from the unmasked export (mask consumed), identity and seeded.
+    {
+        check(hm_agrees(a.get(), b21.get(), hole.get(), a_image, t21_image, hole_image, nullptr,
+                        "masked translation"), "masked translation must converge");
+        check(hm_agrees(a.get(), bltp.get(), hole.get(), a_image, ltp_image, hole_image, ltp_near,
+                        "masked seeded translation+perspective"), "masked seeded must converge");
+        agreements += 2;
+        opencv_video_ecc_homography_result plain = hom_sentinel(), masked = hom_sentinel();
+        check(hom_call(a.get(), b21.get(), &plain) == OPENCV_VIDEO_OK &&
+              hm_call(a.get(), b21.get(), hole.get(), &masked) == OPENCV_VIDEO_OK, "mask consumption calls");
+        check(std::memcmp(&plain, &masked, sizeof plain) != 0, "accepted mask did not reach the optimizer");
+        opencv_video_ecc_homography_result splain = hom_sentinel(), smasked = hom_sentinel();
+        check(hs_call(a.get(), bltp.get(), ltp_near, &splain) == OPENCV_VIDEO_OK &&
+              hms_call(a.get(), bltp.get(), hole.get(), ltp_near, &smasked) == OPENCV_VIDEO_OK,
+              "seeded mask consumption calls");
+        check(std::memcmp(&splain, &smasked, sizeof splain) != 0, "seeded mask did not reach the optimizer");
+        // The identity seed through the masked seeded export equals the masked identity export.
+        opencv_video_ecc_homography_result via_seed = hom_sentinel();
+        check(hms_call(a.get(), b21.get(), hole.get(), identity, &via_seed) == OPENCV_VIDEO_OK &&
+              std::memcmp(&via_seed, &masked, sizeof masked) == 0, "masked identity seed differs");
+    }
+
+    // 2. Full masks (1, 7, 255) are byte-identical to the unmasked exports on both outcomes.
+    {
+        const double pb[9] = {1, 0, 0, 0, 1, 0, 0.0002, -0.0002, 1};
+        const cv::Mat movings[] = {a_image.clone(), t21_image, ecc_fixture::homography_texture(n, n, pb),
+                                   ecc_fixture::constant(n, n, 128)};
+        for (int v : {1, 7, 255}) {
+            auto full = ecc_handle(cv::Mat(n, n, CV_8UC1, cv::Scalar(v)));
+            int ok = 0, failed = 0;
+            for (const auto &mv : movings) {
+                auto moving = ecc_handle(mv);
+                opencv_video_ecc_homography_result p = hom_sentinel(), m = hom_pattern(0x31);
+                const auto pc = hom_call(a.get(), moving.get(), &p);
+                const auto mc = hm_call(a.get(), moving.get(), full.get(), &m);
+                check(pc == mc, "full mask changed the outcome");
+                if (pc == OPENCV_VIDEO_OK) {
+                    check(std::memcmp(&p, &m, sizeof p) == 0, "full mask differs from the unmasked export");
+                    ++ok;
+                } else {
+                    hom_unchanged(p, "unmasked failure");
+                    check(std::memcmp(&m, &(const opencv_video_ecc_homography_result &)hom_pattern(0x31), 48) == 0,
+                          "full-mask failure changed the prefill");
+                    ++failed;
+                }
+                opencv_video_ecc_homography_result sp = hom_sentinel(), sm = hom_sentinel();
+                check(hs_call(a.get(), moving.get(), ltp_near, &sp) ==
+                          hms_call(a.get(), moving.get(), full.get(), ltp_near, &sm) &&
+                      std::memcmp(&sp, &sm, sizeof sp) == 0, "seeded full mask differs from the seeded export");
+            }
+            check(ok >= 2 && failed >= 1, "full-mask equivalence coverage");
+        }
+    }
+
+    // 3. Value semantics through the shim: 1, 255 and arbitrary nonzero are byte-identical.
+    {
+        // Independent direct-level facts the shim relies on (no shim code involved).
+        const cv::Mat full(n, n, CV_8UC1, cv::Scalar(255));
+        check(hm_same_direct(hm_direct(a_image, t21_image, full, identity),
+                             hm_direct(a_image, t21_image, cv::Mat(), identity)),
+              "direct: full mask differs from noArray");
+        check(!hm_same_direct(hm_direct(a_image, t21_image, hole_image, identity),
+                              hm_direct(a_image, t21_image, cv::Mat(), identity)),
+              "direct: hole mask has no effect");
+        cv::Mat arbitrary = hole_image.clone();
+        uint32_t s = 5;
+        for (int r = 0; r < n; ++r)
+            for (int c = 0; c < n; ++c) {
+                s = s * 1664525u + 1013904223u;
+                if (arbitrary.at<uint8_t>(r, c)) arbitrary.at<uint8_t>(r, c) = uint8_t(1 + (s >> 24) % 255);
+            }
+        auto ones = ecc_handle(hm_mask_hole(n, hole_rect, 1));
+        auto arb = ecc_handle(arbitrary);
+        opencv_video_ecc_homography_result r255 = hom_sentinel(), r1 = hom_pattern(3), ra = hom_pattern(9);
+        check(hm_call(a.get(), b21.get(), hole.get(), &r255) == OPENCV_VIDEO_OK &&
+              hm_call(a.get(), b21.get(), ones.get(), &r1) == OPENCV_VIDEO_OK &&
+              hm_call(a.get(), b21.get(), arb.get(), &ra) == OPENCV_VIDEO_OK, "value semantics calls");
+        check(std::memcmp(&r255, &r1, 48) == 0 && std::memcmp(&r255, &ra, 48) == 0,
+              "mask values 1, 255 and arbitrary nonzero must be byte-identical");
+    }
+
+    // 4. Coordinate frame: the transposed hole and a hole in template coordinates are different
+    //    masks (asymmetric fixtures); each still agrees with its own direct call.
+    {
+        const cv::Mat swapped = hm_mask_hole(n, cv::Rect(hole_rect.y, hole_rect.x, hole_rect.height, hole_rect.width));
+        auto swapped_h = ecc_handle(swapped);
+        check(hm_agrees(a.get(), b21.get(), swapped_h.get(), a_image, t21_image, swapped, nullptr,
+                        "transposed hole"), "transposed hole converges");
+        ++agreements;
+        opencv_video_ecc_homography_result x = hom_sentinel(), y = hom_sentinel();
+        hm_call(a.get(), b21.get(), hole.get(), &x);
+        hm_call(a.get(), b21.get(), swapped_h.get(), &y);
+        check(std::memcmp(&x, &y, 48) != 0, "transposed mask indistinguishable (rows/columns swapped?)");
+        // Occluder in the moving image: masking it in MOVING coordinates recovers the motion.
+        const double t_ltp[9] = {1, 0, 12, 0, 1, -9, 0.0005, -0.0004, 1};
+        cv::Mat occluded = ecc_fixture::homography_texture(n, n, t_ltp);
+        occluded(cv::Rect(60, 4, 64, 52)).setTo(250);
+        auto occ = ecc_handle(occluded);
+        const cv::Mat moving_frame = hm_mask_hole(n, cv::Rect(57, 1, 70, 58));
+        const cv::Mat template_frame = hm_mask_hole(n, cv::Rect(45, 10, 70, 58));
+        auto mf = ecc_handle(moving_frame);
+        auto tf = ecc_handle(template_frame);
+        opencv_video_ecc_homography_result unmasked = hom_sentinel(), right = hom_sentinel(), wrong = hom_sentinel();
+        check(hs_call(a.get(), occ.get(), ltp_near, &unmasked) == OPENCV_VIDEO_ERROR_OPENCV,
+              "occluded seeded unmasked call must raise natively");
+        hom_unchanged(unmasked, "occluded native failure changed the result");
+        check(hms_call(a.get(), occ.get(), mf.get(), ltp_near, &right) == OPENCV_VIDEO_OK,
+              "moving-frame occlusion mask must converge");
+        float h[9];
+        hom_values(right, h);
+        check(hom_residual(a_image, ecc_fixture::homography_texture(n, n, t_ltp), h) < 1.0,
+              "moving-frame occlusion mask must recover the homography");
+        check(hm_agrees(a.get(), occ.get(), mf.get(), a_image, occluded, moving_frame, ltp_near,
+                        "moving-frame occlusion"), "moving-frame occlusion agreement");
+        const bool wrong_ok = hm_agrees(a.get(), occ.get(), tf.get(), a_image, occluded, template_frame,
+                                        ltp_near, "template-frame occlusion");
+        agreements += 2;
+        if (wrong_ok) {
+            hms_call(a.get(), occ.get(), tf.get(), ltp_near, &wrong);
+            float g[9];
+            hom_values(wrong, g);
+            check(hom_residual(a_image, ecc_fixture::homography_texture(n, n, t_ltp), g) > 2.0,
+                  "template-frame mask behaved like the moving-frame mask");
+        }
+    }
+
+    // 5. Mask schema, geometry and support: INVALID_ARGUMENT before native, diagnostics, untouched.
+    {
+        auto f32 = matrix(n, n, OPENCV_CORE_DEPTH_FLOAT32, 1);
+        output(f32.get()).setTo(1.0f);
+        auto s8 = matrix(n, n, OPENCV_CORE_DEPTH_INT8, 1);
+        output(s8.get()).setTo(1);
+        auto u16 = matrix(n, n, OPENCV_CORE_DEPTH_UINT16, 1);
+        output(u16.get()).setTo(1);
+        auto c3 = matrix(n, n, OPENCV_CORE_DEPTH_UINT8, 3);
+        output(c3.get()).setTo(cv::Scalar(255, 255, 255));
+        auto c2 = matrix(n, n, OPENCV_CORE_DEPTH_UINT8, 2);
+        output(c2.get()).setTo(cv::Scalar(255, 255));
+        auto tall = matrix(n + 1, n, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(tall.get()).setTo(255);
+        auto wide = matrix(n, n + 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(wide.get()).setTo(255);
+        auto shorter = matrix(n - 1, n, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(shorter.get()).setTo(255);
+        auto small = matrix(64, 64, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(small.get()).setTo(255);
+        auto empty = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(empty.get()).release();
+        auto zero = ecc_handle(cv::Mat(n, n, CV_8UC1, cv::Scalar(0)));
+        auto three_d = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        { const int sizes[3] = {n, n, 1}; output(three_d.get()) = cv::Mat(3, sizes, CV_8UC1, cv::Scalar(255)); }
+        struct Bad { const opencv_core_mat_handle *mask; const char *fragment; const char *name; };
+        const Bad bad[] = {
+            {empty.get(), "nonempty 2-D UInt8 C1", "empty mask"},
+            {f32.get(), "nonempty 2-D UInt8 C1", "Float32 mask"},
+            {s8.get(), "nonempty 2-D UInt8 C1", "Int8 mask"},
+            {u16.get(), "nonempty 2-D UInt8 C1", "UInt16 mask"},
+            {c2.get(), "nonempty 2-D UInt8 C1", "two-channel mask"},
+            {c3.get(), "nonempty 2-D UInt8 C1", "three-channel mask"},
+            {three_d.get(), "nonempty 2-D UInt8 C1", "3-D mask"},
+            {tall.get(), "geometry differs", "rows+1 mask"},
+            {wide.get(), "geometry differs", "columns+1 mask"},
+            {shorter.get(), "geometry differs", "rows-1 mask"},
+            {small.get(), "geometry differs", "64x64 mask"},
+            {zero.get(), "excludes every pixel", "all-zero mask"},
+        };
+        int rejected = 0;
+        for (const auto &x : bad) {
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            hm_rejected(hm_call(a.get(), b21.get(), x.mask, &r), r, x.fragment, x.name);
+            r = hom_sentinel();
+            hm_rejected(hms_call(a.get(), b21.get(), x.mask, ltp_near, &r), r, x.fragment, x.name);
+            rejected += 2;
+        }
+        // Null mask handle: invalid argument (resolve), untouched.
+        opencv_video_ecc_homography_result r = hom_sentinel();
+        check(hm_call(a.get(), b21.get(), nullptr, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "null mask");
+        hom_unchanged(r, "null mask changed the result");
+        check(hms_call(a.get(), b21.get(), nullptr, ltp_near, &r) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+              "null seeded mask");
+        hom_unchanged(r, "null seeded mask changed the result");
+        // Null result.
+        check(hm_call(a.get(), b21.get(), hole.get(), nullptr) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT &&
+              hms_call(a.get(), b21.get(), hole.get(), ltp_near, nullptr) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+              "null result accepted");
+        // Ordering: images/options before mask; mask before seed. A mask equal to the moving image's
+        // geometry but differing from a mismatched template is reported as an image error.
+        auto t64 = ecc_handle(ecc_fixture::texture(64, 64));
+        r = hom_sentinel();
+        hm_rejected(hm_call(a.get(), t64.get(), hole.get(), &r), r, "ECC images", "image validation first");
+        r = hom_sentinel();
+        hm_rejected(hm_call(a.get(), b21.get(), empty.get(), &r, 0), r, "Invalid ECC options", "options before mask");
+        float bad_seed[9];
+        std::memcpy(bad_seed, identity, sizeof bad_seed);
+        bad_seed[8] = 2.0f;
+        r = hom_sentinel();
+        hm_rejected(hms_call(a.get(), b21.get(), empty.get(), bad_seed, &r), r, "moving mask", "mask before seed");
+        r = hom_sentinel();
+        hm_rejected(hms_call(a.get(), b21.get(), hole.get(), bad_seed, &r), r, "H22", "seed after mask");
+        float den_seed[9];
+        std::memcpy(den_seed, identity, sizeof den_seed);
+        den_seed[6] = 0.01f;
+        r = hom_sentinel();
+        hm_rejected(hms_call(a.get(), b21.get(), hole.get(), den_seed, &r), r, "denominator", "seed geometry rule");
+        check(rejected == 24, "mask rejection coverage");
+    }
+
+    // 6. Support that native erosion removes, and non-overlap after warping: the binding forwards
+    //    native nonconvergence (no fabricated result); sparse surviving support agrees bitwise.
+    {
+        cv::Mat single(n, n, CV_8UC1, cv::Scalar(0));
+        single.at<uint8_t>(64, 64) = 255;
+        cv::Mat strip4(n, n, CV_8UC1, cv::Scalar(0));
+        strip4(cv::Rect(0, 60, n, 4)).setTo(255);
+        cv::Mat strip5(n, n, CV_8UC1, cv::Scalar(0));
+        strip5(cv::Rect(0, 60, n, 5)).setTo(255);
+        cv::Mat block12(n, n, CV_8UC1, cv::Scalar(0));
+        block12(cv::Rect(50, 40, 12, 12)).setTo(255);
+        cv::Mat left(n, n, CV_8UC1, cv::Scalar(0));
+        left(cv::Rect(0, 0, 24, n)).setTo(255);
+        const float shift60[9] = {1, 0, 60, 0, 1, 0, 0, 0, 1};
+        int native_failures = 0, native_successes = 0;
+        for (const cv::Mat *m : {&single, &strip4, &strip5, &block12, &left}) {
+            auto h = ecc_handle(*m);
+            (hm_agrees(a.get(), b21.get(), h.get(), a_image, t21_image, *m, nullptr, "sparse mask")
+                 ? native_successes : native_failures) += 1;
+            ++agreements;
+        }
+        auto lh = ecc_handle(left);
+        for (int it : {1, 50}) {
+            check(!hm_agrees(a.get(), b21.get(), lh.get(), a_image, t21_image, left, shift60,
+                             "non-overlapping valid region", it), "non-overlap must raise natively");
+            ++native_failures;
+            ++agreements;
+        }
+        check(std::strstr(opencv_video_last_error(), "NaN") != nullptr, "non-overlap diagnostic");
+        check(native_failures >= 4 && native_successes >= 2, "support coverage");
+    }
+
+    // 7. Regions, aliasing, immutability, options.
+    {
+        auto parent = matrix(n + 32, n + 32, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(parent.get()).setTo(0);
+        hole_image.copyTo(output(parent.get())(cv::Rect(16, 16, n, n)));
+        auto roi = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(roi.get()) = output(parent.get())(cv::Rect(16, 16, n, n));
+        check(!output(roi.get()).isContinuous(), "mask Region fixture is contiguous");
+        const cv::Mat parent_saved = output(parent.get()).clone();
+        opencv_video_ecc_homography_result compact = hom_sentinel(), region = hom_pattern(0x44);
+        check(hm_call(a.get(), b21.get(), hole.get(), &compact) == OPENCV_VIDEO_OK &&
+              hm_call(a.get(), b21.get(), roi.get(), &region) == OPENCV_VIDEO_OK, "Region mask calls");
+        check(std::memcmp(&compact, &region, 48) == 0, "non-contiguous Region mask differs from compact");
+        opencv_video_ecc_homography_result sc = hom_sentinel(), sr = hom_sentinel();
+        check(hms_call(a.get(), bltp.get(), hole.get(), ltp_near, &sc) == OPENCV_VIDEO_OK &&
+              hms_call(a.get(), bltp.get(), roi.get(), ltp_near, &sr) == OPENCV_VIDEO_OK &&
+              std::memcmp(&sc, &sr, 48) == 0, "seeded Region mask differs from compact");
+        check(cv::norm(parent_saved, output(parent.get()), cv::NORM_INF) == 0, "mask Region parent mutated");
+        // Region of the wrong size from the same parent is rejected.
+        auto short_roi = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(short_roi.get()) = output(parent.get())(cv::Rect(16, 16, n, n - 1));
+        opencv_video_ecc_homography_result r = hom_sentinel();
+        hm_rejected(hm_call(a.get(), b21.get(), short_roi.get(), &r), r, "geometry differs", "short Region mask");
+        // All three inputs as Regions agree with the direct call on the same Regions.
+        auto ap = ecc_handle(ecc_fixture::texture(n + 32, n + 32));
+        auto bp = ecc_handle(ecc_fixture::homography_texture(n + 32, n + 32, t21));
+        auto ar = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1), br = matrix(1, 1, OPENCV_CORE_DEPTH_UINT8, 1);
+        output(ar.get()) = output(ap.get())(cv::Rect(16, 16, n, n));
+        output(br.get()) = output(bp.get())(cv::Rect(16, 16, n, n));
+        check(hm_agrees(ar.get(), br.get(), roi.get(), output(ar.get()), output(br.get()), output(roi.get()),
+                        nullptr, "all-Region masked call"), "all-Region masked call converges");
+        ++agreements;
+        // Aliasing: one handle as template, moving AND mask (texture has no zero pixel).
+        check(cv::countNonZero(a_image) == n * n, "aliasing fixture has zero pixels");
+        check(hm_agrees(a.get(), a.get(), a.get(), a_image, a_image, a_image, nullptr, "full alias"),
+              "full alias converges");
+        // The moving image as its own mask (every pixel nonzero) behaves as the unmasked export.
+        check(cv::countNonZero(t21_image) == n * n, "moving aliasing fixture has zero pixels");
+        hm_agrees(a.get(), b21.get(), b21.get(), a_image, t21_image, t21_image, nullptr,
+                  "mask aliasing the moving image");
+        {
+            opencv_video_ecc_homography_result p = hom_sentinel(), q = hom_pattern(0x21);
+            check(hom_call(a.get(), b21.get(), &p) == OPENCV_VIDEO_OK &&
+                  hm_call(a.get(), b21.get(), b21.get(), &q) == OPENCV_VIDEO_OK &&
+                  std::memcmp(&p, &q, 48) == 0, "moving image as mask differs from unmasked");
+        }
+        agreements += 2;
+        // Inputs unchanged.
+        check(hom_checksum(output(hole.get())) == hole_sum, "caller mask modified");
+        check(cv::norm(output(a.get()), a_image, cv::NORM_INF) == 0 &&
+              cv::norm(output(b21.get()), t21_image, cv::NORM_INF) == 0, "masked call modified an image");
+        // Options reach the masked native call.
+        for (int it : {1, 3, 100}) {
+            hm_agrees(a.get(), b21.get(), hole.get(), a_image, t21_image, hole_image, nullptr, "masked options", it, 1e-8);
+            hm_agrees(a.get(), bltp.get(), hole.get(), a_image, ltp_image, hole_image, ltp_near, "seeded masked options", it, 0.1);
+            agreements += 2;
+        }
+        opencv_video_ecc_homography_result one = hom_sentinel(), many = hom_sentinel();
+        hm_call(a.get(), b21.get(), hole.get(), &one, 1);
+        hm_call(a.get(), b21.get(), hole.get(), &many, 50);
+        check(std::memcmp(&one, &many, 48) != 0, "masked iteration count has no effect");
+        // Constant and noise images with a valid mask: native failure, untouched.
+        auto flat = ecc_handle(ecc_fixture::constant(n, n, 128));
+        check(!hm_agrees(flat.get(), flat.get(), hole.get(), ecc_fixture::constant(n, n, 128),
+                         ecc_fixture::constant(n, n, 128), hole_image, nullptr, "constant masked"),
+              "constant images must raise");
+        ++agreements;
+    }
+
+    // 8. Three prefills on success (zero padding, prefill-independent) and failure (preserved).
+    {
+        const opencv_video_ecc_homography_result prefills[] = {hom_sentinel(), hom_pattern(0x11), hom_pattern(0xC7)};
+        unsigned char first_id[48], first_seed[48];
+        auto zero = ecc_handle(cv::Mat(n, n, CV_8UC1, cv::Scalar(0)));
+        auto flat = ecc_handle(ecc_fixture::constant(n, n, 128));
+        for (size_t k = 0; k < 3; ++k) {
+            opencv_video_ecc_homography_result r = prefills[k], s = prefills[k];
+            check(hm_call(a.get(), b21.get(), hole.get(), &r) == OPENCV_VIDEO_OK &&
+                  hms_call(a.get(), bltp.get(), hole.get(), ltp_near, &s) == OPENCV_VIDEO_OK, "prefill successes");
+            hom_padding_zero(r, "masked padding");
+            hom_padding_zero(s, "masked seeded padding");
+            unsigned char br[48], bs[48];
+            hom_bytes(r, br);
+            hom_bytes(s, bs);
+            if (k == 0) { std::memcpy(first_id, br, 48); std::memcpy(first_seed, bs, 48); }
+            check(std::memcmp(first_id, br, 48) == 0 && std::memcmp(first_seed, bs, 48) == 0,
+                  "masked success bytes depend on the prefill");
+            opencv_video_ecc_homography_result f = prefills[k];
+            check(hm_call(a.get(), b21.get(), zero.get(), &f) == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT &&
+                  std::memcmp(&f, &prefills[k], 48) == 0, "zero-mask failure changed the prefill");
+            check(hms_call(flat.get(), flat.get(), hole.get(), ltp_near, &f) == OPENCV_VIDEO_ERROR_OPENCV &&
+                  std::memcmp(&f, &prefills[k], 48) == 0, "native masked failure changed the prefill");
+        }
+    }
+
+#ifdef OPENCV_VIDEO_TEST_FAULTS
+    // 9. Fault build: injected exceptions at both stages, rejected corruption and schema
+    //    mutations on both masked exports; accepted finite injected matrices have zero padding.
+    {
+        int injections = 0, corruptions = 0, schemas = 0, accepted = 0;
+        for (int which = 0; which < 2; ++which) {
+            auto call = [&](opencv_video_ecc_homography_result *out) {
+                return which == 0 ? hm_call(a.get(), b21.get(), hole.get(), out)
+                                  : hms_call(a.get(), bltp.get(), hole.get(), ltp_near, out);
+            };
+            for (const auto &p : {hom_sentinel(), hom_pattern(0x5A)}) {
+                for (int stage : {1, 2}) for (int kind : {1, 2, 4, 3}) {
+                    opencv_video_ecc_homography_result r = p;
+                    fault_stage = stage; fault_kind = kind;
+                    const auto code = call(&r);
+                    fault_stage = 0; fault_kind = 0;
+                    const auto expected = kind == 2 ? OPENCV_VIDEO_ERROR_OPENCV
+                                        : kind == 3 ? OPENCV_VIDEO_ERROR_UNKNOWN : OPENCV_VIDEO_ERROR_STANDARD;
+                    check(code == expected && std::memcmp(&r, &p, 48) == 0, "masked injected exception");
+                    ++injections;
+                }
+                for (int mode = 1; mode <= 20; ++mode) {
+                    opencv_video_ecc_homography_result r = p;
+                    hom_corrupt_mode = mode;
+                    const auto code = call(&r);
+                    hom_corrupt_mode = 0;
+                    check(code == OPENCV_VIDEO_ERROR_OPENCV && std::memcmp(&r, &p, 48) == 0,
+                          "masked corrupted native output accepted or partially published");
+                    ++corruptions;
+                }
+                for (int mode = 1; mode <= 8; ++mode) {
+                    opencv_video_ecc_homography_result r = p;
+                    hom_schema_mode = mode;
+                    hom_schema_applied = 0;
+                    const auto code = call(&r);
+                    hom_schema_mode = 0;
+                    hom_schema_keep.release();
+                    hom_schema_wide.release();
+                    check(hom_schema_applied == 1, "masked schema hook not reached");
+                    check(code == OPENCV_VIDEO_ERROR_OPENCV && std::memcmp(&r, &p, 48) == 0,
+                          "masked altered schema accepted or partially published");
+                    ++schemas;
+                }
+                for (int mode = 30; mode <= 34; ++mode) {
+                    opencv_video_ecc_homography_result r = p;
+                    hom_corrupt_mode = mode;
+                    const auto code = call(&r);
+                    hom_corrupt_mode = 0;
+                    check(code == OPENCV_VIDEO_OK, "masked injected finite matrix rejected");
+                    float got[9];
+                    hom_values(r, got);
+                    check(std::memcmp(got, kHomInjected[mode - 30], sizeof got) == 0,
+                          "masked injected finite matrix not published exactly");
+                    hom_padding_zero(r, "masked injected finite padding");
+                    ++accepted;
+                }
+            }
+            // Mask validation precedes every hook: a rejected mask never reaches stage 1.
+            auto zero = ecc_handle(cv::Mat(n, n, CV_8UC1, cv::Scalar(0)));
+            fault_stage = 1; fault_kind = 3;
+            opencv_video_ecc_homography_result r = hom_sentinel();
+            const auto code = which == 0 ? hm_call(a.get(), b21.get(), zero.get(), &r)
+                                         : hms_call(a.get(), bltp.get(), zero.get(), ltp_near, &r);
+            fault_stage = 0; fault_kind = 0;
+            check(code == OPENCV_VIDEO_ERROR_INVALID_ARGUMENT, "mask validation does not precede native stage");
+            hom_unchanged(r, "pre-native rejection changed the result");
+        }
+        check(injections == 32 && corruptions == 80 && schemas == 32 && accepted == 20, "masked fault coverage");
+        std::cout << "PASS: ECC homography masked faults: " << injections << " exception injections, "
+                  << corruptions << " rejected corruptions, " << schemas << " schema mutations, "
+                  << accepted << " accepted finite matrices, mask validation before hooks\n";
+    }
+#endif
+    std::cout << "PASS: ECC homography masked shim vs direct masked findTransformECC: " << agreements
+              << " agreements, mask consumption, full-mask equivalence, value semantics, coordinate frame, "
+                 "24 schema rejections, support, Regions, aliases, immutability, 3 prefills\n";
+}
+}  // namespace
+
+
 int main() {
     try {
         run();
@@ -3727,6 +4238,7 @@ int main() {
         run_ecc_homography();
         run_ecc_homography_seeded();
         run_ecc_homography_padding();
+        run_ecc_homography_masked();
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "FAIL: " << error.what() << '\n';
