@@ -1221,4 +1221,90 @@ package body OpenCV.Video is
             M12 => OpenCV.Float32_Value (Native.M12)),
          Correlation => OpenCV.Float64_Value (Native.Correlation));
    end Estimate_ECC_Affine;
+
+   function Estimate_ECC_Homography
+     (Template_Image    : OpenCV.Core.Mat;
+      Moving_Image      : OpenCV.Core.Mat;
+      Options           : ECC_Homography_Options := (others => <>);
+      Initial_Transform : ECC_Homography_Result)
+      return ECC_Homography_Result
+   is
+      Maximum_Linear      : constant OpenCV.Float32_Value := 4.0;
+      Maximum_Translation : constant OpenCV.Float32_Value := 2.0 ** 20;
+      Maximum_Deviation   : constant Long_Float := 0.5;
+      Seed   : ECC_Homography_Warp renames Initial_Transform.Warp;
+      Native : aliased C.ECC_Homography_Result;
+      Code   : C.Status := C.Success;
+   begin
+      Validate_ECC_Arguments (Template_Image, Moving_Image, Options);
+      --  Initial_Transform.Correlation is deliberately never read.
+      if not (Is_Finite (Seed.H00) and then Is_Finite (Seed.H01) and then Is_Finite (Seed.H02)
+              and then Is_Finite (Seed.H10) and then Is_Finite (Seed.H11)
+              and then Is_Finite (Seed.H12) and then Is_Finite (Seed.H20)
+              and then Is_Finite (Seed.H21) and then Is_Finite (Seed.H22))
+      then
+         raise OpenCV.OpenCV_Error with "ECC homography seed coefficients must be finite";
+      end if;
+      if Seed.H22 /= 1.0 then
+         raise OpenCV.OpenCV_Error with "ECC homography seed H22 must be exactly 1.0";
+      end if;
+      if abs Seed.H00 > Maximum_Linear or else abs Seed.H01 > Maximum_Linear
+        or else abs Seed.H10 > Maximum_Linear or else abs Seed.H11 > Maximum_Linear
+      then
+         raise OpenCV.OpenCV_Error with
+           "ECC homography seed linear coefficients must have absolute value <= 4.0";
+      end if;
+      if abs Seed.H02 > Maximum_Translation or else abs Seed.H12 > Maximum_Translation then
+         raise OpenCV.OpenCV_Error with
+           "ECC homography seed translations must have absolute value <= 2**20";
+      end if;
+      --  Both products are exact in Long_Float (Float32 times an integer below 2**14), so the
+      --  rounded sum equals the shim's double evaluation.
+      if abs Long_Float (Seed.H20) * Long_Float (Template_Image.Columns - 1)
+         + abs Long_Float (Seed.H21) * Long_Float (Template_Image.Rows - 1) > Maximum_Deviation
+      then
+         raise OpenCV.OpenCV_Error with
+           "ECC homography seed |H20|*(Columns-1) + |H21|*(Rows-1) must be <= 0.5";
+      end if;
+
+      declare
+         procedure Template_Callback (Template_Handle : Bridge.Input_Mat_Handle) is
+            procedure Moving_Callback (Moving_Handle : Bridge.Input_Mat_Handle) is
+            begin
+               Code := C.Estimate_ECC_Homography_Seeded
+                 (Template_Handle, Moving_Handle,
+                  Interfaces.Integer_32 (Options.Maximum_Iterations),
+                  Interfaces.C.double (Options.Epsilon),
+                  Interfaces.C.C_float (Seed.H00),
+                  Interfaces.C.C_float (Seed.H01),
+                  Interfaces.C.C_float (Seed.H02),
+                  Interfaces.C.C_float (Seed.H10),
+                  Interfaces.C.C_float (Seed.H11),
+                  Interfaces.C.C_float (Seed.H12),
+                  Interfaces.C.C_float (Seed.H20),
+                  Interfaces.C.C_float (Seed.H21),
+                  Interfaces.C.C_float (Seed.H22),
+                  Native'Access);
+            end Moving_Callback;
+         begin
+            Bridge.With_Input_Handle (Moving_Image, Moving_Callback'Access);
+         end Template_Callback;
+      begin
+         Bridge.With_Input_Handle (Template_Image, Template_Callback'Access);
+      end;
+      C.Check (Code, "Video.Estimate_ECC_Homography");
+
+      return
+        (Warp        =>
+           (H00 => OpenCV.Float32_Value (Native.H00),
+            H01 => OpenCV.Float32_Value (Native.H01),
+            H02 => OpenCV.Float32_Value (Native.H02),
+            H10 => OpenCV.Float32_Value (Native.H10),
+            H11 => OpenCV.Float32_Value (Native.H11),
+            H12 => OpenCV.Float32_Value (Native.H12),
+            H20 => OpenCV.Float32_Value (Native.H20),
+            H21 => OpenCV.Float32_Value (Native.H21),
+            H22 => OpenCV.Float32_Value (Native.H22)),
+         Correlation => OpenCV.Float64_Value (Native.Correlation));
+   end Estimate_ECC_Homography;
 end OpenCV.Video;

@@ -103,3 +103,11 @@ UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
     "obj/sanitizers/ecc-homography-oracle$suffix" "obj/sanitizers/ecc-homography$suffix.txt"
+
+# Independent seeded ECC homography oracle (Task 017) under the same sanitizers (fixtures only).
+"$compiler" "$@" -std=c++17 -Wall -Wextra -Wpedantic -Werror \
+    $flags -Itests/cpp $opencv_cflags tests/cpp/ecc_homography_seeded_oracle.cpp \
+    $(pkg-config --libs "$package") -o "obj/sanitizers/ecc-homography-seeded-oracle$suffix"
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+    "obj/sanitizers/ecc-homography-seeded-oracle$suffix" "obj/sanitizers/ecc-homography-seeded$suffix.txt"

@@ -7882,6 +7882,849 @@ package body Video_Tests is
               "homography and affine models disagree on a pure shift");
    end ECC_Homography_Other_Models_Unchanged;
 
+   ---------------------------------------------------------------------
+   --  Task 017: caller-seeded ECC homography alignment
+   ---------------------------------------------------------------------
+   --  Truths mirror tests/cpp/ecc_homography_seeded_oracle.cpp literally.
+   Hs_Strong_Truth : constant HM := [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.002, 0.002, 1.0];
+   Hs_Large_Truth  : constant HM := [1.0, 0.0, 40.0, 0.0, 1.0, 30.0, 0.0, 0.0, 1.0];
+   Hs_LTP_Truth    : constant HM := [1.0, 0.0, 12.0, 0.0, 1.0, -9.0, 0.0005, -0.0004, 1.0];
+   Hs_Scp_Truth    : constant HM := [1.15, 0.02, -4.0, -0.01, 1.12, 3.0, 0.0008, -0.0006, 1.0];
+   Hs_Shp_Truth    : constant HM := [1.0, 0.15, -3.0, 0.05, 1.0, 2.0, -0.0007, 0.0009, 1.0];
+
+   function Hk
+     (H00, H01, H02, H10, H11, H12, H20, H21 : OpenCV.Float32_Value;
+      H22 : OpenCV.Float32_Value := 1.0;
+      Correlation : OpenCV.Float64_Value := 0.0) return ECC_Homography_Result is
+     (Warp => (H00 => H00, H01 => H01, H02 => H02, H10 => H10, H11 => H11, H12 => H12,
+               H20 => H20, H21 => H21, H22 => H22),
+      Correlation => Correlation);
+
+   Hs_Identity_Seed : constant ECC_Homography_Result := Hk (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0);
+   Hs_Strong_Near   : constant ECC_Homography_Result := Hk (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0018, 0.0018);
+   Hs_Large_Near    : constant ECC_Homography_Result := Hk (1.0, 0.0, 38.0, 0.0, 1.0, 28.0, 0.0, 0.0);
+   Hs_LTP_Near      : constant ECC_Homography_Result := Hk (1.0, 0.0, 11.0, 0.0, 1.0, -8.0, 0.0004, -0.0003);
+   Hs_Reflect_Near  : constant ECC_Homography_Result := Hk (-0.98, 0.01, 126.0, 0.0, 1.0, 0.1, 0.0, 0.0);
+   Hs_Scp_Near      : constant ECC_Homography_Result := Hk (1.12, 0.01, -3.0, 0.0, 1.10, 2.5, 0.0006, -0.0005);
+   Hs_Shp_Near      : constant ECC_Homography_Result := Hk (1.0, 0.13, -2.5, 0.04, 1.0, 1.6, -0.0006, 0.0008);
+   Hs_Mild_Near     : constant ECC_Homography_Result :=
+     Hk (1.0, 0.01, 1.0, 0.0, 1.0, 0.5, 0.00004, -0.00003);
+   Hs_Wrong_Persp   : constant ECC_Homography_Result := Hk (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, -0.0019, 0.0019);
+
+   --  Seeded results (measured on 4.1.0, 4.6.0, 4.10.0, 5.0.0) are within 0.004 linear,
+   --  0.1 translation and 2e-5 projective of the truth; the Task 016 tolerances are kept for
+   --  the projective part and widened only where the seeded fixtures are larger motions.
+   Hs_Linear_Tolerance      : constant Long_Float := 0.006;
+   Hs_Translation_Tolerance : constant Long_Float := 0.15;
+
+   function Hs_Near (R : ECC_Homography_Result; H : HM) return Boolean is
+     (abs (LF (R.Warp.H00) - H (0)) < Hs_Linear_Tolerance
+      and then abs (LF (R.Warp.H01) - H (1)) < Hs_Linear_Tolerance
+      and then abs (LF (R.Warp.H02) - H (2)) < Hs_Translation_Tolerance
+      and then abs (LF (R.Warp.H10) - H (3)) < Hs_Linear_Tolerance
+      and then abs (LF (R.Warp.H11) - H (4)) < Hs_Linear_Tolerance
+      and then abs (LF (R.Warp.H12) - H (5)) < Hs_Translation_Tolerance
+      and then abs (LF (R.Warp.H20) - H (6)) < Hom_Projective_Tolerance
+      and then abs (LF (R.Warp.H21) - H (7)) < Hom_Projective_Tolerance
+      and then R.Warp.H22 = 1.0);
+
+   procedure Hs_Run
+     (Pair : ECC_Pair; Initial : ECC_Homography_Result;
+      Result : out ECC_Homography_Result; Raised : out Boolean;
+      Options : ECC_Homography_Options := (others => <>)) is
+   begin
+      Result := Estimate_ECC_Homography (Pair.Template, Pair.Moving, Options, Initial);
+      Raised := False;
+   exception
+      when OpenCV.OpenCV_Error => Result := (others => <>); Raised := True;
+   end Hs_Run;
+
+   procedure Hs_Run_Plain
+     (Pair : ECC_Pair; Result : out ECC_Homography_Result; Raised : out Boolean) is
+   begin
+      Result := Estimate_ECC_Homography (Pair.Template, Pair.Moving);
+      Raised := False;
+   exception
+      when OpenCV.OpenCV_Error => Result := (others => <>); Raised := True;
+   end Hs_Run_Plain;
+
+   --  Native-layer failures carry the "Video.Estimate_ECC_Homography" prefix (C.Check);
+   --  Ada preflight rejections do not. Reuses Sd_Outcome.
+   function Hs_Outcome_Of
+     (Pair : ECC_Pair; Initial : ECC_Homography_Result;
+      Options : ECC_Homography_Options := (others => <>)) return Sd_Outcome
+   is
+      Marker : constant String := "Video.Estimate_ECC_Homography";
+      Unused : ECC_Homography_Result;
+   begin
+      Unused := Estimate_ECC_Homography (Pair.Template, Pair.Moving, Options, Initial);
+      return Accepted;
+   exception
+      when Error : OpenCV.OpenCV_Error =>
+         declare
+            Text : constant String := Ada.Exceptions.Exception_Message (Error);
+         begin
+            return (if Text'Length >= Marker'Length
+                      and then Text (Text'First .. Text'First + Marker'Length - 1) = Marker
+                    then Native_Failed else Preflight_Rejected);
+         end;
+   end Hs_Outcome_Of;
+
+   --  Interior residual with the 24-pixel margin; a seed that maps the interior outside the
+   --  image is reported as 255 per pixel by Hom_Residual.
+   function Hs_Residual (Pair : ECC_Pair; R : ECC_Homography_Result) return Long_Float is
+     (Hom_Residual (Pair, Coeffs (R.Warp), True));
+
+   procedure ECC_Homography_Seeded_Identity_Equivalence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pairs : constant array (1 .. 8) of ECC_Pair :=
+        [(EF.Texture (128, 128), EF.Texture (128, 128)), Hom_Pair (K_T21), Hom_Pair (K_PB),
+         Hom_Pair (K_RP), Hom_Pair (K_Strong), Hom_Pair (K_LU),
+         (EF.Constant_Image (128, 128, 128), EF.Constant_Image (128, 128, 128)),
+         (EF.Noise (128, 128, 3), EF.Noise (128, 128, 9))];
+      With_Correlation : constant ECC_Homography_Result :=
+        (Hs_Identity_Seed with delta Correlation => 0.7);
+      Successes, Failures : Natural := 0;
+   begin
+      for Pair of Pairs loop
+         declare
+            Plain, Seeded, Defaulted, Correlated : ECC_Homography_Result;
+            Plain_Raised, Seeded_Raised, Defaulted_Raised, Correlated_Raised : Boolean;
+         begin
+            Hs_Run_Plain (Pair, Plain, Plain_Raised);
+            Hs_Run (Pair, Hs_Identity_Seed, Seeded, Seeded_Raised);
+            Hs_Run (Pair, (others => <>), Defaulted, Defaulted_Raised);
+            Hs_Run (Pair, With_Correlation, Correlated, Correlated_Raised);
+            Assert (Plain_Raised = Seeded_Raised and then Plain_Raised = Defaulted_Raised
+                    and then Plain_Raised = Correlated_Raised,
+                    "identity homography seed changed native success or failure");
+            if Plain_Raised then
+               Failures := Failures + 1;
+            else
+               Successes := Successes + 1;
+               Assert (Plain = Seeded and then Plain = Defaulted and then Plain = Correlated,
+                       "identity homography seed differs from the identity-initialized operation");
+            end if;
+         end;
+      end loop;
+      Assert (Successes >= 4 and then Failures >= 3, "homography identity-equivalence coverage");
+   end ECC_Homography_Seeded_Identity_Equivalence;
+
+   procedure ECC_Homography_Seeded_Consumption (T : in out Fixture) is
+      pragma Unreferenced (T);
+      type Case_Data is record
+         Truth : HM;
+         Seed  : ECC_Homography_Result;
+      end record;
+      Cases : constant array (1 .. 6) of Case_Data :=
+        [(Hs_Strong_Truth, Hs_Strong_Near), (Hs_Large_Truth, Hs_Large_Near),
+         (Hs_LTP_Truth, Hs_LTP_Near), (K_RX, Hs_Reflect_Near),
+         (Hs_Scp_Truth, Hs_Scp_Near), (Hs_Shp_Truth, Hs_Shp_Near)];
+      Residual_Checked : Natural := 0;
+   begin
+      for Item of Cases loop
+         declare
+            Pair : constant ECC_Pair := Hom_Pair (Item.Truth);
+            Plain, Refined : ECC_Homography_Result;
+            Plain_Raised, Refined_Raised : Boolean;
+            Before : constant Long_Float := Hs_Residual (Pair, Item.Seed);
+         begin
+            Hs_Run_Plain (Pair, Plain, Plain_Raised);
+            Assert (Plain_Raised, "identity homography initialization unexpectedly converged");
+            Hs_Run (Pair, Item.Seed, Refined, Refined_Raised);
+            Assert (not Refined_Raised, "near-correct homography seed did not converge");
+            Assert (Hs_Near (Refined, Item.Truth), "seeded homography is not near the known transform");
+            Assert (Hom_Map_Error (Coeffs (Refined.Warp), Item.Truth) < 0.2, "seeded homography mapped points");
+            Assert (Refined.Warp /= Item.Seed.Warp, "seeded homography result is the unmodified seed");
+            Assert (Refined.Correlation > 0.98 and then Refined.Correlation <= 1.000001,
+                    "seeded homography correlation");
+            --  Hom_Residual counts unmapped interior pixels as 255. The metric is applicable
+            --  only when the TRUTH itself maps the whole interior inside the moving image
+            --  (not so for the 40/30 shift); that is a fixture property, not a result one.
+            if Hom_Residual (Pair, Item.Truth, True) < 1.0 then
+               Assert (Hs_Residual (Pair, Refined) < 0.1 * Before,
+                       "seeded homography refinement did not reduce the image residual");
+               Residual_Checked := Residual_Checked + 1;
+            end if;
+         end;
+      end loop;
+      Assert (Residual_Checked >= 5, "too few residual-checked seeded homography fixtures");
+      --  An exact in-domain seed of the large translation converges near itself.
+      declare
+         Exact : ECC_Homography_Result;
+         Raised : Boolean;
+      begin
+         Hs_Run (Hom_Pair (Hs_Large_Truth), Hk (1.0, 0.0, 40.0, 0.0, 1.0, 30.0, 0.0, 0.0), Exact, Raised);
+         Assert (not Raised and then Hs_Near (Exact, Hs_Large_Truth), "exact homography seed");
+      end;
+   end ECC_Homography_Seeded_Consumption;
+
+   procedure ECC_Homography_Seeded_Refinement_And_Direction (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Pair : constant ECC_Pair := Hom_Pair (Hs_LTP_Truth);
+      One, Three, Many : ECC_Homography_Result;
+      One_Raised, Three_Raised, Many_Raised : Boolean;
+   begin
+      Hs_Run (Pair, Hs_LTP_Near, One, One_Raised, (Maximum_Iterations => 1, Epsilon => 0.0001));
+      Hs_Run (Pair, Hs_LTP_Near, Three, Three_Raised, (Maximum_Iterations => 3, Epsilon => 0.0001));
+      Hs_Run (Pair, Hs_LTP_Near, Many, Many_Raised);
+      Assert (not One_Raised and then not Three_Raised and then not Many_Raised, "seeded homography refinement runs");
+      Assert (One /= Many and then One /= Three, "one, three and many iterations are indistinguishable");
+      Assert (Hom_Map_Error (Coeffs (Many.Warp), Hs_LTP_Truth) < Hom_Map_Error (Coeffs (One.Warp), Hs_LTP_Truth),
+              "more iterations did not move the homography closer to the truth");
+      Assert (One.Correlation < Many.Correlation, "one-iteration seeded correlation");
+      Assert (Estimate_ECC_Homography (Pair.Template, Pair.Moving, (others => <>), Hs_LTP_Near) = Many,
+              "seeded homography not repeatable");
+      --  Direction: the returned matrix is applied unchanged with WARP_INVERSE_MAP; its
+      --  transpose, negated translation and swapped translation/projective terms do not align.
+      declare
+         W    : constant HM := Coeffs (Many.Warp);
+         Good : constant Long_Float := Hom_Residual (Pair, W, True);
+      begin
+         Assert (Good < 1.0, "seeded homography residual did not collapse");
+         Assert (Hom_Residual (Pair, Transposed (W), True) > 5.0 * Good, "transposed seeded matrix aligned");
+         Assert (Hom_Residual (Pair, Negated_Translation (W), True) > 5.0 * Good, "negated translation aligned");
+         Assert (Hom_Residual (Pair, Swapped (W, 2, 6), True) > 5.0 * Good, "swapped H02/H20 aligned");
+         Assert (Hom_Residual (Pair, Swapped (W, 5, 7), True) > 5.0 * Good, "swapped H12/H21 aligned");
+      end;
+      --  The seed is consumed in storage order: swapping its translation terms changes the outcome.
+      declare
+         Swapped_Seed : constant ECC_Homography_Result :=
+           (Hs_LTP_Near with delta Warp => (Hs_LTP_Near.Warp with delta H02 => -8.0, H12 => 11.0));
+         R : ECC_Homography_Result;
+         Raised : Boolean;
+      begin
+         Hs_Run (Pair, Swapped_Seed, R, Raised);
+         Assert (Raised or else not Hs_Near (R, Hs_LTP_Truth), "seed translation order had no effect");
+      end;
+   end ECC_Homography_Seeded_Refinement_And_Direction;
+
+   procedure ECC_Homography_Seeded_Correlation_Ignored (T : in out Fixture) is
+      pragma Unreferenced (T);
+      pragma Validity_Checks (Off);
+      function F64 is new Ada.Unchecked_Conversion (Interfaces.Unsigned_64, OpenCV.Float64_Value);
+      Pair : constant ECC_Pair := Hom_Pair (Hs_Strong_Truth);
+      Base : ECC_Homography_Result;
+      Base_Raised : Boolean;
+      Correlations : constant array (1 .. 7) of OpenCV.Float64_Value :=
+        [0.0, 1.0, -1.0, 12345.0, OpenCV.Float64_Value'Last,
+         F64 (16#7FF8_0000_0000_0000#), F64 (16#FFF0_0000_0000_0000#)];
+   begin
+      Hs_Run (Pair, Hs_Strong_Near, Base, Base_Raised);
+      Assert (not Base_Raised, "baseline seeded homography run");
+      for C of Correlations loop
+         declare
+            Initial : constant ECC_Homography_Result := (Hs_Strong_Near with delta Correlation => C);
+            Saved   : constant ECC_Homography_Result := Initial;
+            Again   : ECC_Homography_Result;
+            Raised  : Boolean;
+         begin
+            Hs_Run (Pair, Initial, Again, Raised);
+            Assert (not Raised and then Again = Base, "initial homography correlation changed the result");
+            Assert (Initial.Warp = Saved.Warp, "initial homography warp modified");
+         end;
+      end loop;
+      --  An in-domain previous result is a valid seed for the next call; chaining is repeatable.
+      declare
+         Mild   : constant ECC_Pair := Hom_Pair (K_PM);
+         First  : constant ECC_Homography_Result := Estimate_ECC_Homography (Mild.Template, Mild.Moving);
+         Second : constant ECC_Homography_Result :=
+           Estimate_ECC_Homography (Mild.Template, Mild.Moving, (others => <>), First);
+         Third  : constant ECC_Homography_Result :=
+           Estimate_ECC_Homography (Mild.Template, Mild.Moving, (others => <>), First);
+      begin
+         Assert (Hom_Near (Second, K_PM) and then Second = Third, "previous homography result reused as a seed");
+      end;
+   end ECC_Homography_Seeded_Correlation_Ignored;
+
+   procedure ECC_Homography_Seeded_Immutability_And_Regions (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Window : constant OpenCV.Rect := (16, 16, 128, 128);
+      Saved, Contiguous : ECC_Homography_Result;
+      Before_A, Before_B : Long_Long_Integer;
+      Initial  : constant ECC_Homography_Result := (Hs_Mild_Near with delta Correlation => 0.25);
+      Snapshot : constant ECC_Homography_Result := Initial;
+      Unused   : ECC_Homography_Result;
+      Raised   : Boolean;
+   begin
+      declare
+         Parent_A : constant OpenCV.Core.Mat := EF.Texture (160, 160);
+         Parent_B : constant OpenCV.Core.Mat := EF.Homography_Texture (160, 160, K_PM);
+         Region_A : constant OpenCV.Core.Mat := Parent_A.Region (Window);
+         Region_B : constant OpenCV.Core.Mat := Parent_B.Region (Window);
+      begin
+         Before_A := EF.Checksum (Parent_A);
+         Before_B := EF.Checksum (Parent_B);
+         Assert (not Region_A.Is_Continuous and then not Region_B.Is_Continuous,
+                 "seeded homography fixture Regions are contiguous");
+         Saved := Estimate_ECC_Homography (Region_A, Region_B, (others => <>), Initial);
+         Contiguous := Estimate_ECC_Homography (Region_A.Clone, Region_B.Clone, (others => <>), Initial);
+         Assert (Saved = Contiguous, "seeded homography Region differs from the contiguous clone");
+         Assert (EF.Checksum (Parent_A) = Before_A and then EF.Checksum (Parent_B) = Before_B,
+                 "seeded homography modified a Region parent");
+         --  The seed domain uses the Region geometry (128), not the parent's (160): this seed
+         --  is at the 128 limit and would exceed it on 160.
+         Assert (Hs_Outcome_Of ((Region_A, Region_B), Hk (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.5 / 127.0, 0.0))
+                 /= Preflight_Rejected, "seed domain used the Region parent geometry");
+         Assert (Hs_Outcome_Of ((Parent_A, Parent_B), Hk (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.5 / 127.0, 0.0))
+                 = Preflight_Rejected, "seed domain ignored the larger parent geometry");
+         Hs_Run ((Parent_A, Parent_A), Initial, Unused, Raised);
+         Assert (EF.Checksum (Parent_A) = Before_A, "shared allocation modified by seeded homography");
+      end;
+      Assert (Saved.Warp.H22 = 1.0 and then Saved.Correlation > 0.98, "seeded homography result after finalization");
+      Assert (Initial = Snapshot and then Initial.Correlation = 0.25, "initial homography record changed");
+      declare
+         Pair : constant ECC_Pair := Hom_Pair (Hs_Strong_Truth);
+         Flat : constant OpenCV.Core.Mat := EF.Constant_Image (128, 128, 128);
+         Seed : constant ECC_Homography_Result := (Hs_Strong_Near with delta Correlation => 0.5);
+         Copy : constant ECC_Homography_Result := Seed;
+         Bad  : constant ECC_Homography_Result := Hk (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 2.0, 0.5);
+         Bad_Copy : constant ECC_Homography_Result := Bad;
+      begin
+         Hs_Run (Pair, Seed, Unused, Raised);
+         Assert (not Raised and then Seed = Copy, "initial homography record changed by refinement");
+         Hs_Run ((Flat, Flat), Seed, Unused, Raised);
+         Assert (Raised and then Seed = Copy, "initial homography record changed by nonconvergence");
+         Hs_Run (Pair, Seed, Unused, Raised, (Maximum_Iterations => 101, Epsilon => 0.0001));
+         Assert (Raised and then Seed = Copy, "initial homography record changed by invalid options");
+         Hs_Run (Pair, Bad, Unused, Raised);
+         Assert (Raised and then Bad = Bad_Copy, "initial homography record changed by invalid seed");
+      end;
+   end ECC_Homography_Seeded_Immutability_And_Regions;
+
+   procedure ECC_Homography_Seeded_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      pragma Validity_Checks (Off);
+      function F32 is new Ada.Unchecked_Conversion (Interfaces.Unsigned_32, OpenCV.Float32_Value);
+      NaN : constant OpenCV.Float32_Value := F32 (16#7FC0_0000#);
+      Inf : constant OpenCV.Float32_Value := F32 (16#7F80_0000#);
+      Lin : constant OpenCV.Float32_Value := 4.0;
+      Trn : constant OpenCV.Float32_Value := 1_048_576.0;
+      Pair : constant ECC_Pair := Hom_Pair (K_PB);
+      Base : constant ECC_Homography_Warp := Hs_Mild_Near.Warp;
+      Nonfinite : constant array (1 .. 3) of OpenCV.Float32_Value := [NaN, Inf, -Inf];
+      --  Denominator limit on 128 x 128: |H20| * 127 + |H21| * 127 <= 0.5.
+      Edge : constant OpenCV.Float32_Value := 0.5 / 127.0;
+
+      procedure Rejected (W : ECC_Homography_Warp; Message : String) is
+      begin
+         Assert (Hs_Outcome_Of (Pair, (Warp => W, Correlation => 0.0)) = Preflight_Rejected, Message);
+      end Rejected;
+
+      procedure Admitted (W : ECC_Homography_Warp; Message : String) is
+      begin
+         Assert (Hs_Outcome_Of (Pair, (Warp => W, Correlation => 0.0)) /= Preflight_Rejected, Message);
+      end Admitted;
+
+      --  Rejected, and for the documented reason (the diagnostic names the violated rule).
+      procedure Rejected_For (W : ECC_Homography_Warp; Fragment, Message : String) is
+         Unused : ECC_Homography_Result;
+      begin
+         Unused := Estimate_ECC_Homography (Pair.Template, Pair.Moving, (others => <>), (Warp => W, Correlation => 0.0));
+         Assert (False, Message & ": accepted");
+      exception
+         when Error : OpenCV.OpenCV_Error =>
+            Assert (Ada.Strings.Fixed.Index (Ada.Exceptions.Exception_Message (Error), Fragment) > 0,
+                    Message & ": rejected for the wrong reason: " & Ada.Exceptions.Exception_Message (Error));
+      end Rejected_For;
+   begin
+      for Bad of Nonfinite loop
+         Rejected ((Base with delta H00 => Bad), "nonfinite H00");
+         Rejected ((Base with delta H01 => Bad), "nonfinite H01");
+         Rejected ((Base with delta H02 => Bad), "nonfinite H02");
+         Rejected ((Base with delta H10 => Bad), "nonfinite H10");
+         Rejected ((Base with delta H11 => Bad), "nonfinite H11");
+         Rejected ((Base with delta H12 => Bad), "nonfinite H12");
+         Rejected ((Base with delta H20 => Bad), "nonfinite H20");
+         Rejected ((Base with delta H21 => Bad), "nonfinite H21");
+         Rejected ((Base with delta H22 => Bad), "nonfinite H22");
+         Rejected_For ((Base with delta H22 => Bad), "finite", "nonfinite H22 diagnostic");
+         Rejected_For ((Base with delta H20 => Bad), "finite", "nonfinite H20 diagnostic");
+      end loop;
+      Rejected_For ((Base with delta H22 => 0.0), "H22 must be exactly", "H22 zero");
+      Rejected ((Base with delta H22 => -1.0), "H22 negative");
+      Rejected_For ((Base with delta H22 => 2.0), "H22 must be exactly", "H22 two (no normalization)");
+      Rejected ((Base with delta H22 => OpenCV.Float32_Value'Succ (1.0)), "H22 just above 1");
+      Rejected ((Base with delta H22 => OpenCV.Float32_Value'Pred (1.0)), "H22 just below 1");
+      Rejected_For ((Base with delta H00 => OpenCV.Float32_Value'Succ (Lin)), "linear", "H00 just beyond 4");
+      Rejected ((Base with delta H01 => -OpenCV.Float32_Value'Succ (Lin)), "H01 just beyond -4");
+      Rejected ((Base with delta H10 => 5.0), "H10 beyond 4");
+      Rejected ((Base with delta H11 => OpenCV.Float32_Value'Last), "H11 at Float32'Last");
+      Rejected_For ((Base with delta H02 => OpenCV.Float32_Value'Succ (Trn)), "translations", "H02 just beyond 2**20");
+      Rejected ((Base with delta H12 => -OpenCV.Float32_Value'Succ (Trn)), "H12 just beyond -2**20");
+      Rejected ((Base with delta H12 => OpenCV.Float32_Value'First), "H12 at Float32'First");
+      Rejected_For ((Base with delta H20 => OpenCV.Float32_Value'Succ (Edge), H21 => 0.0), "Columns-1",
+                    "H20 just beyond the edge");
+      Rejected ((Base with delta H20 => 0.0, H21 => -OpenCV.Float32_Value'Succ (Edge)), "H21 just beyond the edge");
+      Rejected ((Base with delta H20 => 0.003, H21 => 0.001), "combined denominator deviation");
+      Rejected ((Base with delta H20 => -0.0025, H21 => -0.0025), "negative combined denominator deviation");
+      Rejected ((Base with delta H20 => 1.0E30, H21 => 0.0), "huge H20");
+      Rejected ((Base with delta H20 => 0.0, H21 => OpenCV.Float32_Value'Last), "H21 at Float32'Last");
+      --  Exact limits and singular / reflected seeds pass preflight; native outcome is compared
+      --  with the direct oracle, not asserted here.
+      Admitted ((H00 => Lin, H01 => -Lin, H02 => Trn, H10 => -Lin, H11 => Lin, H12 => -Trn,
+                 H20 => 0.0, H21 => 0.0, H22 => 1.0), "seed exactly at the linear and translation limits");
+      Admitted ((Base with delta H20 => Edge, H21 => 0.0), "H20 exactly at the edge");
+      Admitted ((Base with delta H20 => 0.0, H21 => -Edge), "H21 exactly at the edge");
+      Admitted ((Base with delta H20 => 0.00195, H21 => -0.00195), "mixed edge");
+      Admitted ((H00 => 0.0, H01 => 0.0, H02 => 0.0, H10 => 0.0, H11 => 0.0, H12 => 0.0,
+                 H20 => 0.0, H21 => 0.0, H22 => 1.0), "all-zero linear seed passes preflight");
+      Admitted ((H00 => -1.0, H01 => 0.0, H02 => 127.0, H10 => 0.0, H11 => 1.0, H12 => 0.0,
+                 H20 => 0.0, H21 => 0.0, H22 => 1.0), "reflected seed passes preflight");
+      --  The rule depends on geometry: valid on 128 columns, rejected on 256.
+      declare
+         Wide : constant ECC_Pair := (EF.Texture (128, 256), EF.Texture (128, 256, 2, 1));
+         Tall : constant ECC_Pair := (EF.Texture (256, 128), EF.Texture (256, 128, 2, 1));
+         X_Seed : constant ECC_Homography_Result := Hk (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0035, 0.0);
+         Y_Seed : constant ECC_Homography_Result := Hk (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0035);
+      begin
+         Assert (Hs_Outcome_Of (Pair, X_Seed) /= Preflight_Rejected, "H20 seed valid on 128 columns");
+         Assert (Hs_Outcome_Of (Wide, X_Seed) = Preflight_Rejected, "H20 seed rule ignored the width");
+         Assert (Hs_Outcome_Of (Wide, Y_Seed) /= Preflight_Rejected, "H21 seed rule used the width");
+         Assert (Hs_Outcome_Of (Tall, Y_Seed) = Preflight_Rejected, "H21 seed rule ignored the height");
+      end;
+   end ECC_Homography_Seeded_Validation;
+
+   procedure ECC_Homography_Seeded_Image_Validation (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Base  : constant ECC_Homography_Result := Hs_Mild_Near;
+      Pair  : constant ECC_Pair := Hom_Pair (K_PB);
+      Good  : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+      Float_Image : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (128, 128, (Depth => OpenCV.Core.Float32, Channels => 1));
+      Color : constant OpenCV.Core.Mat := OpenCV.Core.Create
+        (128, 128, (Depth => OpenCV.Core.UInt8, Channels => 3));
+      Empty : OpenCV.Core.Mat;
+      Small : constant OpenCV.Core.Mat := EF.Texture (31, 128);
+      Bad_Seed : constant ECC_Homography_Result := Hk (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 2.0);
+      Unused : ECC_Homography_Result;
+   begin
+      Assert (Hs_Outcome_Of (Pair, Base, (Maximum_Iterations => 101, Epsilon => 0.0001))
+              = Preflight_Rejected, "101 iterations");
+      Assert (Hs_Outcome_Of (Pair, Base, (Maximum_Iterations => 50, Epsilon => 1.0))
+              = Preflight_Rejected, "epsilon 1.0");
+      Assert (Hs_Outcome_Of (Pair, Base, (Maximum_Iterations => 50, Epsilon => 0.0))
+              = Preflight_Rejected, "epsilon 0.0");
+      Assert (Hs_Outcome_Of ((Float_Image, Float_Image), Base) = Preflight_Rejected, "Float32 images");
+      Assert (Hs_Outcome_Of ((Color, Color), Base) = Preflight_Rejected, "three-channel images");
+      Assert (Hs_Outcome_Of ((Good, EF.Texture (128, 129)), Base) = Preflight_Rejected, "columns");
+      Assert (Hs_Outcome_Of ((EF.Texture (129, 128), Good), Base) = Preflight_Rejected, "rows");
+      Assert (Hs_Outcome_Of ((Small, Small), Base) = Preflight_Rejected, "31 rows");
+      begin
+         Unused := Estimate_ECC_Homography (Empty, Good, (others => <>), Base);
+         Assert (False, "empty template accepted by the seeded homography");
+      exception
+         when OpenCV.OpenCV_Error => null;
+      end;
+      --  Image and option errors are reported before seed errors.
+      begin
+         Unused := Estimate_ECC_Homography (Small, Small, (others => <>), Bad_Seed);
+         Assert (False, "invalid image with invalid seed accepted");
+      exception
+         when Error : OpenCV.OpenCV_Error =>
+            Assert (Ada.Strings.Fixed.Index (Ada.Exceptions.Exception_Message (Error), "ECC image size") > 0,
+                    "image validation must precede seed validation");
+      end;
+      Assert (Hs_Outcome_Of (Pair, Base, (Maximum_Iterations => 1, Epsilon => 1.0E-8)) /= Preflight_Rejected
+              and then Hs_Outcome_Of (Pair, Base, (Maximum_Iterations => 100, Epsilon => 0.1))
+                       /= Preflight_Rejected, "seeded homography option bounds are accepted");
+   end ECC_Homography_Seeded_Image_Validation;
+
+   procedure ECC_Homography_Seeded_Nonconvergence (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Flat          : constant OpenCV.Core.Mat := EF.Constant_Image (128, 128, 128);
+      Texture_Image : constant OpenCV.Core.Mat := EF.Texture (128, 128);
+   begin
+      Assert (Hs_Outcome_Of ((Flat, Flat), Hs_Mild_Near) = Native_Failed, "seeded constant images");
+      Assert (Hs_Outcome_Of ((Flat, Texture_Image), Hs_Mild_Near) = Native_Failed, "seeded constant template");
+      Assert (Hs_Outcome_Of ((EF.Noise (128, 128, 3), EF.Noise (128, 128, 9)), Hs_Mild_Near) = Native_Failed,
+              "seeded independent noise");
+      --  Seeds that are wrong or not close enough raise natively on every qualified version.
+      Assert (Hs_Outcome_Of (Hom_Pair (Hs_Strong_Truth), Hs_Wrong_Persp) = Native_Failed,
+              "wrong-direction perspective seed");
+      Assert (Hs_Outcome_Of (Hom_Pair (Hs_Strong_Truth), Hk (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0015, 0.0015))
+              = Native_Failed, "insufficiently close perspective seed");
+      Assert (Hs_Outcome_Of (Hom_Pair (K_PB), Hk (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)) = Native_Failed,
+              "all-zero linear seed");
+      --  Finite is not correct: a wrong seed with one iteration returns a finite, poorly
+      --  correlated matrix that leaves the seed domain; it is published, not corrected, and
+      --  passing it back as a seed is rejected by the binding.
+      declare
+         Pair : constant ECC_Pair := Hom_Pair (K_PB);
+         R : ECC_Homography_Result;
+         Raised : Boolean;
+      begin
+         Hs_Run (Pair, Hs_Wrong_Persp, R, Raised, (Maximum_Iterations => 1, Epsilon => 0.0001));
+         Assert (not Raised and then R.Correlation < 0.5 and then R.Warp.H22 = 1.0,
+                 "wrong-but-finite seeded homography outcome");
+         Assert (abs LF (R.Warp.H20) * 127.0 + abs LF (R.Warp.H21) * 127.0 > 0.5,
+                 "fixture no longer leaves the seed domain");
+         Assert (Hs_Outcome_Of (Pair, R) = Preflight_Rejected, "out-of-domain result accepted as a seed");
+      end;
+      --  A seed with an extreme anisotropic linear part may be accepted natively with a
+      --  meaningless matrix (4.x and 5.0 measured); nothing is fabricated.
+      declare
+         R : ECC_Homography_Result;
+         Raised : Boolean;
+      begin
+         Hs_Run (Hom_Pair (K_PB), Hk (4.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0), R, Raised);
+         Assert (Raised or else (R.Correlation < 0.1 and then not Hs_Near (R, K_PB)),
+                 "anisotropic seed produced a confident result");
+      end;
+   end ECC_Homography_Seeded_Nonconvergence;
+
+   ---------------------------------------------------------------------
+   --  Task 017: independent seeded homography oracle (ecc-homography-seeded-oracle 1)
+   ---------------------------------------------------------------------
+   type Hs_Token_Array is array (1 .. 30) of Ada.Strings.Unbounded.Unbounded_String;
+
+   procedure Hs_Split (Line : String; Tokens : out Hs_Token_Array; Count : out Natural) is
+      First : Natural := Line'First;
+   begin
+      Count := 0;
+      Tokens := [others => Ada.Strings.Unbounded.Null_Unbounded_String];
+      while First <= Line'Last loop
+         if Line (First) = ' ' then
+            First := First + 1;
+         else
+            declare
+               Last : Natural := First;
+            begin
+               while Last < Line'Last and then Line (Last + 1) /= ' ' loop
+                  Last := Last + 1;
+               end loop;
+               if Count = Tokens'Last then
+                  Count := Tokens'Last + 1;
+                  return;
+               end if;
+               Count := Count + 1;
+               Tokens (Count) := Ada.Strings.Unbounded.To_Unbounded_String (Line (First .. Last));
+               First := Last + 1;
+            end;
+         end if;
+      end loop;
+   end Hs_Split;
+
+   function Hs_Tok (Tokens : Hs_Token_Array; Index : Positive) return String is
+     (Ada.Strings.Unbounded.To_String (Tokens (Index)));
+
+   function Hs_With_Token
+     (Lines : Hom_Line_Array; Line_Index, Token_Index : Positive; Value : String) return Hom_Line_Array
+   is
+      Result : Hom_Line_Array := Lines;
+      Tok    : Hs_Token_Array;
+      TC     : Natural;
+      Text   : Ada.Strings.Unbounded.Unbounded_String;
+   begin
+      Hs_Split (Ada.Strings.Unbounded.To_String (Lines (Line_Index)), Tok, TC);
+      Tok (Token_Index) := Ada.Strings.Unbounded.To_Unbounded_String (Value);
+      for K in 1 .. TC loop
+         if K > 1 then Ada.Strings.Unbounded.Append (Text, " "); end if;
+         Ada.Strings.Unbounded.Append (Text, Tok (K));
+      end loop;
+      Result (Line_Index) := Text;
+      return Result;
+   end Hs_With_Token;
+
+   function Hs_Swap_Tokens
+     (Lines : Hom_Line_Array; Line_Index, A, B : Positive) return Hom_Line_Array
+   is
+      Tok : Hs_Token_Array;
+      TC  : Natural;
+   begin
+      Hs_Split (Ada.Strings.Unbounded.To_String (Lines (Line_Index)), Tok, TC);
+      return Hs_With_Token
+        (Hs_With_Token (Lines, Line_Index, A, Hs_Tok (Tok, B)), Line_Index, B, Hs_Tok (Tok, A));
+   end Hs_Swap_Tokens;
+
+   type Hs_Spec is record
+      Name       : String (1 .. 20);
+      Kind       : Character;
+      Truth      : HM;
+      Seed       : ECC_Homography_Warp;
+      Iterations : Positive;
+      Epsilon    : Long_Float;
+   end record;
+
+   function Hp
+     (Name : String; Kind : Character; Truth : HM; Seed : ECC_Homography_Result;
+      Iterations : Positive := 50; Epsilon : Long_Float := 1.0E-4) return Hs_Spec is
+     (Name => Ada.Strings.Fixed.Head (Name, 20), Kind => Kind, Truth => Truth,
+      Seed => Seed.Warp, Iterations => Iterations, Epsilon => Epsilon);
+
+   Expected_Hs_Oracle_Fixtures : constant := 35;
+
+   Hs_Table : constant array (1 .. Expected_Hs_Oracle_Fixtures) of Hs_Spec :=
+     [Hp ("identity-id", 'T', K_Identity, Hs_Identity_Seed),
+      Hp ("pb-id", 'T', K_PB, Hs_Identity_Seed),
+      Hp ("strong-id", 'T', Hs_Strong_Truth, Hs_Identity_Seed),
+      Hp ("large-id", 'T', Hs_Large_Truth, Hs_Identity_Seed),
+      Hp ("reflect-id", 'T', K_RX, Hs_Identity_Seed),
+      Hp ("scale-persp-id", 'T', Hs_Scp_Truth, Hs_Identity_Seed),
+      Hp ("shear-persp-id", 'T', Hs_Shp_Truth, Hs_Identity_Seed),
+      Hp ("strong-near", 'T', Hs_Strong_Truth, Hs_Strong_Near),
+      Hp ("large-near", 'T', Hs_Large_Truth, Hs_Large_Near),
+      Hp ("large-persp-near", 'T', Hs_LTP_Truth, Hs_LTP_Near),
+      Hp ("reflect-near", 'T', K_RX, Hs_Reflect_Near),
+      Hp ("scale-persp-near", 'T', Hs_Scp_Truth, Hs_Scp_Near),
+      Hp ("shear-persp-near", 'T', Hs_Shp_Truth, Hs_Shp_Near),
+      Hp ("mild-near", 'T', K_PM, Hs_Mild_Near),
+      Hp ("large-exact", 'T', Hs_Large_Truth, Hk (1.0, 0.0, 40.0, 0.0, 1.0, 30.0, 0.0, 0.0)),
+      Hp ("pb-wrong-persp", 'T', K_PB, Hs_Wrong_Persp),
+      Hp ("strong-wrong-persp", 'T', Hs_Strong_Truth, Hs_Wrong_Persp),
+      Hp ("strong-loose", 'T', Hs_Strong_Truth, Hk (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0015, 0.0015)),
+      Hp ("pb-wrong-affine", 'T', K_PB, Hk (0.8, -0.2, 6.0, 0.2, 1.25, -5.0, 0.001, -0.001)),
+      Hp ("den-edge-x", 'T', K_PB, Hk (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0039, 0.0)),
+      Hp ("den-edge-mixed", 'T', K_PB, Hk (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.00195, -0.00195)),
+      Hp ("limit-linear", 'T', K_PB, Hk (4.0, 4.0, 0.0, 4.0, 4.0, 0.0, 0.0, 0.0)),
+      Hp ("limit-translation", 'T', K_PB, Hk (1.0, 0.0, 1_048_576.0, 0.0, 1.0, -1_048_576.0, 0.0, 0.0)),
+      Hp ("all-limits", 'T', K_PB, Hk (4.0, -4.0, 1_048_576.0, -4.0, 4.0, -1_048_576.0, 0.00195, -0.00195)),
+      Hp ("singular-zero", 'T', K_PB, Hk (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+      Hp ("tiny-scale", 'T', K_PB, Hk (1.0E-6, 0.0, 0.0, 0.0, 1.0E-6, 0.0, 0.0, 0.0)),
+      Hp ("aniso-seed", 'T', K_PB, Hk (4.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0)),
+      Hp ("strong-near-it1", 'T', Hs_Strong_Truth, Hs_Strong_Near, 1),
+      Hp ("strong-near-it3", 'T', Hs_Strong_Truth, Hs_Strong_Near, 3),
+      Hp ("strong-near-e0.1", 'T', Hs_Strong_Truth, Hs_Strong_Near, 50, 0.1),
+      Hp ("strong-near-it100-e8", 'T', Hs_Strong_Truth, Hs_Strong_Near, 100, 1.0E-8),
+      Hp ("pb-wrong-persp-it1", 'T', K_PB, Hs_Wrong_Persp, 1),
+      Hp ("constant-seeded", 'C', K_Identity, Hs_Mild_Near),
+      Hp ("noise-seeded", 'N', K_Identity, Hs_Mild_Near),
+      Hp ("region-near", 'R', K_PM, Hs_Mild_Near)];
+
+   function Hs_Name (I : Positive) return String is
+     (Ada.Strings.Fixed.Trim (Hs_Table (I).Name, Ada.Strings.Both));
+
+   function Hs_Build (Spec : Hs_Spec) return ECC_Pair is
+      use type EF.Homography_Matrix;
+      Window : constant OpenCV.Rect := (16, 16, 128, 128);
+   begin
+      case Spec.Kind is
+         when 'C' => return (EF.Constant_Image (128, 128, 128), EF.Constant_Image (128, 128, 128));
+         when 'N' => return (EF.Noise (128, 128, 3), EF.Noise (128, 128, 9));
+         when 'R' =>
+            return (EF.Texture (160, 160).Region (Window),
+                    EF.Homography_Texture (160, 160, Spec.Truth).Region (Window));
+         when others =>
+            if Spec.Truth = K_Identity then
+               return (EF.Texture (128, 128), EF.Texture (128, 128));
+            end if;
+            return Hom_Pair (Spec.Truth);
+      end case;
+   end Hs_Build;
+
+   function Hs_Oracle_Path return String is
+     (Ada.Environment_Variables.Value
+        ("VIDEO_ECC_HOMOGRAPHY_SEEDED_ORACLE", "../obj/oracle/ecc-homography-seeded.txt"));
+
+   function Hs_Seed_Values (W : ECC_Homography_Warp) return HM renames Coeffs;
+
+   --  Strict verifier (never raises): "" when the oracle is complete, current and agrees with
+   --  the binding, otherwise the first defect. Fixture record tokens: 1 fixture, 2 name,
+   --  3 iterations, 4 epsilon, 5..13 seed, 14 OK|EXC, 15..23 result, 24 correlation,
+   --  25 template checksum, 26 moving checksum.
+   function Hs_Compare
+     (Tok : Hs_Token_Array; Spec : Hs_Spec; Name : String;
+      Succeeded, Raised, Nonidentity, Distinguishing : in out Natural) return String
+   is
+      function Tk (I : Positive) return String is (Hs_Tok (Tok, I));
+      Result_Outcome : constant String := Tk (14);
+      Pair    : constant ECC_Pair := Hs_Build (Spec);
+      Options : constant ECC_Homography_Options :=
+        (Maximum_Iterations => Spec.Iterations, Epsilon => OpenCV.Float64_Value (Spec.Epsilon));
+      Initial : constant ECC_Homography_Result := (Warp => Spec.Seed, Correlation => 0.0);
+      Seed    : constant HM := Hs_Seed_Values (Spec.Seed);
+      Label   : constant array (0 .. 8) of String (1 .. 3) :=
+        ["H00", "H01", "H02", "H10", "H11", "H12", "H20", "H21", "H22"];
+      S, W    : HM;
+      R, Plain : ECC_Homography_Result;
+      Binding_Raised, Plain_Raised : Boolean;
+   begin
+      if Integer'Value (Tk (3)) /= Spec.Iterations
+        or else abs (Long_Float'Value (Tk (4)) - Spec.Epsilon) > 1.0E-15
+      then
+         return "fixture options differ: " & Name;
+      end if;
+      if Result_Outcome /= "OK" and then Result_Outcome /= "EXC" then return "outcome token: " & Name; end if;
+      for K in S'Range loop
+         S (K) := Long_Float'Value (Tk (5 + K));
+         W (K) := Long_Float'Value (Tk (15 + K));
+         if abs (S (K) - Seed (K)) > 1.0E-12 * (1.0 + abs Seed (K)) then
+            return "seed " & Label (K) & " differs: " & Name;
+         end if;
+      end loop;
+      if Long_Long_Integer'Value (Tk (25)) /= EF.Checksum (Pair.Template)
+        or else Long_Long_Integer'Value (Tk (26)) /= EF.Checksum (Pair.Moving)
+      then
+         return "fixture checksum differs: " & Name;
+      end if;
+      if Spec.Seed /= Hs_Identity_Seed.Warp then Nonidentity := Nonidentity + 1; end if;
+      Hs_Run (Pair, Initial, R, Binding_Raised, Options);
+      if Result_Outcome = "OK" then
+         if Binding_Raised then return "binding raised where native succeeded: " & Name; end if;
+         Succeeded := Succeeded + 1;
+         declare
+            B : constant HM := Coeffs (R.Warp);
+         begin
+            if W (8) /= 1.0 or else B (8) /= 1.0 then return "H22 is not exactly 1: " & Name; end if;
+            for K in 0 .. 7 loop
+               declare
+                  Absolute : constant Long_Float :=
+                    (if K = 2 or else K = 5 then 1.0E-5 elsif K >= 6 then 1.0E-8 else 1.0E-6);
+               begin
+                  if not Hom_Close (B (K), W (K), Absolute) then return Label (K) & " differs: " & Name; end if;
+               end;
+            end loop;
+         end;
+         if abs (Long_Float (R.Correlation) - Long_Float'Value (Tk (24))) > 1.0E-6 then
+            return "correlation differs: " & Name;
+         end if;
+         if Spec.Kind = 'T' and then Spec.Seed /= Hs_Identity_Seed.Warp and then Hs_Near (R, Spec.Truth) then
+            Hs_Run_Plain (Pair, Plain, Plain_Raised);
+            if Plain_Raised then Distinguishing := Distinguishing + 1; end if;
+         end if;
+      else
+         if not Binding_Raised then return "binding succeeded where native raised: " & Name; end if;
+         Raised := Raised + 1;
+      end if;
+      return "";
+   end Hs_Compare;
+
+   function Verify_Hs_Oracle
+     (Path : String; Succeeded, Raised, Nonidentity, Distinguishing : out Natural) return String
+   is
+      Lines : Hom_Line_Array;
+      N     : Natural;
+      Tok   : Hs_Token_Array;
+      TC    : Natural;
+      Native : constant String := Interfaces.C.Strings.Value (Hom_Native_Version);
+      function Line (I : Positive) return String is (Ada.Strings.Unbounded.To_String (Lines (I)));
+   begin
+      Succeeded := 0; Raised := 0; Nonidentity := 0; Distinguishing := 0;
+      begin
+         Hom_Read_Lines (Path, Lines, N);
+      exception
+         when others => return "oracle missing or unreadable";
+      end;
+      if N = 0 then return "oracle is empty"; end if;
+      if Line (1) /= "ecc-homography-seeded-oracle 1" then return "oracle magic or format version"; end if;
+      if N < 2 or else Line (2) /= "version " & Native then return "oracle OpenCV version differs"; end if;
+      if N < 3 or else Ada.Strings.Fixed.Head (Line (N), 4) /= "end " then
+         return "oracle truncated (no end record)";
+      end if;
+      if Line (N) /= "end" & Integer'Image (Expected_Hs_Oracle_Fixtures) then
+         return "oracle record count";
+      end if;
+      if N - 3 /= Expected_Hs_Oracle_Fixtures then return "oracle fixture record count"; end if;
+      for I in 1 .. Expected_Hs_Oracle_Fixtures loop
+         Hs_Split (Line (I + 2), Tok, TC);
+         if TC /= 26 or else Hs_Tok (Tok, 1) /= "fixture" then
+            return "malformed fixture record";
+         end if;
+         if Hs_Tok (Tok, 2) /= Hs_Name (I) then
+            return "fixture identity or order: " & Hs_Name (I);
+         end if;
+         declare
+            Defect : constant String :=
+              Hs_Compare (Tok, Hs_Table (I), Hs_Name (I), Succeeded, Raised, Nonidentity, Distinguishing);
+         begin
+            if Defect /= "" then return Defect; end if;
+         end;
+      end loop;
+      return "";
+   exception
+      when others => return "oracle parse error";
+   end Verify_Hs_Oracle;
+
+   procedure ECC_Homography_Seeded_Direct_Oracle (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Succeeded, Raised, Nonidentity, Distinguishing : Natural;
+      Defect : constant String :=
+        Verify_Hs_Oracle (Hs_Oracle_Path, Succeeded, Raised, Nonidentity, Distinguishing);
+   begin
+      Assert (Defect = "", "seeded homography oracle: " & Defect);
+      Assert (Succeeded > 0 and then Raised > 0, "seeded homography oracle did not cover both outcomes");
+      Assert (Succeeded + Raised = Expected_Hs_Oracle_Fixtures, "seeded homography oracle outcome accounting");
+      Assert (Nonidentity >= 25, "seeded homography oracle needs genuinely nonidentity seeds");
+      Assert (Distinguishing >= 6, "seeded homography oracle has too few identity-fails / seeded-succeeds fixtures");
+   end ECC_Homography_Seeded_Direct_Oracle;
+
+   procedure ECC_Homography_Seeded_Oracle_Integrity (T : in out Fixture) is
+      pragma Unreferenced (T);
+      Original : constant String := Hs_Oracle_Path;
+      Scratch  : constant String := Original & ".tampered";
+      Lines    : Hom_Line_Array;
+      Count    : Natural;
+      A, B, C, D : Natural;
+
+      function Line_Of (Name : String) return Positive is
+      begin
+         for I in 1 .. Expected_Hs_Oracle_Fixtures loop
+            if Hs_Name (I) = Name then return I + 2; end if;
+         end loop;
+         raise Constraint_Error with "no such seeded homography oracle fixture " & Name;
+      end Line_Of;
+
+      procedure Expect_Rejected (Label, Fragment : String; Edited : Hom_Line_Array; Edited_Count : Natural) is
+      begin
+         Hom_Write_Lines (Scratch, Edited, Edited_Count);
+         declare
+            Defect : constant String := Verify_Hs_Oracle (Scratch, A, B, C, D);
+         begin
+            Assert (Defect /= "", "tampered seeded homography oracle accepted: " & Label);
+            Assert (Ada.Strings.Fixed.Index (Defect, Fragment) > 0,
+                    "tampered seeded homography oracle (" & Label & ") rejected for the wrong reason: " & Defect);
+         end;
+      end Expect_Rejected;
+
+      function Value_Of (Line_Index, Token_Index : Positive) return Long_Float is
+         Tok : Hs_Token_Array;
+         TC  : Natural;
+      begin
+         Hs_Split (Ada.Strings.Unbounded.To_String (Lines (Line_Index)), Tok, TC);
+         return Long_Float'Value (Hs_Tok (Tok, Token_Index));
+      end Value_Of;
+
+      Near : Positive;
+   begin
+      Hom_Read_Lines (Original, Lines, Count);
+      Near := Line_Of ("large-persp-near");
+      Assert (Count = Expected_Hs_Oracle_Fixtures + 3, "seeded homography oracle line count");
+      Assert (Verify_Hs_Oracle (Original, A, B, C, D) = "", "pristine seeded homography oracle rejected");
+      Assert (Verify_Hs_Oracle (Original & ".does-not-exist", A, B, C, D) = "oracle missing or unreadable",
+              "missing seeded homography oracle accepted");
+      Expect_Rejected ("empty", "empty", Lines, 0);
+      Expect_Rejected ("truncated", "truncated", Lines, Count - 1);
+      Expect_Rejected ("truncated mid-record", "truncated", Lines, Count - 5);
+      Expect_Rejected ("wrong magic", "format version", Hs_With_Token (Lines, 1, 1, "ecc-homography-oracle"), Count);
+      Expect_Rejected ("wrong format version", "format version", Hs_With_Token (Lines, 1, 2, "2"), Count);
+      Expect_Rejected ("wrong OpenCV version", "OpenCV version", Hs_With_Token (Lines, 2, 2, "0.0.0"), Count);
+      Expect_Rejected ("wrong declared count", "record count", Hs_With_Token (Lines, Count, 2, "34"), Count);
+      Expect_Rejected ("renamed fixture", "fixture identity", Hs_With_Token (Lines, Near, 2, "large-persp-nearX"), Count);
+      Expect_Rejected ("altered options", "options", Hs_With_Token (Lines, Near, 3, "49"), Count);
+      Expect_Rejected ("altered template checksum", "checksum", Hs_With_Token (Lines, Near, 25, "1"), Count);
+      Expect_Rejected ("altered moving checksum", "checksum", Hs_With_Token (Lines, Near, 26, "1"), Count);
+      Expect_Rejected ("altered seed H02", "seed H02", Hs_With_Token (Lines, Near, 7, "9.0"), Count);
+      Expect_Rejected ("swapped seed H02 and H12", "seed H02", Hs_Swap_Tokens (Lines, Near, 7, 10), Count);
+      Expect_Rejected ("swapped seed H20 and H21", "seed H20", Hs_Swap_Tokens (Lines, Near, 11, 12), Count);
+      Expect_Rejected ("altered seed H22", "seed H22", Hs_With_Token (Lines, Near, 13, "2.0"), Count);
+      Assert (abs (Value_Of (Near, 17) - Value_Of (Near, 21)) > 0.5
+              and then abs (Value_Of (Near, 20) - Value_Of (Near, 22)) > 0.5,
+              "swap fixtures must have distinguishable H02/H20 and H12/H21");
+      Expect_Rejected ("swapped output H02 and H20", "differs", Hs_Swap_Tokens (Lines, Near, 17, 21), Count);
+      Expect_Rejected ("swapped output H12 and H21", "differs", Hs_Swap_Tokens (Lines, Near, 20, 22), Count);
+      Expect_Rejected ("transposed output H01/H10", "differs", Hs_Swap_Tokens (Lines, Near, 16, 18), Count);
+      Expect_Rejected ("altered output H20", "H20 differs", Hs_With_Token (Lines, Near, 21, "0.0"), Count);
+      Expect_Rejected ("altered output H22", "H22", Hs_With_Token (Lines, Near, 23, "2.0"), Count);
+      Expect_Rejected ("altered correlation", "correlation differs", Hs_With_Token (Lines, Near, 24, "0.5"), Count);
+      Expect_Rejected ("success recorded as exception", "binding succeeded where native raised",
+                       Hs_With_Token (Lines, Line_Of ("identity-id"), 14, "EXC"), Count);
+      Expect_Rejected ("exception recorded as success", "binding raised where native succeeded",
+                       Hs_With_Token (Lines, Line_Of ("strong-id"), 14, "OK"), Count);
+      Expect_Rejected ("unknown outcome token", "outcome token",
+                       Hs_With_Token (Lines, Line_Of ("identity-id"), 14, "MAYBE"), Count);
+      Ada.Directories.Delete_File (Scratch);
+   end ECC_Homography_Seeded_Oracle_Integrity;
+
    function Suite return AUnit.Test_Suites.Access_Test_Suite is
       Result : constant AUnit.Test_Suites.Access_Test_Suite := AUnit.Test_Suites.New_Suite;
    begin
@@ -8061,6 +8904,16 @@ package body Video_Tests is
       Result.Add_Test (Caller.Create ("ECC_Homography_Nonconvergence", ECC_Homography_Nonconvergence'Access));
       Result.Add_Test (Caller.Create ("ECC_Homography_Direct_Oracle", ECC_Homography_Direct_Oracle'Access));
       Result.Add_Test (Caller.Create ("ECC_Homography_Oracle_Integrity", ECC_Homography_Oracle_Integrity'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Seeded_Identity_Equivalence", ECC_Homography_Seeded_Identity_Equivalence'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Seeded_Consumption", ECC_Homography_Seeded_Consumption'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Seeded_Refinement_And_Direction", ECC_Homography_Seeded_Refinement_And_Direction'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Seeded_Correlation_Ignored", ECC_Homography_Seeded_Correlation_Ignored'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Seeded_Immutability_And_Regions", ECC_Homography_Seeded_Immutability_And_Regions'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Seeded_Validation", ECC_Homography_Seeded_Validation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Seeded_Image_Validation", ECC_Homography_Seeded_Image_Validation'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Seeded_Nonconvergence", ECC_Homography_Seeded_Nonconvergence'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Seeded_Direct_Oracle", ECC_Homography_Seeded_Direct_Oracle'Access));
+      Result.Add_Test (Caller.Create ("ECC_Homography_Seeded_Oracle_Integrity", ECC_Homography_Seeded_Oracle_Integrity'Access));
       return Result;
    end Suite;
 end Video_Tests;

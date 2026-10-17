@@ -5,9 +5,12 @@
 #include <opencv2/video/tracking.hpp>
 
 #include <cmath>
+#include <cstddef>
+#include <cstring>
 #include <exception>
 #include <cstdio>
 #include <limits>
+#include <type_traits>
 #include <utility>
 #include <memory>
 #include <vector>
@@ -971,10 +974,41 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_affine(
                             nullptr, result);
 }
 
-extern "C" opencv_video_status opencv_video_estimate_ecc_homography(
-    const opencv_core_mat_handle *template_image,
-    const opencv_core_mat_handle *moving_image,
-    int32_t maximum_iterations, double epsilon,
+namespace {
+// Binding-policy homography seed domain (docs/ecc-homography-seeded-source-contract.md); not
+// an OpenCV guarantee. All three bounds are exactly representable in float and double.
+constexpr double kEccHomographySeedMaximumLinear = 4.0;
+constexpr double kEccHomographySeedMaximumTranslation = 1048576.0;
+constexpr double kEccHomographySeedMaximumDenominatorDeviation = 0.5;
+
+// The 48-byte homography result has four padding bytes between h22 and correlation (offsets
+// 36-39, pinned by the layout assertions in opencv_video_shim.h). A member-wise store or a
+// structure copy leaves padding bytes unspecified, so the published representation is built
+// in a zero-filled byte buffer and copied once with std::memcpy.
+using EccHomographyResult = opencv_video_ecc_homography_result;
+constexpr std::size_t kEccHomographyPaddingBegin = offsetof(EccHomographyResult, h22) + sizeof(float);
+constexpr std::size_t kEccHomographyPaddingEnd = offsetof(EccHomographyResult, correlation);
+static_assert(std::is_trivially_copyable<EccHomographyResult>::value &&
+                  std::is_standard_layout<EccHomographyResult>::value,
+              "ECC homography result must be a trivially copyable standard-layout object");
+static_assert(kEccHomographyPaddingBegin == 36 && kEccHomographyPaddingEnd == 40 &&
+                  kEccHomographyPaddingEnd + sizeof(double) == sizeof(EccHomographyResult),
+              "ECC homography result padding must be exactly bytes 36-39");
+
+// Writes one field at its ABI offset into the byte representation.
+template <typename T>
+void put_ecc_homography_field(unsigned char (&bytes)[sizeof(EccHomographyResult)],
+                              std::size_t offset, T value) {
+    std::memcpy(bytes + offset, &value, sizeof value);
+}
+
+// Shared homography ECC entry. `seed` is nullptr for the identity-initialized path, otherwise
+// nine row-major coefficients h00 h01 h02 h10 h11 h12 h20 h21 h22 (native STORAGE order). Only
+// the private initial matrix differs; validation, native call, output checks and publication
+// are shared. The seed check needs the image geometry, so it runs after input validation.
+opencv_video_status ecc_homography_entry(
+    const opencv_core_mat_handle *template_image, const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations, double epsilon, const float *seed,
     opencv_video_ecc_homography_result *result) {
     try {
         clear_error();
@@ -985,9 +1019,39 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_homography(
         auto status = validate_ecc_inputs(template_image, moving_image, maximum_iterations,
                                           epsilon, &tmpl, &moving);
         if (status != OPENCV_VIDEO_OK) return status;
+        if (seed != nullptr) {
+            for (int i = 0; i < 9; ++i)
+                if (!std::isfinite(seed[i]))
+                    return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                                "ECC homography seed coefficient is nonfinite");
+            // The native Jacobian hard-codes H22 = 1 and the update never writes H22.
+            if (seed[8] != 1.0f)
+                return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                            "ECC homography seed H22 must be exactly 1");
+            for (int i : {0, 1, 3, 4})
+                if (std::fabs(double(seed[i])) > kEccHomographySeedMaximumLinear)
+                    return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                                "ECC homography seed linear coefficient outside accepted magnitude");
+            for (int i : {2, 5})
+                if (std::fabs(double(seed[i])) > kEccHomographySeedMaximumTranslation)
+                    return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                                "ECC homography seed translation outside accepted magnitude");
+            // Both products are exact in double (24-bit significand times an integer below
+            // 2^14), so the single rounded sum is identical in the Ada preflight.
+            const double deviation = std::fabs(double(seed[6])) * double(tmpl->cols - 1) +
+                                     std::fabs(double(seed[7])) * double(tmpl->rows - 1);
+            if (!(deviation <= kEccHomographySeedMaximumDenominatorDeviation))
+                return fail(OPENCV_VIDEO_ERROR_INVALID_ARGUMENT,
+                            "ECC homography seed denominator deviation exceeds 0.5 over the image");
+        }
 
         // Private warp: native code mutates it; the caller's result is untouched.
         cv::Mat warp = cv::Mat::eye(3, 3, CV_32F);
+        if (seed != nullptr) {
+            // Native matrix STORAGE order (row-major), not the update-vector order.
+            float *init = warp.ptr<float>();
+            for (int i = 0; i < 9; ++i) init[i] = seed[i];
+        }
         if (warp.dims != 2 || warp.rows != 3 || warp.cols != 3 || warp.type() != CV_32FC1 ||
             !warp.isContinuous())
             return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC private warp has an unexpected schema");
@@ -1015,22 +1079,29 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_homography(
                 return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite warp entry");
         if (!std::isfinite(correlation))
             return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC produced a nonfinite correlation");
-        // The native homography update never writes H22 (docs/ecc-homography-source-contract.md).
+        // The native homography update never writes H22 (docs/ecc-homography-source-contract.md),
+        // and every accepted seed has H22 = 1. The seed domain is NOT applied to the output.
         if (w[8] != 1.0f)
             return fail(OPENCV_VIDEO_ERROR_OPENCV, "ECC homography H22 is not exactly 1");
 
-        opencv_video_ecc_homography_result computed;
-        computed.h00 = w[0];
-        computed.h01 = w[1];
-        computed.h02 = w[2];
-        computed.h10 = w[3];
-        computed.h11 = w[4];
-        computed.h12 = w[5];
-        computed.h20 = w[6];
-        computed.h21 = w[7];
-        computed.h22 = w[8];
-        computed.correlation = correlation;
-        *result = computed;
+        // Every validation has passed. All 48 bytes are defined: the buffer starts zero-filled,
+        // nine Float32 coefficients occupy 0-35, padding 36-39 stays zero (cleared explicitly),
+        // correlation occupies 40-47. One publication; the caller's object is not touched earlier.
+        unsigned char computed[sizeof(EccHomographyResult)];
+        std::memset(computed, 0, sizeof computed);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h00), w[0]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h01), w[1]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h02), w[2]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h10), w[3]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h11), w[4]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h12), w[5]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h20), w[6]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h21), w[7]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, h22), w[8]);
+        put_ecc_homography_field(computed, offsetof(EccHomographyResult, correlation), correlation);
+        std::memset(computed + kEccHomographyPaddingBegin, 0,
+                    kEccHomographyPaddingEnd - kEccHomographyPaddingBegin);
+        std::memcpy(static_cast<void *>(result), computed, sizeof computed);
         clear_error();
         return OPENCV_VIDEO_OK;
     } catch (const cv::Exception &e) {
@@ -1040,6 +1111,16 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_homography(
     } catch (...) {
         return fail(OPENCV_VIDEO_ERROR_UNKNOWN, "Unknown ECC exception");
     }
+}
+}  // namespace
+
+extern "C" opencv_video_status opencv_video_estimate_ecc_homography(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations, double epsilon,
+    opencv_video_ecc_homography_result *result) {
+    return ecc_homography_entry(template_image, moving_image, maximum_iterations, epsilon,
+                                nullptr, result);
 }
 
 extern "C" opencv_video_status opencv_video_estimate_ecc_affine_seeded(
@@ -1053,4 +1134,19 @@ extern "C" opencv_video_status opencv_video_estimate_ecc_affine_seeded(
                            initial_m10, initial_m11, initial_m12};
     return ecc_affine_entry(template_image, moving_image, maximum_iterations, epsilon,
                             seed, result);
+}
+
+extern "C" opencv_video_status opencv_video_estimate_ecc_homography_seeded(
+    const opencv_core_mat_handle *template_image,
+    const opencv_core_mat_handle *moving_image,
+    int32_t maximum_iterations, double epsilon,
+    float initial_h00, float initial_h01, float initial_h02,
+    float initial_h10, float initial_h11, float initial_h12,
+    float initial_h20, float initial_h21, float initial_h22,
+    opencv_video_ecc_homography_result *result) {
+    const float seed[9] = {initial_h00, initial_h01, initial_h02,
+                           initial_h10, initial_h11, initial_h12,
+                           initial_h20, initial_h21, initial_h22};
+    return ecc_homography_entry(template_image, moving_image, maximum_iterations, epsilon,
+                                seed, result);
 }
