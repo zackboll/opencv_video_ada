@@ -1,5 +1,58 @@
 # OpenCV Video for Ada
 
+### Caller-seeded ECC homography alignment (Task 017)
+
+```ada
+Refined : constant ECC_Homography_Result :=
+  OpenCV.Video.Estimate_ECC_Homography
+    (Template_Image    => Previous_Image,
+     Moving_Image      => Current_Image,
+     Initial_Transform => Predicted_Homography);
+```
+
+The same native `findTransformECC` (`MOTION_HOMOGRAPHY`, `COUNT | EPS`, no mask, Gaussian size 5)
+as Task 016, but the private 3x3 Float32 warp starts from `Initial_Transform.Warp` instead of the
+identity. The matrix convention, output checks and result type are Task 016's.
+
+* **Storage order.** The nine seed coefficients are placed in row-major storage order `H00 .. H22`,
+  not the native update-vector order. Nothing is transposed, negated, inverted, normalized,
+  decomposed or composed.
+* **`Initial_Transform.Correlation` is ignored.** It is never read, validated or propagated.
+* **Seed domain (binding policy, not an OpenCV guarantee).** Checked after the image and option
+  checks, before any native call; a violation raises `OpenCV_Error` and is never clamped:
+  * every coefficient finite;
+  * `H22` exactly `1.0` (native ECC never updates H22 and its Jacobian assumes 1, so a seed with
+    another scale is rejected rather than normalized);
+  * `H00 H01 H10 H11` at most 4 in magnitude, `H02 H12` at most `2**20` pixels;
+  * `|H20| * (Columns - 1) + |H21| * (Rows - 1) <= 0.5`, so the seed's denominator stays within
+    `0.5 .. 1.5` over the template. This depends on the image size: on 128 x 128 it allows a
+    projective term of about `3.9e-3`.
+* **The domain is not an output policy.** Native ECC updates the matrix without constraint; about a
+  third of measured one-iteration successes left the seed domain. A returned result (seeded or not)
+  is published as Task 016 publishes it, and passing an out-of-domain result back as a seed raises.
+* **Identity seed equivalence.** The identity seed and the default record give a byte-identical
+  result to the identity-initialized overload, including the same native failures.
+* **Seed consumption.** Identity initialization raises on strong perspective (`H20 = H21 = 0.002`),
+  a 40/30-pixel shift, a reflection, a 15% scale with perspective and a 0.15 shear with perspective
+  on every qualified version; a nearby seed converges on the same pairs.
+* **Nonconvergence and wrong results.** Constant images, noise, wrong-direction or insufficiently
+  close seeds and singular seeds raise. A finite result can still be wrong (for example a wrong seed
+  with one iteration, or an extreme anisotropic seed); no correlation threshold hides it.
+* **Result value.** Plain value, no native ownership; Regions are accepted (the seed domain uses the
+  Region's own size); inputs and the initial record are never modified. It is an image-alignment
+  matrix, not a camera pose or navigation estimate.
+
+**Safety gate.** `SAFETY_GATE_ESTABLISHED` was recorded before the API commit. Every native path that
+consumes an unconstrained warp was reviewed on 4.1.0, 4.6.0, 4.10.0 and 5.0.0 and exercised against
+OpenCV builds instrumented with ASan/UBSan and `float-cast-overflow`, with no reports. The gate relies
+on IEC 60559 floating point for division by zero and for out-of-range double-to-float conversion.
+
+Production ABI: 23 exports. The new export is `opencv_video_estimate_ecc_homography_seeded` (nine
+`float` seed coefficients by value, 48-byte result reused). AUnit has 186 registrations. See the
+[task note](docs/tasks/017-seeded-ecc-homography.md), the
+[source contract](docs/ecc-homography-seeded-source-contract.md) and the
+[qualification](docs/task017-qualification.md). The new code has not yet run on Windows.
+
 ### ECC eight-parameter homography alignment (Task 016)
 
 ```ada
@@ -41,7 +94,8 @@ This calls native `cv::findTransformECC` with these settings:
   (all versions), and low-gradient or ill-conditioned pairs on 4.6.0 and 4.10.0. No correlation threshold
   hides these cases, and a finite result does not guarantee correct registration.
 * **Small basin.** From identity, convergence covers about 2% scale or shear, 2 degrees of rotation,
-  a few pixels of translation and perspective terms of about `2e-4` at 128 px.
+  a few pixels of translation and perspective terms of about `2e-4` at 128 px. Use the Task 017
+  seeded overload for larger motion with a prediction.
 * **Homography versus affine.** On five measured perspective fixtures, the homography interior
   residual (0.35-0.36 gray levels) was 2.2-4.2 times lower than affine ECC's (0.77-1.49), on 4.10.0.
   Homography does not always outperform affine; on pure affine motion the two are equal.
@@ -716,8 +770,8 @@ The first slice does not bind:
 
 - forward/backward prebuilt-pyramid composition;
 - DIS dense optical flow and Farneback options beyond the Task 009/010 subset (Gaussian, UMat);
-- seeded ECC homography, masked and multiscale registration (translation, Euclidean, seeded
-  Euclidean, identity-initialized and seeded affine, and identity-initialized homography ECC are
+- masked and multiscale ECC registration (translation, Euclidean, seeded Euclidean,
+  identity-initialized and seeded affine, and identity-initialized and seeded homography ECC are
   bound);
 - KalmanFilter;
 - CamShift / meanShift;
