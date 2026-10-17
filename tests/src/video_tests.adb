@@ -8215,6 +8215,18 @@ package body Video_Tests is
       begin
          Assert (Hs_Outcome_Of (Pair, (Warp => W, Correlation => 0.0)) /= Preflight_Rejected, Message);
       end Admitted;
+
+      --  Rejected, and for the documented reason (the diagnostic names the violated rule).
+      procedure Rejected_For (W : ECC_Homography_Warp; Fragment, Message : String) is
+         Unused : ECC_Homography_Result;
+      begin
+         Unused := Estimate_ECC_Homography (Pair.Template, Pair.Moving, (others => <>), (Warp => W, Correlation => 0.0));
+         Assert (False, Message & ": accepted");
+      exception
+         when Error : OpenCV.OpenCV_Error =>
+            Assert (Ada.Strings.Fixed.Index (Ada.Exceptions.Exception_Message (Error), Fragment) > 0,
+                    Message & ": rejected for the wrong reason: " & Ada.Exceptions.Exception_Message (Error));
+      end Rejected_For;
    begin
       for Bad of Nonfinite loop
          Rejected ((Base with delta H00 => Bad), "nonfinite H00");
@@ -8226,20 +8238,23 @@ package body Video_Tests is
          Rejected ((Base with delta H20 => Bad), "nonfinite H20");
          Rejected ((Base with delta H21 => Bad), "nonfinite H21");
          Rejected ((Base with delta H22 => Bad), "nonfinite H22");
+         Rejected_For ((Base with delta H22 => Bad), "finite", "nonfinite H22 diagnostic");
+         Rejected_For ((Base with delta H20 => Bad), "finite", "nonfinite H20 diagnostic");
       end loop;
-      Rejected ((Base with delta H22 => 0.0), "H22 zero");
+      Rejected_For ((Base with delta H22 => 0.0), "H22 must be exactly", "H22 zero");
       Rejected ((Base with delta H22 => -1.0), "H22 negative");
-      Rejected ((Base with delta H22 => 2.0), "H22 two (no normalization)");
+      Rejected_For ((Base with delta H22 => 2.0), "H22 must be exactly", "H22 two (no normalization)");
       Rejected ((Base with delta H22 => OpenCV.Float32_Value'Succ (1.0)), "H22 just above 1");
       Rejected ((Base with delta H22 => OpenCV.Float32_Value'Pred (1.0)), "H22 just below 1");
-      Rejected ((Base with delta H00 => OpenCV.Float32_Value'Succ (Lin)), "H00 just beyond 4");
+      Rejected_For ((Base with delta H00 => OpenCV.Float32_Value'Succ (Lin)), "linear", "H00 just beyond 4");
       Rejected ((Base with delta H01 => -OpenCV.Float32_Value'Succ (Lin)), "H01 just beyond -4");
       Rejected ((Base with delta H10 => 5.0), "H10 beyond 4");
       Rejected ((Base with delta H11 => OpenCV.Float32_Value'Last), "H11 at Float32'Last");
-      Rejected ((Base with delta H02 => OpenCV.Float32_Value'Succ (Trn)), "H02 just beyond 2**20");
+      Rejected_For ((Base with delta H02 => OpenCV.Float32_Value'Succ (Trn)), "translations", "H02 just beyond 2**20");
       Rejected ((Base with delta H12 => -OpenCV.Float32_Value'Succ (Trn)), "H12 just beyond -2**20");
       Rejected ((Base with delta H12 => OpenCV.Float32_Value'First), "H12 at Float32'First");
-      Rejected ((Base with delta H20 => OpenCV.Float32_Value'Succ (Edge), H21 => 0.0), "H20 just beyond the edge");
+      Rejected_For ((Base with delta H20 => OpenCV.Float32_Value'Succ (Edge), H21 => 0.0), "Columns-1",
+                    "H20 just beyond the edge");
       Rejected ((Base with delta H20 => 0.0, H21 => -OpenCV.Float32_Value'Succ (Edge)), "H21 just beyond the edge");
       Rejected ((Base with delta H20 => 0.003, H21 => 0.001), "combined denominator deviation");
       Rejected ((Base with delta H20 => -0.0025, H21 => -0.0025), "negative combined denominator deviation");
