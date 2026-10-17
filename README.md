@@ -76,9 +76,10 @@ overload keeps the Task 017 seed domain unchanged.
 * **Ownership.** The mask, both images, all Region parents and `Initial_Transform` are never
   modified. The result is a plain Ada value with no native resource.
 * **Why masking helps, and its limits.** Excluding pixels that do not follow the scene motion removes
-  them from the correlation, the Hessian and the update. On qualified fixtures a misleading
-  occluder moved the unmasked estimate by 2.9-8.4 pixels or made native ECC raise, while the masked
-  estimate stayed within 0.03-0.43 pixels. A mask never guarantees convergence or correctness: it
+  them from the correlation, the Hessian and the update. In the oracle's occlusion fixtures a
+  misleading occluder moved the unmasked estimate by 1.7-5.6 pixels at interior reference points
+  (or made native ECC raise), while the masked estimate stayed within 0.02-0.15 pixels, on all four
+  qualified versions. A mask never guarantees convergence or correctness: it
   reduces the available signal, can remove the texture that constrains the motion, and cannot repair
   a wrong seed. Choosing what to exclude is the caller's policy; the binding does not detect moving
   objects, occlusions or unreliable pixels.
