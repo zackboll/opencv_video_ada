@@ -18,6 +18,8 @@
 # location once per process, so cases must not share a process):
 #   negative conversion-check level-a-euclidean-bigangle
 #   level-a-translation-extreme level-a-euclidean-extreme
+#   level-a-nonfinite-translation level-a-nonfinite-euclidean
+#   level-a-translation-far level-a-euclidean-far
 #   trace-translation trace-euclidean-identity trace-euclidean-seeded
 #   level-c-translation level-c-euclidean-identity level-c-euclidean-seeded
 # Bounded searches are opt-in only (never in the default list):
@@ -38,6 +40,8 @@ prefix=${OPENCV_PREFIX:?set OPENCV_PREFIX to an instrumented OpenCV install}
 core=${OPENCV_CORE_SOURCE:?set OPENCV_CORE_SOURCE to the pinned opencv_core checkout}
 all_cases='negative conversion-check level-a-euclidean-bigangle
 level-a-translation-extreme level-a-euclidean-extreme
+level-a-nonfinite-translation level-a-nonfinite-euclidean
+level-a-translation-far level-a-euclidean-far
 trace-translation trace-euclidean-identity trace-euclidean-seeded
 level-c-translation level-c-euclidean-identity level-c-euclidean-seeded'
 cases=${*:-$all_cases}
@@ -84,9 +88,11 @@ for case_name in $cases; do
     ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
     UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=0:report_error_type=1 \
         "$binary" $(printf '%s' "$case_name" | tr ':' ' ') > "$log" 2>&1 || status=$?
-    # Expected evidence: signed-integer-overflow reported inside OpenCV's imgwarp sources.
-    # Any other UBSan report (in OpenCV, the shims or the probe) is unexpected and fails.
-    expected='/modules/imgproc/src/imgwarp[^ ]*: runtime error: signed integer overflow'
+    # Expected evidence: a runtime error reported inside OpenCV's imgproc warp sources
+    # (4.x legacy imgwarp fixed-point addition, or the 5.0 float-coordinate warp kernels for
+    # the deliberately nonfinite cases). Any report outside those OpenCV sources (in the
+    # shims or the probe) is foreign and fails the runner.
+    expected='/modules/imgproc/src/\(imgwarp\|warp_kernels\|warp_common\)[^ ]*: runtime error:'
     upstream=$(grep -c "$expected" "$log" || true)
     foreign=$(grep 'runtime error:' "$log" | grep -vc "$expected" || true)
     asan=$(grep -c 'ERROR: AddressSanitizer\|ERROR: LeakSanitizer' "$log" || true)

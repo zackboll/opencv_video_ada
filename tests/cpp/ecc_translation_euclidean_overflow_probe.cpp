@@ -18,6 +18,13 @@
 //              Observes the target's cvtsd2si result for boundary/NaN doubles through the
 //              intrinsic, checks the diagnostic's explicit conversion model against it, and
 //              maps the translation overflow window at the widest permitted geometry.
+//   level-a-nonfinite-translation / level-a-nonfinite-euclidean
+//              Level A replay of the NaN warps a nonfinite optimizer update would leave
+//              (reported model-valid=NO: they are not finite model matrices). Records what
+//              the native resampler would do if such an update ever occurred.
+//   level-a-translation-far / level-a-euclidean-far
+//              Negative controls: finite model-valid warps with |t| = 1e6 (inside the 2^20
+//              seed bound, far outside the image). Must show no overflow on any version.
 //   level-a-translation-extreme / level-a-euclidean-extreme
 //              Level A: direct native warpAffine replay of a MODEL-VALID extreme-translation
 //              matrix (translation: identity linear part; Euclidean: a rigid rotation).
@@ -140,13 +147,18 @@ void print_matrix(const char *prefix, const float w[6]) {
 // Classify a 2x3 warp as a model-valid intermediate for each motion model, so Level A
 // cannot be misread as "a general affine matrix overflows". Tolerances are generous
 // Float32 bounds; the matrices below are built exactly as native ECC would store them.
+bool all_finite(const float w[6]) {
+    for (int i = 0; i < 6; ++i)
+        if (!std::isfinite(w[i])) return false;
+    return true;
+}
 bool is_translation_valid(const float w[6]) {
-    return std::fabs(w[0] - 1.0f) <= 1e-5f && std::fabs(w[1]) <= 1e-5f &&
+    return all_finite(w) && std::fabs(w[0] - 1.0f) <= 1e-5f && std::fabs(w[1]) <= 1e-5f &&
            std::fabs(w[3]) <= 1e-5f && std::fabs(w[4] - 1.0f) <= 1e-5f;
 }
 bool is_euclidean_valid(const float w[6]) {
     const double a = w[0], b = w[1], c = w[3], d = w[4];
-    return std::fabs(a - d) <= 1e-5 && std::fabs(b + c) <= 1e-5 &&
+    return all_finite(w) && std::fabs(a - d) <= 1e-5 && std::fabs(b + c) <= 1e-5 &&
            std::fabs(a * a + c * c - 1.0) <= 1e-5;
 }
 
@@ -518,6 +530,27 @@ int main(int argc, char **argv) {
         std::printf("NEGATIVE_CONTROL_OK\n");
     } else if (mode == "conversion-check") {
         return conversion_check();
+    } else if (mode == "level-a-translation-far") {
+        // Finite, model-valid translation far outside the image but representable in the
+        // 5.0 float coordinate and in int32 (|t| = 1e6, inside even the 2^20 seed bound):
+        // the 5.0 scalar tail forms src + srcstep*iy + ix before its bounds test.
+        const float far[6] = {1, 0, 1.0e6f, 0, 1, 1.0e6f};
+        level_a("translation-far", "translation", far, rows, wide);
+    } else if (mode == "level-a-euclidean-far") {
+        float far[6];
+        euclidean_matrix(far, 0.5, -1.0e6f, 1.0e6f);
+        level_a("euclidean-far", "euclidean", far, rows, 97);
+    } else if (mode == "level-a-nonfinite-translation") {
+        // What a NaN translation update would leave: identity linear part, NaN tx/ty.
+        // Not a finite model-valid matrix; it records the native behavior if one occurred.
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const float w[6] = {1, 0, nan, 0, 1, nan};
+        level_a("nonfinite-translation", "translation", w, rows, wide);
+    } else if (mode == "level-a-nonfinite-euclidean") {
+        // What a NaN angle update would leave: cos/sin(NaN) make every coefficient NaN.
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const float w[6] = {nan, nan, nan, nan, nan, nan};
+        level_a("nonfinite-euclidean", "euclidean", w, rows, 97);
     } else if (mode == "level-a-translation-extreme") {
         level_a("translation-extreme", "translation", translation_extreme, rows, wide);
     } else if (mode == "level-a-euclidean-extreme") {
