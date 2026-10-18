@@ -152,7 +152,14 @@ The 4.1.0, 4.6.0 and 5.0.0 rows use the uninstrumented Release installs
 * a check that no build file, workflow or regression script references the research probe.
 
 All four rows ran on clean clones of `d7b2ab9a1010463403aba876245ad7eaa86877d7`, the
-findings and documentation commit. Later commits add only this qualification file.
+findings and documentation commit. Two commits followed it:
+
+* `4ccdf2b` added the nonfinite and far replays to the research probe and runner;
+* `629e040` added this file and corrected documentation.
+
+Neither commit touches `src/`, `cpp/`, a GPR, a workflow or a regression script, and none of
+those references the probe. The 4.10.0 row was nevertheless rerun on a clean clone of the
+final content head `629e040a4228c6d500c5ec971eb276b77a6d2cf9`, with the identical result shown in the table below.
 
 | OpenCV | Library loaded by `run_tests` (`ldd`) | Checker / config / `sh -n` / diff | Builds D/V/R | `test.sh` | AUnit run/ok/fail/err | Translation / Euclidean / seeded oracle | Affine / seeded oracle | Homography / seeded / masked (native ok/exc) | Sanitizer step | Exports / test symbols | `lk_synthetic`, smokes |
 |---|---|---|---|---|---|---|---|---|---|---|---|
