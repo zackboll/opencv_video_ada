@@ -119,21 +119,38 @@ times per iteration. The sanitizer runs instrumented only the binding, not OpenC
 [Task 021](tasks/021-translation-euclidean-safety-audit.md) audited that path at operand
 level:
 
-* **OpenCV 4.x signed-overflow site.** The 4.x `WarpAffineInvoker` adds `X0 + adelta[x]` in
-  signed `int`. For a translation warp `[1 0 tx; 0 1 ty]` that addition overflows when `tx`
-  lies in a narrow band just below `2^21` (about `2.0808e6 .. 2.097e6` at 16383 columns).
-* **Confirmed for a model-valid matrix.** UBSan confirmed the overflow on instrumented 4.1.0,
-  4.6.0 and 4.10.0 by direct replay of `[1 0 2090000; 0 1 0]` (Level A).
+* **OpenCV 4.x signed-overflow sites.** The 4.x `WarpAffineInvoker` performs two signed
+  `int` additions on the coordinate:
+  * **Row-base rounding (Task 021-R1).** It builds each row base as
+    `X0/Y0 = cvRound(...) + round_delta`.
+  * **Per-column delta.** It then adds `X0 + adelta[x]` / `Y0 + bdelta[x]`.
+
+  Translation warps `[1 0 tx; 0 1 ty]` overflow in two ways:
+  * **Per-column X.** `X0 + adelta[x]` overflows when `tx` lies in a narrow band just below
+    `2^21` (about `2.0808e6 .. 2.097e6` at 16383 columns).
+  * **Row base, either axis, `INTER_NEAREST` only.** `round_delta = 512`. The row-base
+    addition overflows when `tx`, or `y + ty` for some row `y`, lies in
+    `[2097151.5, 2097151.875]`. This occurs at any image width.
+
+  `bdelta[x] = 0` does **not** make Y safe: `Y0` itself can overflow.
+* **Confirmed for model-valid matrices** by direct replay (Level A). UBSan confirmed each
+  overflow on instrumented 4.1.0, 4.6.0 and 4.10.0:
+  * Per-column: `[1 0 2090000; 0 1 0]`.
+  * Row base (Task 021-R1): `[1 0 0; 0 1 2097151.875]` at 64x97. The overflow is
+    `512 + 2147483520` at `imgwarp.cpp:2214:84` / `2200:84` / `2300:84` for Y, with the X
+    twin at `2213:84` / `2199:84` / `2299:84`.
 * **Not reproduced through ECC.** No native ECC run (Level B) or call to
   `opencv_video_estimate_ecc_translation` (Level C) reached it. The largest accumulated
   `|t|` over 660 bounded translation trials (four versions) was 3274.
 * **OpenCV 5.0.0.** It routes ECC's types to float-coordinate kernels and does not execute
-  this addition.
+  either addition. gdb confirmed this in both dispatch modes, including for the row-base
+  cases.
 
 **Disposition: `SAFETY_GATE_NOT_ESTABLISHED`.** Nothing bounds the optimizer's accumulated
-translation, so the band is not excluded. It is also not shown reachable, so the API is not
-declared unsafe. The phrase "the arithmetic limit is far higher" above applies to ECC's own
-`2*ws` / `countNonZero` arithmetic only. It does not apply to `warpAffine` coordinates.
+translation, on either axis, so the bands are not excluded. They are also not shown
+reachable, so the API is not declared unsafe. The phrase "the arithmetic limit is far
+higher" above applies to ECC's own `2*ws` / `countNonZero` arithmetic only. It does not
+apply to `warpAffine` coordinates.
 
 ## Windows MSYS2 provisioning correction
 

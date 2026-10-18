@@ -176,16 +176,33 @@ is accurate for what was run: the binding was instrumented and OpenCV was not.
 * **Model-valid overflow confirmed.** A rigid matrix (θ = 0.5 rad, `ty = 2090000`)
   overflows `Y0 + bdelta[x]` in signed `int`. UBSan reported this on instrumented 4.1.0,
   4.6.0 and 4.10.0 (Level A).
+* **Row-base overflow (Task 021-R1).** Building the row base,
+  `Y0 = cvRound((c*y + ty)*1024) + round_delta`, is itself a signed `int` addition. It can
+  overflow before any column delta is applied. The rotated row term is not a multiple of 128,
+  so for Euclidean this can happen even in `INTER_LINEAR` mode (`round_delta = 16`).
+  * Example: θ = -0.5, `t = (0, 2097109.875)` at 64x97. At row 48 the row base converts to
+    `2147483647`. The first UB is `2147483647 + 16`, reported at
+    `imgwarp.cpp:2214:84` / `2200:84` / `2300:84` on 4.1.0 / 4.6.0 / 4.10.0.
+* **Conversion followed by overflow (Task 021-R1).** Above `2^21`, x86 `cvRound` returns
+  `INT_MIN`. Translation's non-negative deltas leave that in range. A rotation with a
+  negative column coefficient on the same axis, however, overflows
+  `INT_MIN + round_delta + delta` below `INT32_MIN`.
+  * Example: θ = -0.5, `ty = 2097200`. UBSan reported `-47129 + -2147483632` at
+    `imgwarp.cpp:2286:41` / `2270:41` / `2374:41`.
+  * The model flagged every tested `ty` up to `1e9`. This route therefore has **no upper
+    bound in `|t|`**.
 * **Rotation alone cannot overflow.** A ~89-degree rotation with small translation
   produced no overflow.
 * **Not reproduced through ECC.** No native ECC run (Level B) or call to
   `opencv_video_estimate_ecc_euclidean` (Level C) reached the overflow. The largest
   accumulated `|t|` over 600 bounded identity trials (four versions) was 5522, against a
   window near `2.08e6`.
-* **OpenCV 5.0.0.** It does not execute this addition for ECC's types.
+* **OpenCV 5.0.0.** It does not execute these additions for ECC's types. gdb confirmed this
+  for the row-base cases as well.
 
 **Disposition: `SAFETY_GATE_NOT_ESTABLISHED`.** No argument bounds the accumulated
-translation, and no execution was shown to reach the window.
+translation, and no execution was shown to reach any window. Task 021-R1 adds Level A
+evidence only; it does not change this disposition.
 
 ## Not claimed
 

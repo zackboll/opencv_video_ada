@@ -57,6 +57,13 @@ shown to reach undefined behavior. All three APIs stay available and unchanged.
   4.6.0 and 4.10.0 by direct native replay. Bounded rotation coefficients do not prevent
   them: the overflowing operand carries the accumulated translation, and the overflow band
   is a translation just below 2^21 pixels.
+* **Row-base rounding (Task 021-R1 correction).** OpenCV builds each row's fixed-point base
+  as `cvRound(...) + round_delta` in signed `int`, and that addition can itself overflow,
+  before any per-column delta is applied. A zero Y column delta does **not** make the Y
+  coordinate safe. It was confirmed by direct replay at an ordinary 64x97 image for the
+  model-valid translation `[1 0 0; 0 1 2097151.875]` (nearest-neighbour mask warp; 4.1.0,
+  4.6.0, 4.10.0). For Euclidean, a rotation also exposes a route that has no upper bound in
+  translation beyond 2^21. The dispositions are unchanged.
 * **Not reproduced through ECC.** Neither native ECC (iteration-capped traces) nor the
   real C exports reached that band on any version (`NOT_REPRODUCED`, not `SAFE`). The
   largest accumulated translation over 1,980 bounded, deterministic trials was about

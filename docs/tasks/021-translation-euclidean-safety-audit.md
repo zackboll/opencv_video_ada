@@ -24,7 +24,16 @@ None reached `KNOWN_NATIVE_UB_UNMITIGATED`: unlike affine, **no model-valid ECC 
 models, on any of the four versions. None reached `SAFETY_GATE_ESTABLISHED` either: the
 optimizer's accumulated translation is not bounded by any source-level argument across the
 published envelope, and a model-valid extreme matrix **does** overflow the same native
-`warpAffine` addition (Level A). `NOT_REPRODUCED` is not proof of safety.
+`warpAffine` fixed-point path (Level A). `NOT_REPRODUCED` is not proof of safety.
+
+**Task 021-R1 (2026-10-18).** The first audit missed an earlier signed addition: the row-base
+rounding `X0/Y0 = cvRound(...) + round_delta`. It wrongly concluded that only the X addition
+can overflow for translation. The row-base overflow is now reproduced natively on 4.1.0,
+4.6.0 and 4.10.0, at an ordinary 64x97 image, for Y and X, using the model-valid translation
+`[1 0 0; 0 1 2097151.875]` and its X twin (`INTER_NEAREST`, `512 + 2147483520`). It is also
+reproduced for a Euclidean rotation in linear mode. It is identified as the **first**
+undefined operation there (section 3). It is Level A evidence only, and it does not change
+any disposition.
 
 Hosted CI status is in [the qualification report](../task021-qualification.md).
 
@@ -71,7 +80,15 @@ mapPtr[5] += updatePtr[1];   // ty
 Entries 0, 1, 3 and 4 are never written, so the linear part stays the private identity on
 **every** iteration. The shim re-checks this after the call (`opencv_video_shim.cpp:713`).
 For the fixed-point math (section 3) this means `adelta[x] = x*1024` and `bdelta[x] = 0` for
-every iterate. Only `tx` and `ty` change, and only the X addition can overflow.
+every iterate. Only `tx` and `ty` change.
+
+> **Correction (Task 021-R1, 2026-10-18).** The original text continued "and only the X
+> addition can overflow". **That was wrong.** `bdelta[x] = 0` makes the per-column Y
+> addition `Y0 + bdelta[x]` trivially safe, but it says nothing about the **row base**
+> `Y0 = cvRound((y + ty)*1024) + round_delta`, which is itself a signed `int` addition. For
+> `ty` just below `2^21` that addition overflows before any column delta is applied. It was
+> reproduced natively on 4.1.0, 4.6.0 and 4.10.0 for both X0 and Y0 (section 3, "Row-base
+> rounding overflow").
 
 ### Euclidean update model
 
@@ -138,12 +155,38 @@ Legacy 4.x `warpAffine`, with `AB_SCALE = 1024`. Each destination pixel `(x, y)`
 `WARP_INVERSE_MAP` 2x3 matrix `M`:
 
 ```text
-adelta[x] = saturate_cast<int>(M[0]*x*1024)                    // per column (hal::warpAffine)
+adelta[x] = saturate_cast<int>(M[0]*x*1024)                    // (1) per column (hal::warpAffine)
 bdelta[x] = saturate_cast<int>(M[3]*x*1024)
-X0 = saturate_cast<int>((M[1]*y + M[2])*1024) + round_delta    // per row
+X0 = saturate_cast<int>((M[1]*y + M[2])*1024) + round_delta    // (1) conversion, (2) signed int add, per row
 Y0 = saturate_cast<int>((M[4]*y + M[5])*1024) + round_delta
-X  = X0 + adelta[x];   Y = Y0 + bdelta[x];                     // signed int32 addition: the UB site
+X  = X0 + adelta[x];   Y = Y0 + bdelta[x];                     // (3) signed int add, per pixel
 ```
+
+There are **three distinct conditions** (Task 021-R1). The original Task 021 analysis
+treated only (3):
+
+1. **Out-of-range conversion.** `saturate_cast<int>(double)` is `cvRound`. On x86-64 it
+   returns `INT_MIN` for NaN or for any value that rounds outside int32. This is a defined
+   intrinsic, so it is not UB, but the value is wrong.
+2. **Row-base rounding overflow.** `cvRound(...) + round_delta` is a signed `int` addition
+   that runs once per row, **before** any per-column delta. Source lines (4.x
+   `WarpAffineInvoker::operator()`):
+
+   | Version | `X0` | `Y0` | `round_delta` |
+   |---|---|---|---|
+   | 4.1.0 | `imgwarp.cpp:2213` | `:2214` | `:2185` |
+   | 4.6.0 | `imgwarp.cpp:2199` | `:2200` | `:2174` |
+   | 4.10.0 | `imgwarp.cpp:2299` | `:2300` | `:2271` |
+   | 5.0.0 | `imgwarp.cpp:2018` | `:2019` | `:1999` (not executed for ECC's types; section 2) |
+
+   `round_delta = interpolation == INTER_NEAREST ? AB_SCALE/2 : AB_SCALE/INTER_TAB_SIZE/2`,
+   which is **512 for nearest** and 16 for linear (`AB_SCALE = 1024`, `INTER_TAB_SIZE = 32`).
+3. **Per-column coordinate overflow.** `X0 + adelta[x]` / `Y0 + bdelta[x]`, in the
+   blockline SIMD body (which wraps silently) or the scalar tails (visible to UBSan).
+
+Execution order is: column tables, then for each row the X0 conversion and add, then the Y0
+conversion and add, then the per-pixel adds. (2) therefore precedes (3). A row whose base
+overflows must be classified as a row-base overflow, not as a later coordinate addition.
 
 `round_delta` is 16 for linear and 512 for nearest. `saturate_cast<int>(double)` is
 `cvRound`. On x86-64 that is `_mm_cvtsd_si32`, and this was **verified on the test host**,
@@ -156,21 +199,48 @@ its own arithmetic is defined. It never executes the overflowing addition.
 ### Translation (`[1 0 tx; 0 1 ty]`; identity linear part)
 
 `adelta[x] = x*1024`, which is at most `16383*1024 = 16_775_168` and always in range.
-`bdelta[x] = 0`, so `Y = Y0` never overflows. `X` overflows only if both conditions hold:
+`bdelta[x] = 0`, so the **per-column** Y addition `Y0 + bdelta[x] = Y0` cannot overflow.
+**That does not make Y safe** (Task 021-R1 correction): `Y0` is itself built by the signed
+row-base addition (2), and so is `X0`. There are two translation windows.
+
+**(a) Row-base rounding overflow, condition (2), on either axis.** It overflows when
+`cvRound(v*1024)` is in range but `cvRound(v*1024) + round_delta > INT32_MAX`, where `v` is
+`tx` (for X0) or `y + ty` (for Y0, any row `y`). The Float32 spacing at `2^21` is `0.125`, so
+`v*1024` steps by 128:
+
+| `round_delta` | Representable `v` that overflow | Count |
+|---|---|---|
+| 512 (nearest) | `2097151.5`, `.625`, `.75`, `.875` (`cvRound` = `2147483136` .. `2147483520`) | 4 |
+| 16 (linear) | none: the largest in-range value, `2147483520`, plus 16 is `2147483536` | 0 |
+
+So for translation the row-base overflow occurs **only in the nearest-neighbour mask warp**.
+It is **independent of image width** and reproduces at an ordinary 64x97 image. For `Y0`,
+the row index widens the `ty` window to `rows` disjoint 0.5-pixel bands. For 64 rows:
+`ty` from `2097088.5` to `2097151.875`, fractional part `.5` to `.875`
+(`ROWBASE_Y_WINDOW`). `tx` has only the four values above, because `X0` uses `M[1] = 0`.
+
+**(b) Per-column coordinate overflow, condition (3), X only.** This is the original Task 021
+window:
 
 ```text
 X0 + adelta[x] > INT32_MAX   ⇔  tx*1024 > 2^31 - 1 - 16_775_168 - round_delta  ⇒  tx > ~2_080_770
 tx*1024 rounds into int32                                                     ⇒  tx < 2_097_152
 ```
 
-Above about `2.097e6`, `cvRound` returns `INT_MIN`. `X0` then becomes about
-`-2_147_483_632` and the sum stays in range: **no addition overflow, but a wrong
-(sign-inverted) coordinate**. For negative `tx` the in-range minimum `X0 ≈ INT_MIN + 16`
-plus a non-negative `adelta` never overflows. So the **only overflow window is
-`tx ∈ (~2.0808e6, 2.097152e6)` with wide images**. It narrows as the image narrows:
-the window's lower bound is `(2^31 - cols*1024)/1024`. The public binding has **no
-translation seed**, so the identity start is `tx = ty = 0` and the window is reachable only
-by accumulated optimizer updates.
+Its lower bound is `(2^31 - cols*1024)/1024`, so it narrows as the image narrows.
+
+**Above `2^21`.** `cvRound` returns `INT_MIN` (condition (1), a defined intrinsic). `X0`/`Y0`
+then become `INT_MIN + round_delta`, which is in range. A non-negative `adelta`, or the zero
+`bdelta`, keeps the sum in range: **no addition overflow for translation, but a wrong
+(sign-inverted) coordinate**. For negative `t`, the in-range minimum `≈ INT_MIN + 16` plus
+a non-negative delta never overflows.
+
+The full translation hazard is therefore `tx ∈ (~2.0808e6, 2.097152e6)` for X, plus the
+nearest-mode row-base bands for `ty` just below `2^21`. The four nearest-mode `tx` values lie
+inside the X window, but there the **first** undefined operation is the X0 row base, not the
+per-column add (`level-a-rowbase-x`). The public
+binding has **no translation seed**, so the identity start is `tx = ty = 0`, and both windows
+are reachable only by accumulated optimizer updates.
 
 ### Euclidean (`[c -s tx; s c ty]`, `c = cos θ`, `s = sin θ`)
 
@@ -186,6 +256,27 @@ condition again amounts to `|tx|` or `|ty|` lying within roughly `±3.3e4` of
 (for example negative `ty` with negative `s`). **Bounded rotation coefficients bound the
 column delta, not the row base.** The hazard therefore has the same magnitude as for
 translation, and it applies to whichever of X or Y carries the large translation.
+
+**Task 021-R1 additions for Euclidean.** Two routes exist that translation does not have:
+
+* **Row-base overflow in linear mode as well.** The rotated row term `c*y*1024` (or
+  `-s*y*1024`) is not a multiple of 128. A Euclidean row base can therefore land anywhere in
+  `[INT32_MAX - 511, INT32_MAX]`, so even `round_delta = 16` can overflow. Example:
+  `level-a-rowbase-euclidean`, θ = -0.5 rad, `t = (0, 2097109.875)`, 64x97, with
+  `is_euclidean_valid` YES. At row 48, `cvRound((c*48 + ty)*1024) = 2147483647`. The first UB
+  is then `Y0 = 2147483647 + 16` (linear) and `+ 512` (nearest), with no column delta
+  involved.
+* **Conversion followed by overflow, with no upper bound.** Above `2^21` the row base
+  converts to the `INT_MIN` sentinel, condition (1). Translation's deltas are non-negative,
+  so that is harmless there. A rotation with `s < 0` gives `bdelta[x] < 0`, and
+  `INT_MIN + round_delta + bdelta[x]` overflows below `INT32_MIN`. Example:
+  `level-a-conversion-euclidean`, θ = -0.5, `ty = 2097200`. Its first UB is
+  `Y0 + bdelta[1] = -2147483632 + -491`. In the model (`EUCLIDEAN_WINDOW`, 64x97) every
+  tested `ty` from `2097200` to `1e9` overflows. The Euclidean hazard is therefore **not**
+  confined to a band below `2^21`. It extends to every `|ty|` beyond `2^21` while `s < 0`,
+  and to every `|tx|` beyond `2^21` while `c < 0`: the column coefficient on that axis must
+  be negative, so the delta pushes the sentinel below `INT32_MIN`. The seed bound `2^20`
+  still lies below all of it.
 
 **Seeded Euclidean.** The accepted seed `|tx|, |ty| <= 2^20 = 1_048_576` is about
 `1.03e6` below the lower bound of the window, so a seed alone produces a defined
@@ -229,9 +320,87 @@ the model, which visits pixels in raster order; both appear in the logs. With
 replay gave **zero** reports in both dispatch modes, because the float kernels run instead
 (the nonfinite replays are in section 5).
 
-These are **addition** overflows, not out-of-range conversions. The row-base doubles
-(`2.14e9`) are representable and `cvRound` converts them exactly. No float-to-int
-conversion is out of range in any confirmed report.
+These two cases are **per-column addition** overflows, condition (3). Their row-base
+doubles (`2.14e9`) are representable, `cvRound` converts them exactly, and the row-base
+additions (`2_140_160_000 + 16/512`) are in range. In these two cases no float-to-int
+conversion is out of range. The row-base and conversion-then-add cases below are different.
+
+### Row-base rounding overflow (Task 021-R1; Level A, model-valid matrices)
+
+Geometry is **64x97** (cols x rows: 97x64), an ordinary ECC size. The calls are
+`cv::warpAffine` with `CV_32FC1` + `INTER_LINEAR | WARP_INVERSE_MAP`, then `CV_8UC1` +
+`INTER_NEAREST | WARP_INVERSE_MAP`. These are the same call shapes native ECC uses.
+
+**Translation Y `[1 0 0; 0 1 2097151.875]`** (`level-a-rowbase-y`; `is_translation_valid`
+YES). `2097151.875` is exact in Float32 (`0x49FFFFFF`). Row 0:
+
+```text
+Y before conversion = (1*0 + 2097151.875)*1024 = 2147483520.0
+converted (cvRound) = 2147483520            (in int32: no condition (1))
+round_delta         = 512                   (INTER_NEAREST)
+int64 sum           = 2147484032  >  INT32_MAX = 2147483647   → condition (2), first UB
+```
+
+`bdelta[x] = 0` is irrelevant: the overflow happens while building `Y0`, before any
+`Y0 + bdelta[x]`. Linear mode (`round_delta = 16`) gives `2147483536`, which is in range. At
+row 1 the conversion goes out of range and yields the `INT_MIN` sentinel, which is harmless
+for translation. The model's `FIRST_UB` is `ROWBASE axis=Y row=0`.
+
+**Translation X `[1 0 2097151.875; 0 1 0]`** (`level-a-rowbase-x`). The X0 row base gives the
+same `2147483520 + 512` in nearest mode, which is the first UB (`FIRST_UB=ROWBASE axis=X
+row=0`). In linear mode the row base is `2147483536`, in range, and the first UB is the
+per-column `X0 + adelta[1] = 2147483536 + 1024`.
+
+**Euclidean θ = -0.5, `t = (0, 2097109.875)`** (`level-a-rowbase-euclidean`;
+`is_euclidean_valid` YES). At row 48 the row base converts to `2147483647`. The first UB is
+`2147483647 + 16` in linear mode and `+ 512` in nearest mode.
+
+| Case | 4.1.0 | 4.6.0 | 4.10.0 | Reported operands |
+|---|---|---|---|---|
+| rowbase-y, nearest, Y0 | `imgwarp.cpp:2214:84` | `2200:84` | `2300:84` | `512 + 2147483520` |
+| rowbase-x, nearest, X0 | `imgwarp.cpp:2213:84` | `2199:84` | `2299:84` | `512 + 2147483520` |
+| rowbase-x, linear, per-column X (scalar tail) | `imgwarp.cpp:2285:41` | `2269:41` | `2373:41` | `98304 + 2147483536` |
+| rowbase-euclidean, linear, Y0 | `imgwarp.cpp:2214:84` | `2200:84` | `2300:84` | `16 + 2147483647` |
+
+Column `:84` on the `X0`/`Y0` lines is the `+ round_delta` operator. The diagnostic itself
+is distinct from the per-column `:41`/`:45`/`sse4_1:204-205` sites. With
+`setUseOptimized(false)` the same row-base lines fire, because they sit in the generic
+`WarpAffineInvoker` row loop and not in a SIMD kernel. The only difference is that the nearest
+per-column report moves from `sse4_1:205:21` to the generic tail (`imgwarp.cpp:2245:45`,
+`2230:45`, `2330:45`). UBSan reports each source location once
+per process. In `rowbase-euclidean` the nearest call therefore reaches the already-reported
+`Y0` line silently, and its remaining reports are later per-column sites. The int64 model
+confirms that nearest's first UB is also the row base. The 98304 operand is the
+SIMD-to-tail boundary column, `96*1024`; the model's raster-first pixel is column 1.
+
+**Conversion followed by overflow, Euclidean θ = -0.5, `ty = 2097200`**
+(`level-a-conversion-euclidean`; model-valid). Every Y row base is out of range, so
+condition (1) gives `INT_MIN`. The row-base add gives `INT_MIN + 16`, which is in range.
+Then `Y0 + bdelta[x]` with `bdelta[x] = round(-0.479*x*1024) < 0` overflows. The first UB is
+`-2147483632 + -491` (linear, column 1). UBSan reports: 4.1.0 `imgwarp.cpp:2286:41`,
+4.6.0 `2270:41` and 4.10.0 `2374:41`, all `-47129 + -2147483632`; nearest gives
+`imgwarp.sse4_1.cpp:205:21`, `-47129 + -2147483136`.
+
+**Negative control** (`level-a-rowbase-control`, `t = 2097000` on each axis, 64x97). The
+worst Y row base is `(63 + 2097000)*1024 + 512 = 2147393024`. The worst X sum is
+`2147328000 + 512 + 96*1024 = 2147426816`. Both are in range: the model reports 0, and there
+are 0 UBSan reports on every version, in both dispatch modes. The exact row-base boundary
+(`2097151.375` safe, `2097151.5` unsafe, nearest, row 0) is in `ROWBASE_WINDOW` and
+`ROWBASE_Y_WINDOW`. It is not used as a native control, because at 64x97 the Y rows and X
+columns push a boundary value over by other routes.
+
+**5.0.0.** All four cases gave **0** reports. gdb on each case, in default and
+`setUseOptimized(false)` modes, hit only `cv::opt_AVX2::` (default) or
+`cv::cpu_baseline::` (scalar) `warpAffineLinearInvoker_32FC1` and
+`warpAffineNearestInvoker_8UC1`, never `cv::WarpAffineInvoker::operator()`. In 5.0.0
+`hal::warpAffine` (`imgwarp.cpp:2238-2361`; dispatch at `:2251` for nearest `CV_8UC1` and
+`:2329` for linear `CV_32FC1`), `CV_CPU_DISPATCH` chains end in
+`CV_CPU_CALL_BASELINE(fn, args) return (cpu_baseline::fn args)` (`cv_cpu_helper.h:654`),
+with `if (CV_CPU_HAS_SUPPORT_AVX2) return (opt_AVX2::fn args)` before it. So every path
+returns, and the `break` after each case is unreachable. The legacy `WarpAffineInvoker`
+(with the `X0`/`Y0` lines at `imgwarp.cpp:2018-2019`, constructed at `:2357-2360`) is
+therefore not reached for these types. The 5.0 row-base lines exist but are not executed
+by ECC's resampling.
 
 
 The window bounds were checked with the model (`conversion-check`, 16383x64,
@@ -248,7 +417,22 @@ identity-linear). Overflowing pixels per linear/nearest mode:
 | 2097152.5 (`cvRound` → `INT_MIN`) | 0/0 |
 | 3000000 | 0/0 |
 
-This matches the derived window `(~2080770, 2097152)` exactly.
+This matches the derived per-column X window `(~2080770, 2097152)` exactly. The counts are
+pixels at which a signed `int` addition overflows. A pixel whose only issue is an
+out-of-range conversion is not counted. Task 021-R1 kept this metric. The original model
+already detected every row-base overflow numerically, because the column-0 pixel of an
+overflowing row was out of range in its int64 sum. Its defect was the label: it reported
+every such overflow as `X0 + adelta` / `Y0 + bdelta`, and the documentation drew the wrong
+conclusion ("only X"). Each search and trace verdict is per matrix and is unchanged, so the
+existing campaign results stand.
+
+Row-base windows (`conversion-check`, model only):
+
+| Probe | Result |
+|---|---|
+| `ROWBASE_WINDOW` (one row, Float32 `t` in `[2097140, 2097153)`) | nearest: 4 values, `2097151.5`..`2097151.875`; linear: 0 |
+| `ROWBASE_Y_WINDOW` (64x97, nearest/linear) | `ty = 2097088.375`: 0/0 · `2097088.5`: 0/97 · `2097100.375`: 0/0 · `2097100.5`: 0/97 · `2097100.875`: 0/97 · `2097101.0`: 0/0 · `2097151.375`: 0/0 · `2097151.5`: 0/97 (linear/nearest) |
+| `EUCLIDEAN_WINDOW` (θ = -0.5, 64x97, linear/nearest) | `ty = 2^20`, `2.0e6`, `2097000`: 0/0 · `2097109.875`: 1537/1522 · `2097151.875`: 6048/6082 · `2097200`, `3e6`, `1e9`: 6144/6080 |
 
 ## 4. Reproduction harness
 
@@ -270,7 +454,7 @@ references it:
 ```sh
 OPENCV_PREFIX=$HOME/.cache/video-task017/install-4.10.0-san \
 OPENCV_CORE_SOURCE=$PWD/alire/cache/pins/opencv_core_4da9d35e \
-  sh scripts/research_ecc_translation_euclidean_overflow.sh           # all 15 default cases
+  sh scripts/research_ecc_translation_euclidean_overflow.sh           # all 20 default cases (15 + 5 from Task 021-R1)
 sh scripts/research_ecc_translation_euclidean_overflow.sh search-euclidean-seeded:0:180
 ```
 
@@ -298,8 +482,8 @@ iterate (`MODEL_INVARIANT_VIOLATED`). None was ever printed.
 
 | API | Level A | Level B | Level C |
 |---|---|---|---|
-| **Translation** | **Demonstrated** on 4.1.0, 4.6.0 and 4.10.0: model-valid `[1 0 2090000; 0 1 0]` overflows X (operands in section 3). 5.0.0: not executed | `NOT_REPRODUCED`. Trace (97x64, (+2,+1)): 8 distinct iterates on every version, then a repeated warp ends it; max `\|t\|` 2.14. Searches: max `\|t\|` **3273.9** (trial 73) | `NOT_REPRODUCED`. Status 0, displacement (2.020, 1.027); 5.0.0 gives (2.012, 1.013). 0 UBSan reports on every version |
-| **Euclidean identity** | **Demonstrated** on 4.x: model-valid rigid θ=0.5, `ty=2090000` overflows Y. The θ≈89° control has no overflow | `NOT_REPRODUCED`. Trace (97x64, 6°, (2,1)): 17 (4.1.0), 87 (4.6.0/4.10.0), 10 (5.0.0) distinct iterates; max `\|t\|` 2.65. Searches: max `\|t\|` **5522.0** (4.10.0 trial 208) | `NOT_REPRODUCED`. Status 0, angle 0.10475, displacement (1.996, 1.016). 0 reports |
+| **Translation** | **Demonstrated** on 4.1.0, 4.6.0 and 4.10.0: model-valid `[1 0 2090000; 0 1 0]` overflows the per-column X add (16383x64), and (Task 021-R1) `[1 0 0; 0 1 2097151.875]` / `[1 0 2097151.875; 0 1 0]` overflow the **Y0/X0 row base** at 64x97 (operands in section 3). 5.0.0: not executed | `NOT_REPRODUCED`. Trace (97x64, (+2,+1)): 8 distinct iterates on every version, then a repeated warp ends it; max `\|t\|` 2.14. Searches: max `\|t\|` **3273.9** (trial 73) | `NOT_REPRODUCED`. Status 0, displacement (2.020, 1.027); 5.0.0 gives (2.012, 1.013). 0 UBSan reports on every version |
+| **Euclidean identity** | **Demonstrated** on 4.x: model-valid rigid θ=0.5, `ty=2090000` overflows the per-column Y add; (Task 021-R1) θ=-0.5, `ty=2097109.875` overflows the Y0 row base in **linear** mode too, and θ=-0.5, `ty=2097200` overflows after an out-of-range conversion (64x97). The θ≈89° control has no overflow | `NOT_REPRODUCED`. Trace (97x64, 6°, (2,1)): 17 (4.1.0), 87 (4.6.0/4.10.0), 10 (5.0.0) distinct iterates; max `\|t\|` 2.65. Searches: max `\|t\|` **5522.0** (4.10.0 trial 208) | `NOT_REPRODUCED`. Status 0, angle 0.10475, displacement (1.996, 1.016). 0 reports |
 | **Euclidean seeded** | Same Level A as identity. θ=0.5 lies inside the seeded angle domain, but `ty=2090000` lies **outside** the `2^20` seed domain, so this matrix is reachable only as a later iterate | `NOT_REPRODUCED`. Trace from the in-domain extreme seed `(θ=0.9, tx=2^20, ty=-2^20)`: the first iterate is safe, then the very next call raised `StsNoConv` "NaN encountered" (the image falls entirely outside), so no further matrix reached `warpAffine`. Searches: max `\|t\|` 1048575.6, the seed itself (trial 51) | `NOT_REPRODUCED`. The same seed through `opencv_video_estimate_ecc_euclidean_seeded` returned status 3 (`OPENCV_VIDEO_ERROR_OPENCV`, "NaN encountered") on every version. 0 reports |
 
 **Nonfinite replays (Level A, NOT model-valid: `is_*_valid` = NO).** These record what the
@@ -326,7 +510,10 @@ version, so the harness does not flag every transform:
 * `level-a-translation-far` `[1 0 1e6; 0 1 1e6]` (16383x64) and `level-a-euclidean-far`
   (θ=0.5, t=(-1e6, 1e6), 97x64). Both are finite model-valid warps inside the `2^20` seed
   bound and entirely outside the image, and both are clean on 5.0.0 too;
-* the window checks at `tx = 2^20`, `2.0e6` and `2.0807e6`.
+* the window checks at `tx = 2^20`, `2.0e6` and `2.0807e6`;
+* (Task 021-R1) `level-a-rowbase-control`, `t = 2097000` on X and on Y at 64x97, the
+  row-base negative control, plus the safe neighbours in `ROWBASE_WINDOW` /
+  `ROWBASE_Y_WINDOW` (`2097151.375`, `2097088.375`, `2097101.0`).
 
 **Why the seeded extreme seed cannot walk into the window.** With `|tx|` or `|ty|` near
 `2^20`, every warped sample falls outside the source, so `imageMask` is empty. Then
@@ -426,7 +613,7 @@ establish that every platform path is safe.
 | Translation updates | Accumulated, unbounded | Accumulated, unbounded | Accumulated, unbounded |
 | Per-column `adelta`/`bdelta` | `x*1024`, `0` (bounded) | bounded by `x*1024` | **unbounded**; saturates for large coefficients |
 | Native geometric warp | `warpAffine` | `warpAffine` | `warpAffine` |
-| Overflow trigger on 4.x | `tx` in a band up to ~16,400 px wide just below `2^21` (width = image columns) | `\|tx\|` or `\|ty\|` near `2^21` | large linear coefficients **or** translation |
+| Overflow trigger on 4.x | Per-column: `tx` in a band up to ~16,400 px wide just below `2^21` (width = image columns). Row base (Task 021-R1): `tx` or `y+ty` in `[2097151.5, 2097151.875]`, nearest mode only, any image width | Per-column and row base (both modes) near `2^21`; **plus** conversion-then-add for any `\|t\|` beyond `2^21` with a matching rotation sign | large linear coefficients **or** translation |
 | Seeded public operation | No | Yes (`\|t\| <= 2^20`, `\|θ\| <= 1`) | Yes (`\|A\| <= 4`, `\|t\| <= 2^20`) |
 | Level A, model-valid | Demonstrated | Demonstrated | Demonstrated |
 | Level B, ECC-generated | `NOT_REPRODUCED` | `NOT_REPRODUCED` | **Demonstrated** (iteration 3) |
@@ -435,10 +622,14 @@ establish that every platform path is safe.
 
 **Do bounded linear coefficients prevent unsafe fixed-point coordinates?** No.
 
-* The overflowing operand is the row base `X0`/`Y0`, which carries `tx`/`ty`. Bounded
-  rotation coefficients bound only the column delta added to it.
-* Translation and Euclidean therefore overflow under the same condition: an accumulated
-  translation within about 1% of `2^21`.
+* The large operand is the row base `X0`/`Y0`, which carries `tx`/`ty`. Bounded rotation
+  coefficients bound only the column delta added to it. As Task 021-R1 adds, **building the
+  row base is itself a signed addition that can overflow** (`cvRound(...) + round_delta`).
+  Neither bounded nor zero column deltas protect that step.
+* Translation and Euclidean therefore overflow under the same leading condition: an
+  accumulated translation within about 1% of `2^21`. For Euclidean, a rotation of the
+  matching sign also lets any translation beyond `2^21` overflow, through the `INT_MIN`
+  conversion sentinel (section 3).
 * The constraint does shrink the attack surface. Affine reached overflow through linear
   coefficients of order `1e4` to `1e5` at iteration 3 (Task 020 Matrices A and B and the
   n103 intermediate). Translation and Euclidean cannot use that route: they need a
@@ -457,11 +648,12 @@ CPU architectures.
 `SAFETY_GATE_ESTABLISHED` needs a source-level argument that excludes the unsafe addition
 across a precisely defined domain. None exists for these operations:
 
-* **Translation identity.** Excluding the window would need an upper bound on the
-  accumulated `tx`. Each step is `deltaP = H^-1 * e`, where `H` is the 2x2 gradient Hessian
-  of the warped image. Its conditioning depends on the data and is unbounded: stripes give a
-  singular `y` direction, and nearly constant images give a near-zero Hessian. `lambda_d`
-  has no positive floor, and there is no step cap. A single ill-conditioned step can
+* **Translation identity.** Excluding the windows would need an upper bound on the
+  accumulated `tx` **and** `ty`. Task 021-R1 shows that `ty` alone reaches the Y0 row-base
+  overflow, so bounding only `tx` would not suffice. Each step is `deltaP = H^-1 * e`, where
+  `H` is the 2x2 gradient Hessian of the warped image. Its conditioning depends on the data
+  and is unbounded: stripes give a singular `y` direction, and nearly constant images give
+  a near-zero Hessian. `lambda_d` has no positive floor, and there is no step cap. A single ill-conditioned step can
   therefore move `tx` arbitrarily far. Tasks 011/012 already recorded a "successful"
   4.x result of `(44.3, 89.5)` from a `(6, 4)` shift. The searches reached 3274, but
   nothing bounds the next step.
@@ -497,9 +689,12 @@ No production behavior changed:
 No new *reached* native defect was confirmed for these models, so the stop criterion did not
 trigger and no gate was applied. Translation and Euclidean are covered by the same Task 020
 Option A research patch, `docs/research/task020_imgwarp_guard.py`, a guard on the
-`WarpAffineInvoker` row block. That patch is model-agnostic: it bounds the sum, so it covers
-the translation row-base overflow as well. It was not rebuilt or re-tested for Task 021, and
-it remains an unadopted research artifact that needs a patched OpenCV.
+`WarpAffineInvoker` row block. That patch is model-agnostic. **By source inspection only**
+(Task 021-R1), it is inserted before the `X0` line and tests the double row bases `|xa|`,
+`|ya| <= 2^30`. For a row base near `2^31` it therefore takes the guarded path before the
+`+ round_delta` row-base addition executes, so it would cover the row-base overflow as well
+as the per-column sums. It was not rebuilt or re-tested for Task 021 or 021-R1, and it remains
+an unadopted research artifact that needs a patched OpenCV.
 
 Owner decisions carried forward:
 
@@ -509,8 +704,14 @@ Owner decisions carried forward:
 
 ## 11. Remaining risks and recommended follow-on
 
-* **The native defect is reachable in principle for all three operations on 4.x.** The
-  window is narrow (`|t| ≈ 2.08e6 .. 2.097e6`), but no argument excludes it.
+* **The native defect is reachable in principle for all three operations on 4.x.** For
+  translation the windows are narrow: `tx ≈ 2.08e6 .. 2.097e6` per-column, plus the
+  nearest-mode row-base bands for `tx`/`ty` just below `2^21`. No argument excludes them.
+  For Euclidean, the conversion-then-add route has no upper bound in `|t|` (section 3).
+* **Task 021-R1 correction.** The original analysis missed the row-base addition
+  `cvRound(...) + round_delta`. It is now modelled as a separate condition, reproduced
+  natively at 64x97, and shown to be the first undefined operation where it applies. The
+  dispositions are unchanged, because no new Level B/C evidence was found.
 * `NOT_REPRODUCED` covers 1,980 bounded trials. It shows rarity, not impossibility.
 * The x86 `cvRound` sign inversion above `2^21` gives a wrong but in-range coordinate with no
   UB report. That can still steer the optimizer.

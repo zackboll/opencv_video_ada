@@ -16,8 +16,26 @@
 //              int32-range overflows in the int64 model and zero UBSan reports.
 //   conversion-check
 //              Observes the target's cvtsd2si result for boundary/NaN doubles through the
-//              intrinsic, checks the diagnostic's explicit conversion model against it, and
-//              maps the translation overflow window at the widest permitted geometry.
+//              intrinsic, checks the diagnostic's explicit conversion model against it, maps
+//              the per-column overflow window at the widest permitted geometry, and (Task
+//              021-R1) maps the row-base rounding window and the 64x97 row-base model.
+//   level-a-rowbase-y / level-a-rowbase-x
+//              Level A (Task 021-R1): direct native warpAffine of a model-valid translation
+//              [1 0 0; 0 1 2097151.875] (or the X transpose) at a NORMAL 64x97 CV_8UC1 image
+//              with INTER_NEAREST+WARP_INVERSE_MAP. The FIRST undefined operation is the
+//              signed int addition cvRound(...) + round_delta building Y0 (or X0), before any
+//              per-column delta. bdelta[x]=0 does not make Y0 safe.
+//   level-a-rowbase-euclidean
+//              Level A (Task 021-R1): model-valid Euclidean theta=-0.5, ty=2097109.875 on
+//              64x97. The rotated row term lets the LINEAR (round_delta 16) Y row base
+//              overflow as well; first unsafe op is ROWBASE in both modes.
+//   level-a-conversion-euclidean
+//              Level A (Task 021-R1): model-valid Euclidean theta=-0.5, ty=2097200 on 64x97.
+//              The Y row-base conversion is out of range (INT_MIN sentinel); the row-base add
+//              is in range; the later per-column add with a negative bdelta overflows.
+//   level-a-rowbase-control
+//              Negative control: t = 2097000 on both axes, 64x97 (safe for every row, column
+//              and mode); must show no overflow in the model or natively.
 //   level-a-nonfinite-translation / level-a-nonfinite-euclidean
 //              Level A replay of the NaN warps a nonfinite optimizer update would leave
 //              (reported model-valid=NO: they are not finite model matrices). Records what
@@ -55,6 +73,8 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/video/tracking.hpp>
+
+#include <vector>
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <emmintrin.h>
@@ -105,38 +125,165 @@ int x86_cvround_model(double v) {
     return cv::saturate_cast<int>(v);
 }
 
+// Does int64 v lie outside the signed int32 range?
+inline bool oob_i32(int64_t v) { return v > INT32_MAX || v < INT32_MIN; }
+
 // int64 model of the legacy warpAffine integer path (4.x WarpAffineInvoker; 5.0 legacy
-// blockline). Returns the number of destination pixels whose X0+adelta or Y0+bdelta lies
-// outside int32 for the given rounding delta (16 linear, 512 nearest). The final add is
-// performed in int64, so the DIAGNOSTIC never overflows int32.
-long fixed_point_overflows(const double M[6], int rows, int cols, int round_delta,
-                           const char *label, bool verbose) {
+// blockline). It classifies the THREE distinct undefined operations OpenCV can execute, in
+// the order the native code performs them, and records which one happens FIRST. All
+// potentially overflowing sums are computed in int64, so the diagnostic never overflows
+// int32 itself.
+//
+// Native per row y (imgwarp.cpp, the X0/Y0 lines):
+//     int X0 = saturate_cast<int>((M[1]*y + M[2])*AB_SCALE) + round_delta;   // (1) conv, (2) +round_delta
+//     int Y0 = saturate_cast<int>((M[4]*y + M[5])*AB_SCALE) + round_delta;
+// Native per pixel x (blockline/tail):
+//     int X = (X0 + adelta[x]) >> ...; adelta[x]=saturate_cast<int>(M[0]*x*AB_SCALE);  // (1) conv, (3) +delta
+//
+// Conditions:
+//   1. CONVERSION - saturate_cast<int>(double) is cvRound; a double rounding outside int32
+//                   yields the x86 "integer indefinite" INT_MIN (defined intrinsic, wrong
+//                   value), NOT a clamp. Flagged where the mathematical value is out of range.
+//   2. ROWBASE    - the signed int addition `cvRound(...) + round_delta` building X0/Y0, ONCE
+//                   PER ROW, BEFORE any per-column delta is applied.
+//   3. PERCOLUMN  - the later signed int addition `X0 + adelta[x]` / `Y0 + bdelta[x]`.
+// ROWBASE precedes PERCOLUMN in execution, so a row whose base overflows is classified as
+// ROWBASE, never as a later coordinate-addition overflow.
+struct FixedPointReport {
+    long conversion = 0, rowbase = 0, percolumn = 0;
+    long conversion_then_add_overflow = 0;  // subset of conversion: INT_MIN sentinel then overflows an add
+    const char *first_kind = "NONE";   // "CONVERSION" | "ROWBASE" | "PERCOLUMN"
+    char first_axis = '-';
+    int first_row = -1, first_col = -1;
+    int64_t first_a = 0, first_b = 0, first_sum = 0;
+    // FIRST_UB: the first SIGNED-INT ADDITION that overflows, in native execution order
+    // (column tables; then per row: conv X0, add X0, conv Y0, add Y0; then per pixel: add X,
+    // add Y), using the INT_MIN sentinel for an out-of-range conversion exactly as native
+    // code would. An out-of-range conversion is NOT itself UB on x86: saturate_cast<int> is
+    // the defined cvtsd2si intrinsic (wrong value), so the first UB is a later addition.
+    // Ordering caveat: the scan is raster order. Native WarpAffineInvoker walks row blocks
+    // of width bw (128 for the 64-row geometries here); for cols <= bw, as in every 64x97
+    // case, raster order equals native order. For wider images only the KIND is asserted.
+    const char *ub_kind = "NONE";      // "ROWBASE" | "PERCOLUMN"
+    char ub_axis = '-';
+    int ub_row = -1, ub_col = -1;
+    int64_t ub_a = 0, ub_b = 0;
+    // Pixels flagged for any reason (conversion out of range and/or an add overflow).
+    long total() const { return conversion + rowbase + percolumn; }
+    // Pixels where a SIGNED INT ADDITION overflows (row base or per column), including those
+    // whose operand came from an out-of-range conversion. This is the Task 021 metric
+    // (an out-of-range conversion alone is a wrong value, not UB) and is what every
+    // control, window and search compares against.
+    long ub_pixels() const { return rowbase + percolumn + conversion_then_add_overflow; }
+};
+
+void find_first_ub(FixedPointReport &r, const double M[6], int rows, int cols, int round_delta) {
+    constexpr int AB_SCALE = 1024;
+    std::vector<int> adelta(cols), bdelta(cols);
+    for (int x = 0; x < cols; ++x) {
+        adelta[x] = x86_cvround_model(M[0] * x * AB_SCALE);
+        bdelta[x] = x86_cvround_model(M[3] * x * AB_SCALE);
+    }
+    auto hit = [&](const char *kind, char axis, int y, int x, int64_t a, int64_t b) {
+        r.ub_kind = kind; r.ub_axis = axis; r.ub_row = y; r.ub_col = x; r.ub_a = a; r.ub_b = b;
+    };
+    for (int y = 0; y < rows; ++y) {
+        const int cx = x86_cvround_model((M[1] * y + M[2]) * AB_SCALE);
+        if (oob_i32(int64_t(cx) + round_delta)) return hit("ROWBASE", 'X', y, -1, cx, round_delta);
+        const int X0 = cx + round_delta;
+        const int cy = x86_cvround_model((M[4] * y + M[5]) * AB_SCALE);
+        if (oob_i32(int64_t(cy) + round_delta)) return hit("ROWBASE", 'Y', y, -1, cy, round_delta);
+        const int Y0 = cy + round_delta;
+        for (int x = 0; x < cols; ++x) {
+            if (oob_i32(int64_t(X0) + adelta[x])) return hit("PERCOLUMN", 'X', y, x, X0, adelta[x]);
+            if (oob_i32(int64_t(Y0) + bdelta[x])) return hit("PERCOLUMN", 'Y', y, x, Y0, bdelta[x]);
+        }
+    }
+}
+
+FixedPointReport analyze_fixed_point(const double M[6], int rows, int cols, int round_delta) {
     constexpr int AB_SCALE = 1024;  // AB_BITS = max(10, INTER_BITS = 5)
-    long overflows = 0;
+    FixedPointReport r;
+    auto record_first = [&](const char *kind, char axis, int y, int x, int64_t a, int64_t b) {
+        if (r.first_row >= 0) return;
+        r.first_kind = kind; r.first_axis = axis; r.first_row = y; r.first_col = x;
+        r.first_a = a; r.first_b = b; r.first_sum = a + b;
+    };
+    auto conv_oor = [](double v) {
+        return !std::isfinite(v) || oob_i32((int64_t)std::llround(v));
+    };
     for (int y = 0; y < rows; ++y) {
         const double x_pre = (M[1] * y + M[2]) * AB_SCALE;
         const double y_pre = (M[4] * y + M[5]) * AB_SCALE;
-        const int64_t X0 = int64_t(x86_cvround_model(x_pre)) + round_delta;
+        const bool convx_oor = conv_oor(x_pre), convy_oor = conv_oor(y_pre);
+        const int64_t X0 = int64_t(x86_cvround_model(x_pre)) + round_delta;  // native int wraps; model does not
         const int64_t Y0 = int64_t(x86_cvround_model(y_pre)) + round_delta;
+        const bool rowx_ovf = oob_i32(X0), rowy_ovf = oob_i32(Y0);
         for (int x = 0; x < cols; ++x) {
-            const int adelta = x86_cvround_model(M[0] * x * AB_SCALE);
-            const int bdelta = x86_cvround_model(M[3] * x * AB_SCALE);
+            const double a_pre = M[0] * x * AB_SCALE, b_pre = M[3] * x * AB_SCALE;
+            const bool convax_oor = conv_oor(a_pre), convby_oor = conv_oor(b_pre);
+            const int adelta = x86_cvround_model(a_pre), bdelta = x86_cvround_model(b_pre);
             const int64_t X = X0 + adelta, Y = Y0 + bdelta;
-            const bool x_bad = X > INT32_MAX || X < INT32_MIN;
-            const bool y_bad = Y > INT32_MAX || Y < INT32_MIN;
-            if (!x_bad && !y_bad) continue;
-            if (verbose && overflows == 0)
-                std::printf("  %s first overflow (delta %d) row=%d col=%d\n"
-                            "    pre-conversion x=%.17g y=%.17g\n"
-                            "    X0=%lld adelta=%d int64 sum=%lld%s\n"
-                            "    Y0=%lld bdelta=%d int64 sum=%lld%s\n",
-                            label, round_delta, y, x, x_pre, y_pre,
-                            (long long)X0, adelta, (long long)X, x_bad ? " OVERFLOW" : "",
-                            (long long)Y0, bdelta, (long long)Y, y_bad ? " OVERFLOW" : "");
-            ++overflows;
+            const bool colx_ovf = oob_i32(X), coly_ovf = oob_i32(Y);
+            const bool any_conv = convx_oor || convy_oor || convax_oor || convby_oor;
+            const bool any_row = rowx_ovf || rowy_ovf;
+            const bool any_col = colx_ovf || coly_ovf;
+            if (!any_conv && !any_row && !any_col) continue;
+            if (any_conv) {
+                ++r.conversion;
+                // The conversion is a defined intrinsic yielding INT_MIN, but the later
+                // native int additions then use that sentinel; record when they overflow
+                // (e.g. INT_MIN + 16 + negative bdelta in a rotated Euclidean warp).
+                if (any_row || any_col) ++r.conversion_then_add_overflow;
+                if (convx_oor) record_first("CONVERSION", 'X', y, x, (int64_t)std::llround(x_pre), 0);
+                else if (convy_oor) record_first("CONVERSION", 'Y', y, x, (int64_t)std::llround(y_pre), 0);
+                else if (convax_oor) record_first("CONVERSION", 'X', y, x, (int64_t)std::llround(a_pre), 0);
+                else record_first("CONVERSION", 'Y', y, x, (int64_t)std::llround(b_pre), 0);
+            } else if (any_row) {
+                ++r.rowbase;
+                if (rowx_ovf) record_first("ROWBASE", 'X', y, x, int64_t(x86_cvround_model(x_pre)), round_delta);
+                else record_first("ROWBASE", 'Y', y, x, int64_t(x86_cvround_model(y_pre)), round_delta);
+            } else {
+                ++r.percolumn;
+                if (colx_ovf) record_first("PERCOLUMN", 'X', y, x, X0, adelta);
+                else record_first("PERCOLUMN", 'Y', y, x, Y0, bdelta);
+            }
         }
     }
-    return overflows;
+    return r;
+}
+
+// Thin wrapper preserving the Task 021 interface: it returns the number of pixels where a
+// signed int addition overflows (ub_pixels). The original model already DETECTED every
+// row-base overflow, because column 0 has adelta = bdelta = 0, so an overflowing int64
+// X0/Y0 left that pixel's final sum out of range; it only MISLABELLED the overflow as a
+// per-column addition. ub_pixels is a superset of the original count: it adds only pixels
+// whose row base overflowed but whose int64 sum a negative delta brought back into range.
+// For any FINITE matrix the per-matrix verdict (count > 0) is identical, because the
+// column-0 pixel of an overflowing row was already flagged; trace/search verdicts are per
+// matrix. The verbose lines name the first flagged condition (FIRST_UNSAFE) and the first
+// actual UB addition (FIRST_UB).
+long fixed_point_overflows(const double M[6], int rows, int cols, int round_delta,
+                           const char *label, bool verbose) {
+    FixedPointReport r = analyze_fixed_point(M, rows, cols, round_delta);
+    if (verbose && r.total() > 0) {
+        find_first_ub(r, M, rows, cols, round_delta);
+        std::printf("  %s delta=%d FIRST_UNSAFE=%s axis=%c row=%d col=%d operands %lld + %lld "
+                    "int64 sum=%lld%s\n"
+                    "    counts: conversion=%ld (then add overflow=%ld) rowbase=%ld percolumn=%ld\n",
+                    label, round_delta, r.first_kind, r.first_axis, r.first_row, r.first_col,
+                    (long long)r.first_a, (long long)r.first_b, (long long)r.first_sum,
+                    oob_i32(r.first_sum) ? " OVERFLOW" : "", r.conversion,
+                    r.conversion_then_add_overflow, r.rowbase, r.percolumn);
+        if (r.ub_row >= 0)
+            std::printf("    FIRST_UB=%s axis=%c row=%d col=%d int32 operands %lld + %lld "
+                        "int64 sum=%lld\n",
+                        r.ub_kind, r.ub_axis, r.ub_row, r.ub_col, (long long)r.ub_a,
+                        (long long)r.ub_b, (long long)(r.ub_a + r.ub_b));
+        else
+            std::printf("    FIRST_UB=NONE (out-of-range conversions only; no int add overflows)\n");
+    }
+    return r.ub_pixels();
 }
 
 void print_matrix(const char *prefix, const float w[6]) {
@@ -478,6 +625,54 @@ int conversion_check() {
                     fixed_point_overflows(M, 64, 16383, 16, "", false),
                     fixed_point_overflows(M, 64, 16383, 512, "", false));
     }
+    // Row-base window (Task 021-R1): the smallest representable float32 translation whose
+    // cvRound(t*1024) is still in int32 but cvRound(t*1024) + round_delta overflows int32.
+    // The float32 step at 2^21 is 0.125 (scaled step 128), so only nearest (round_delta 512)
+    // has representable t in the window; linear (16) has none. Reported with the per-row
+    // 64x97 int64 model so the FIRST_UNSAFE classification is ROWBASE.
+    const int round_deltas[2] = {512, 16};
+    for (int rd : round_deltas) {
+        int n = 0; double lo = 0, hi = 0;
+        for (float t = 2097140.0f; t < 2097153.0f; t = std::nextafter(t, 3.0e6f)) {
+            const double pre = double(t) * 1024.0;
+            if (!(pre >= -2147483648.5 && pre < 2147483647.5)) continue;
+            if (int64_t(std::llround(pre)) + rd > INT32_MAX) { if (!n) lo = t; hi = t; ++n; }
+        }
+        std::printf("  ROWBASE_WINDOW round_delta=%d count=%d first=%.6f last=%.6f\n", rd, n, lo, hi);
+    }
+    // Euclidean window (Task 021-R1), model only, 64x97, theta = -0.5 (s < 0, so bdelta <= 0):
+    // unlike translation, the window is NOT bounded above 2^21. Beyond it cvRound returns
+    // the INT_MIN sentinel and INT_MIN + round_delta + (negative bdelta) overflows.
+    const float euclid_ty[] = {1048576.0f, 2000000.0f, 2097000.0f, 2097109.875f,
+                               2097151.875f, 2097200.0f, 3.0e6f, 1.0e9f};
+    for (float ty : euclid_ty) {
+        float w[6];
+        euclidean_matrix(w, -0.5, 0.0f, ty);
+        double M[6];
+        for (int i = 0; i < 6; ++i) M[i] = w[i];
+        std::printf("  EUCLIDEAN_WINDOW theta=-0.5 ty=%.9g cols=97 rows=64 linear=%ld nearest=%ld\n",
+                    double(ty), fixed_point_overflows(M, 64, 97, 16, "", false),
+                    fixed_point_overflows(M, 64, 97, 512, "", false));
+    }
+    {
+        const double My[6] = {1, 0, 0, 0, 1, double(2097151.875f)};
+        const double Mx[6] = {1, 0, double(2097151.875f), 0, 1, 0};
+        std::printf("  ROWBASE_MODEL y-translation 64x97 nearest:\n");
+        fixed_point_overflows(My, 64, 97, 512, "    Y", true);
+        std::printf("  ROWBASE_MODEL x-translation 64x97 nearest:\n");
+        fixed_point_overflows(Mx, 64, 97, 512, "    X", true);
+    }
+    // Translation Y row-base window over rows: Y0 = cvRound((y + ty)*1024) + 512 overflows
+    // iff y + ty lies in {2097151.5, .625, .75, .875} for some row y. So ty can sit up to
+    // rows-1 pixels below that set. Exact float32 samples, 64x97, nearest, with neighbours.
+    const float ywin[] = {2097088.375f, 2097088.5f, 2097100.375f, 2097100.5f, 2097100.875f,
+                          2097101.0f, 2097151.375f, 2097151.5f};
+    for (float ty : ywin) {
+        const double M[6] = {1, 0, 0, 0, 1, double(ty)};
+        std::printf("  ROWBASE_Y_WINDOW ty=%.6f rows=64 cols=97 linear=%ld nearest=%ld\n",
+                    double(ty), fixed_point_overflows(M, 64, 97, 16, "", false),
+                    fixed_point_overflows(M, 64, 97, 512, "", false));
+    }
     std::printf("  CONVERSION_SUMMARY mismatches=%d\n", mismatches);
     return mismatches == 0 ? 0 : 1;
 }
@@ -551,6 +746,59 @@ int main(int argc, char **argv) {
         const float nan = std::numeric_limits<float>::quiet_NaN();
         const float w[6] = {nan, nan, nan, nan, nan, nan};
         level_a("nonfinite-euclidean", "euclidean", w, rows, 97);
+    } else if (mode == "level-a-rowbase-y" || mode == "level-a-rowbase-x") {
+        // Task 021-R1: the row-base construction X0/Y0 = cvRound(...) + round_delta is a
+        // signed int addition performed ONCE PER ROW, BEFORE any per-column delta. With a
+        // translation of 2097151.875 (exact in float32), cvRound((M*y + t)*1024) at y=0 is
+        // 2147483520, and +512 (nearest round_delta) overflows int32 at a NORMAL 64x97 image.
+        // bdelta[x]=0 does NOT make Y0 safe; Y0 itself is the unsafe operand. INTER_NEAREST so
+        // round_delta is 512; INTER_LINEAR's 16 overflows too but nearest is the recorded case.
+        const bool yaxis = mode == "level-a-rowbase-y";
+        float w[6] = {1, 0, 0, 0, 1, 0};
+        w[yaxis ? 5 : 2] = 2097151.875f;
+        level_a(yaxis ? "rowbase-y" : "rowbase-x", "translation", w, 64, 97);
+    } else if (mode == "level-a-rowbase-euclidean") {
+        // Task 021-R1: a MODEL-VALID Euclidean warp (theta = -0.5 rad, tx = 0,
+        // ty = 2097109.875, exact in float32) on 64x97. The rotated row term c*y*1024 is not a
+        // multiple of 128, so the Y row base can land in [INT32_MAX-15, INT32_MAX] and the
+        // LINEAR round_delta (16) overflows too, which translation can never do. bdelta[x] =
+        // round(s*x*1024) <= 0 here, so no per-column delta is needed: the first undefined
+        // operation is Y0 = cvRound(...) + round_delta (row 48 linear). UBSan reports a source
+        // location once per process, so the shared X0/Y0 line is reported by the first
+        // (linear) call; the int64 model shows nearest is also ROWBASE.
+        float w[6];
+        euclidean_matrix(w, -0.5, 0.0f, 2097109.875f);
+        level_a("rowbase-euclidean", "euclidean", w, 64, 97);
+    } else if (mode == "level-a-conversion-euclidean") {
+        // Task 021-R1: model-valid Euclidean theta=-0.5, ty=2097200 (exact in float32) on
+        // 64x97. Every Y row base is beyond int32, so cvRound returns the x86 INT_MIN
+        // sentinel (condition 1, a defined intrinsic but a wrong value) and the row-base add
+        // INT_MIN + round_delta is in range. bdelta[x] = round(s*x*1024) < 0 for x >= 1, so
+        // the per-column add Y0 + bdelta then overflows below INT32_MIN. No row base
+        // overflows first, isolating the conversion-then-add route. Translation cannot take
+        // this route because its deltas are never negative.
+        float w[6];
+        euclidean_matrix(w, -0.5, 0.0f, 2097200.0f);
+        level_a("conversion-euclidean", "euclidean", w, 64, 97);
+    } else if (mode == "level-a-rowbase-control") {
+        // Negative control: a large translation (2097000, exact in float32) that stays
+        // safe across the WHOLE 64x97 image on both axes. For the Y axis the worst row is
+        // y=63: (63 + 2097000)*1024 = 2147392512, + 512 = 2147393024 <= INT32_MAX. For the
+        // X axis the worst column is x=96: cvRound(2097000*1024)=2147328000, + 512 +
+        // 96*1024 = 2147426816 <= INT32_MAX. So no conversion, row-base or per-column
+        // overflow occurs. The int64 model must report zero and native must report nothing.
+        // (The exact row-base boundary, 2097151.5, is shown analytically by conversion-check
+        // ROWBASE_WINDOW; it cannot be a clean native control on 64x97 because the Y row
+        // index and the X per-column deltas push a boundary value over.)
+        const float wy[6] = {1, 0, 0, 0, 1, 2097000.0f};
+        const float wx[6] = {1, 0, 2097000.0f, 0, 1, 0};
+        const long ny = level_a("rowbase-control-y", "translation", wy, 64, 97);
+        const long nx = level_a("rowbase-control-x", "translation", wx, 64, 97);
+        if (ny != 0 || nx != 0) {
+            std::printf("NEGATIVE_CONTROL_FAILED rowbase y=%ld x=%ld\n", ny, nx);
+            return 1;
+        }
+        std::printf("NEGATIVE_CONTROL_OK rowbase\n");
     } else if (mode == "level-a-translation-extreme") {
         level_a("translation-extreme", "translation", translation_extreme, rows, wide);
     } else if (mode == "level-a-euclidean-extreme") {

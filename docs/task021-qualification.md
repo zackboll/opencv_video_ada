@@ -133,6 +133,150 @@ sanitizer reports in any search log. Rerunning `search-euclidean-identity:208:1`
 
 Result: **`NOT_REPRODUCED`, not `SAFE`.**
 
+### Task 021-R1 — Row-base rounding overflow (correction; research evidence)
+
+**Scope.** This corrects Part 1. The original arithmetic model computed
+`X0`/`Y0 = cvRound(...) + round_delta` directly in int64. It therefore never classified that
+signed `int` addition as a separate hazard, and the audit wrongly concluded that "only the X
+addition can overflow" for translation. The source was re-read at all four tags:
+
+| Version | `X0` | `Y0` | `round_delta` (`INTER_NEAREST` → `AB_SCALE/2 = 512`, linear → 16) |
+|---|---|---|---|
+| 4.1.0 | `imgwarp.cpp:2213` | `:2214` | `:2185` |
+| 4.6.0 | `imgwarp.cpp:2199` | `:2200` | `:2174` |
+| 4.10.0 | `imgwarp.cpp:2299` | `:2300` | `:2271` |
+| 5.0.0 | `imgwarp.cpp:2018` | `:2019` | `:1999` (legacy invoker; not reached for `CV_32FC1`/`CV_8UC1`) |
+
+**Probe changes (research only).**
+
+* `analyze_fixed_point` sorts every flagged pixel into one of three conditions:
+  1. out-of-range conversion;
+  2. row-base `+ round_delta` overflow;
+  3. per-column `+ delta` overflow.
+* `find_first_ub` replays the native execution order and names the **first undefined
+  addition** (`FIRST_UB`).
+* All sums are int64.
+* The returned count, the number of pixels where an int addition overflows, keeps the
+  Task 021 metric. A bounded search rerun, shown below, confirms this.
+* Five default cases were added: `level-a-rowbase-y`, `level-a-rowbase-x`,
+  `level-a-rowbase-euclidean`, `level-a-conversion-euclidean` and the negative control
+  `level-a-rowbase-control`.
+* `conversion-check` gained `ROWBASE_WINDOW`, `ROWBASE_Y_WINDOW` and `EUCLIDEAN_WINDOW`.
+
+**Default runner, 20 cases per version, final probe:**
+
+| Version | Exit | Cases | `EXPECTED_UPSTREAM_UB_OBSERVED` | `RESEARCH_PROBE_FAILED` | Non-imgproc UBSan / ASan |
+|---|---|---|---|---|---|
+| 4.1.0 | 0 | 20 | 7 | 0 | 0 / 0 |
+| 4.6.0 | 0 | 20 | 7 | 0 | 0 / 0 |
+| 4.10.0 | 0 | 20 | 7 | 0 | 0 / 0 |
+| 5.0.0 | 0 | 20 | 1 (the NaN translation replay, unchanged) | 0 | 0 / 0 |
+
+The 15 original cases gave the same verdicts and report sites as in the table above.
+
+**Candidate.**
+
+* Matrix: the exact Float32 `[1 0 0; 0 1 2097151.875]` (`0x49FFFFFF`).
+* Geometry and call: 64x97 `CV_8UC1`, `INTER_NEAREST | WARP_INVERSE_MAP`.
+* Row 0 arithmetic:
+  * `Y` before conversion = `2147483520.0`;
+  * converted = `2147483520`;
+  * `round_delta` = 512;
+  * int64 sum = `2147484032`, which exceeds `INT32_MAX`.
+* X twin: `[1 0 2097151.875; 0 1 0]`.
+
+| Case (64x97, model-valid) | Model `FIRST_UB` (linear / nearest) | 4.1.0 | 4.6.0 | 4.10.0 | 5.0.0 |
+|---|---|---|---|---|---|
+| `rowbase-y` | none / **ROWBASE Y row 0** `2147483520 + 512` | `imgwarp.cpp:2214:84` `512 + 2147483520` | `2200:84` same | `2300:84` same | 0 |
+| `rowbase-x` | PERCOLUMN X `2147483536 + 1024` / **ROWBASE X row 0** `2147483520 + 512` | `2285:41` `98304 + 2147483536`; `2213:84` `512 + 2147483520` | `2269:41`; `2199:84` | `2373:41`; `2299:84` | 0 |
+| `rowbase-euclidean` (θ=-0.5, ty=2097109.875) | **ROWBASE Y row 48** `2147483647 + 16` / `+ 512` | `2214:84` `16 + 2147483647`; `2286:41`, `sse4_1:205:21` `-47129 + …` | `2200:84`; `2270:41`; `205:21` | `2300:84`; `2374:41`; `205:21` | 0 |
+| `conversion-euclidean` (θ=-0.5, ty=2097200) | PERCOLUMN Y col 1 `-2147483632 + -491` / col 2 `-2147483136 + -982` (after INT_MIN conversion) | `2286:41` `-47129 + -2147483632`; `sse4_1:205:21` | `2270:41`; `205:21` | `2374:41`; `205:21` | 0 |
+| `rowbase-control` (t=2097000, X and Y) | none / none | 0 | 0 | 0 | 0 |
+
+**Scalar dispatch.** With `setUseOptimized(false)`, every version reported the same
+row-base sites at `:84`. The nearest per-column site moved to the generic tail
+(`2245:45` / `2230:45` / `2330:45`). The control was clean, and 5.0.0 had 0 reports.
+
+**Standalone reproducer.** A program independent of the probe was built against each
+instrumented install. It calls `cv::warpAffine` on a 64x97 `CV_8UC1` image with the candidate
+matrix. It reported exactly `imgwarp.cpp:2214:84` / `2200:84` / `2300:84` for Y and
+`2213:84` / `2199:84` / `2299:84` for X, all `512 + 2147483520`. It reported nothing on
+5.0.0.
+
+**5.0.0 execution path.** gdb ran all three row-base cases in both dispatch modes, with
+`ASAN_OPTIONS=detect_leaks=0` because LSan cannot run under ptrace. It hit only:
+
+* `cv::opt_AVX2::warpAffineLinearInvoker_32FC1` and `warpAffineNearestInvoker_8UC1`
+  (default);
+* the `cv::cpu_baseline::` versions of the same two functions (scalar).
+
+Both are called from `cv::hal::warpAffine` (`imgwarp.cpp:2251` nearest, `:2329` linear).
+`cv::WarpAffineInvoker::operator()` was never hit. `CV_CPU_DISPATCH` always ends in
+`return (cpu_baseline::fn args)` (`cv_cpu_helper.h:654`), so the legacy invoker at
+`:2357-2360` is unreachable for these types.
+
+**Model windows** (`conversion-check`, identical on all versions):
+
+* `ROWBASE_WINDOW`: Float32 `t` such that `cvRound(t*1024)` is in range but adding
+  `round_delta` overflows.
+  * Nearest: 4 values, `2097151.5` .. `2097151.875`.
+  * Linear: 0 values.
+* `ROWBASE_Y_WINDOW` (64x97, linear/nearest pixels):
+
+  | `ty` | Pixels |
+  |---|---|
+  | `2097088.375` | 0/0 |
+  | `2097088.5` | 0/97 |
+  | `2097100.375` | 0/0 |
+  | `2097100.5` | 0/97 |
+  | `2097100.875` | 0/97 |
+  | `2097101.0` | 0/0 |
+  | `2097151.375` | 0/0 |
+  | `2097151.5` | 0/97 |
+
+* `EUCLIDEAN_WINDOW` (θ=-0.5, 64x97, linear/nearest pixels):
+
+  | `ty` | Pixels |
+  |---|---|
+  | `2^20`, `2e6`, `2097000` | 0/0 |
+  | `2097109.875` | 1537/1522 |
+  | `2097151.875` | 6048/6082 |
+  | `2097200`, `3e6`, `1e9` | 6144/6080 |
+
+* `TRANSLATION_WINDOW` (16383x64) is unchanged from Part 1. The `2097152.5` and `3e6` rows
+  are 0/0 because an out-of-range conversion alone is not counted as an overflowing
+  addition.
+
+**Corrected conclusions.**
+
+* **Translation, nearest mode.** For `ty` or `tx` in the row-base band just below `2^21`,
+  the first undefined operation is the **row-base addition**, on either axis. `bdelta = 0`
+  does not protect `Y0`.
+* **Translation, linear mode.** There is no row-base overflow. Float32 spacing makes the
+  largest in-range base `2147483520`, and adding 16 fits. Only the per-column X window
+  applies.
+* **Euclidean.** A row-base overflow occurs in linear mode as well. There is also a
+  conversion-then-add route that has no upper bound in `|t|` beyond `2^21` when the
+  rotation sign matches.
+* **Seed bound.** `2^20` lies below every window.
+* **Evidence level.** Every case is Level A. There is no Level B or Level C reproduction,
+  so **the dispositions remain `SAFETY_GATE_NOT_ESTABLISHED`.**
+
+**Search re-check with the corrected model.** This is a subset of the Part 1 campaign,
+rerun only to confirm that the reclassified model leaves the per-matrix verdicts unchanged.
+It is not a new campaign.
+
+| Version | `search-translation:0:120` | `search-euclidean-identity:0:24` | `search-euclidean-seeded:48:12` |
+|---|---|---|---|
+| 4.1.0 | 0 unsafe, max 3273.89 (trial 73) | 0, max 12.85 (trial 1) | 0, max 1048575.62 (trial 51, the seed) |
+| 4.6.0 | 0, 3273.89 (73) | 0, 12.85 (1) | 0, 1048575.62 (51) |
+| 4.10.0 | 0, 3273.89 (73) | 0, 12.85 (1) | 0, 1048575.62 (51) |
+| 5.0.0 | 0, 3273.89 (73) | 0, 13.19 (4) | 0, 1048575.62 (51) |
+
+The maxima and trial indices equal the original runs. The remaining 1,980-trial campaign
+was **not** rerun. Its per-matrix verdicts are unaffected by construction (probe comment on
+`fixed_point_overflows`).
+
 ## Part 2 — Normal regression campaign (binding qualification, unchanged scope)
 
 Each row is an independent `git clone --no-local` of the committed head, built from source.

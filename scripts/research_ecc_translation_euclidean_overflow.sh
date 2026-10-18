@@ -17,6 +17,8 @@
 # With no CASE every case below runs, each in its own process (UBSan reports a given source
 # location once per process, so cases must not share a process):
 #   negative conversion-check level-a-euclidean-bigangle
+#   level-a-rowbase-control level-a-rowbase-y level-a-rowbase-x level-a-rowbase-euclidean
+#   level-a-conversion-euclidean
 #   level-a-translation-extreme level-a-euclidean-extreme
 #   level-a-nonfinite-translation level-a-nonfinite-euclidean
 #   level-a-translation-far level-a-euclidean-far
@@ -39,6 +41,8 @@ cd "$root"
 prefix=${OPENCV_PREFIX:?set OPENCV_PREFIX to an instrumented OpenCV install}
 core=${OPENCV_CORE_SOURCE:?set OPENCV_CORE_SOURCE to the pinned opencv_core checkout}
 all_cases='negative conversion-check level-a-euclidean-bigangle
+level-a-rowbase-control level-a-rowbase-y level-a-rowbase-x level-a-rowbase-euclidean
+level-a-conversion-euclidean
 level-a-translation-extreme level-a-euclidean-extreme
 level-a-nonfinite-translation level-a-nonfinite-euclidean
 level-a-translation-far level-a-euclidean-far
@@ -104,7 +108,7 @@ for case_name in $cases; do
         verdict=NO_UPSTREAM_REPORT
     fi
     echo "== case $case_name: $verdict (exit $status, warpAffine UBSan $upstream, other UBSan $foreign, ASan $asan) log $log"
-    grep -E 'runtime error:|UNSAFE_INTERMEDIATE|MODEL_INVARIANT|first unsafe|model-valid|ROTATION_ONLY|BINDING_CALL_END|NEGATIVE_CONTROL|int64 model|SEARCH_|max.translation|CONVERSION|TRANSLATION_WINDOW|PEAK_RSS' "$log" | sed 's/^/     /'
+    grep -E 'runtime error:|UNSAFE_INTERMEDIATE|MODEL_INVARIANT|first unsafe|model-valid|ROTATION_ONLY|BINDING_CALL_END|NEGATIVE_CONTROL|int64 model|SEARCH_|max.translation|CONVERSION|TRANSLATION_WINDOW|EUCLIDEAN_WINDOW|ROWBASE_|FIRST_UNSAFE|FIRST_UB|counts:|PEAK_RSS' "$log" | sed 's/^/     /'
 done
 echo "== NO_UPSTREAM_REPORT is not evidence of defined arithmetic. OpenCV 5.0 routes CV_32FC1/CV_8UC1"
 echo "== through float-coordinate kernels and marks the legacy integer blockline CV_DISABLE_UBSAN."
