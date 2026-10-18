@@ -14,6 +14,10 @@
 //   negative
 //              Moderate translation and moderate Euclidean warps; must report zero
 //              int32-range overflows in the int64 model and zero UBSan reports.
+//   conversion-check
+//              Observes the target's cvtsd2si result for boundary/NaN doubles through the
+//              intrinsic, checks the diagnostic's explicit conversion model against it, and
+//              maps the translation overflow window at the widest permitted geometry.
 //   level-a-translation-extreme / level-a-euclidean-extreme
 //              Level A: direct native warpAffine replay of a MODEL-VALID extreme-translation
 //              matrix (translation: identity linear part; Euclidean: a rigid rotation).
@@ -44,6 +48,10 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/video/tracking.hpp>
+
+#if defined(__x86_64__) || defined(_M_X64)
+#include <emmintrin.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -79,12 +87,21 @@ Handle make_handle(const cv::Mat &src) {
     return handle;
 }
 
+// Explicit model of OpenCV 4.x saturate_cast<int>(double) == cvRound on x86-64, which is
+// _mm_cvtsd_si32 (cvtsd2si, round-to-nearest-even). For NaN or a value that rounds outside
+// int32 the instruction returns the "integer indefinite" value INT_MIN for BOTH signs; it
+// does not clamp. The model never hands an out-of-range double to the real conversion: it
+// range-checks first and calls cv::saturate_cast only for values that are representable.
+// The conversion-check mode records the observed target behavior separately.
+int x86_cvround_model(double v) {
+    if (!(v >= -2147483648.5 && v < 2147483647.5)) return INT32_MIN;
+    return cv::saturate_cast<int>(v);
+}
+
 // int64 model of the legacy warpAffine integer path (4.x WarpAffineInvoker; 5.0 legacy
 // blockline). Returns the number of destination pixels whose X0+adelta or Y0+bdelta lies
-// outside int32 for the given rounding delta (16 linear, 512 nearest). It uses
-// cv::saturate_cast<int> for the per-row/column conversions (the exact native cvRound /
-// x86 cvtsd2si behavior, which returns INT_MIN for an out-of-range double rather than
-// clamping), then performs the final add in int64 so the DIAGNOSTIC never overflows int32.
+// outside int32 for the given rounding delta (16 linear, 512 nearest). The final add is
+// performed in int64, so the DIAGNOSTIC never overflows int32.
 long fixed_point_overflows(const double M[6], int rows, int cols, int round_delta,
                            const char *label, bool verbose) {
     constexpr int AB_SCALE = 1024;  // AB_BITS = max(10, INTER_BITS = 5)
@@ -92,11 +109,11 @@ long fixed_point_overflows(const double M[6], int rows, int cols, int round_delt
     for (int y = 0; y < rows; ++y) {
         const double x_pre = (M[1] * y + M[2]) * AB_SCALE;
         const double y_pre = (M[4] * y + M[5]) * AB_SCALE;
-        const int64_t X0 = int64_t(cv::saturate_cast<int>(x_pre)) + round_delta;
-        const int64_t Y0 = int64_t(cv::saturate_cast<int>(y_pre)) + round_delta;
+        const int64_t X0 = int64_t(x86_cvround_model(x_pre)) + round_delta;
+        const int64_t Y0 = int64_t(x86_cvround_model(y_pre)) + round_delta;
         for (int x = 0; x < cols; ++x) {
-            const int adelta = cv::saturate_cast<int>(M[0] * x * AB_SCALE);
-            const int bdelta = cv::saturate_cast<int>(M[3] * x * AB_SCALE);
+            const int adelta = x86_cvround_model(M[0] * x * AB_SCALE);
+            const int bdelta = x86_cvround_model(M[3] * x * AB_SCALE);
             const int64_t X = X0 + adelta, Y = Y0 + bdelta;
             const bool x_bad = X > INT32_MAX || X < INT32_MIN;
             const bool y_bad = Y > INT32_MAX || Y < INT32_MIN;
@@ -408,6 +425,51 @@ void search(const char *name, int flavor, int motionType, uint32_t first, uint32
                 name, count, unsafe, global_max_translation, worst_trial);
 }
 
+// Peak resident set (Linux VmHWM), so each campaign can be checked against its budget.
+void print_peak_rss() {
+    std::FILE *f = std::fopen("/proc/self/status", "r");
+    if (f == nullptr) return;
+    char line[256];
+    while (std::fgets(line, sizeof line, f) != nullptr)
+        if (std::string(line).rfind("VmHWM:", 0) == 0) std::printf("  PEAK_RSS %s", line + 6);
+    std::fclose(f);
+}
+
+// conversion-check: (1) observe the target's cvtsd2si result for boundary doubles through
+// the _mm_cvtsd_si32 intrinsic (a defined hardware operation, not a C++ float-to-int cast)
+// and compare it with x86_cvround_model; (2) evaluate, with the model only (no native call),
+// the identity-linear translation overflow window at the widest permitted geometry.
+int conversion_check() {
+    int mismatches = 0;
+#if defined(__x86_64__) || defined(_M_X64)
+    const double probes[] = {0.0, 2147483647.0, 2147483647.49, 2147483647.5, 2147483648.0,
+                             -2147483648.0, -2147483648.5, -2147483649.0, 3e9, -3e9, 1e300,
+                             std::numeric_limits<double>::infinity(),
+                             std::numeric_limits<double>::quiet_NaN()};
+    for (double v : probes) {
+        const int hw = _mm_cvtsd_si32(_mm_set_sd(v));
+        const int model = x86_cvround_model(v);
+        std::printf("  CONVERSION v=%.17g cvtsd2si=%d model=%d %s\n", v, hw, model,
+                    hw == model ? "MATCH" : "MISMATCH");
+        if (hw != model) ++mismatches;
+    }
+#else
+    std::printf("  CONVERSION non-x86 target: model not validated\n");
+#endif
+    // Predicted window for 16383 columns: tx in (~2080770, 2097152).
+    const double candidates[] = {1048576.0, 2.0e6,       2.0807e6,    2.0808e6,
+                                 2.09e6,    2.0971515e6, 2.0971525e6, 3.0e6};
+    for (double t : candidates) {
+        const double M[6] = {1, 0, double(float(t)), 0, 1, 0};
+        std::printf("  TRANSLATION_WINDOW tx=%.9g (float %.9g) cols=16383 rows=64 "
+                    "linear=%ld nearest=%ld\n", t, M[2],
+                    fixed_point_overflows(M, 64, 16383, 16, "", false),
+                    fixed_point_overflows(M, 64, 16383, 512, "", false));
+    }
+    std::printf("  CONVERSION_SUMMARY mismatches=%d\n", mismatches);
+    return mismatches == 0 ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -454,6 +516,8 @@ int main(int argc, char **argv) {
             return 1;
         }
         std::printf("NEGATIVE_CONTROL_OK\n");
+    } else if (mode == "conversion-check") {
+        return conversion_check();
     } else if (mode == "level-a-translation-extreme") {
         level_a("translation-extreme", "translation", translation_extreme, rows, wide);
     } else if (mode == "level-a-euclidean-extreme") {
@@ -487,10 +551,10 @@ int main(int argc, char **argv) {
                          : mode == "search-euclidean-identity" ? 1 : 2;
         const int motion = flavor == 0 ? cv::MOTION_TRANSLATION : cv::MOTION_EUCLIDEAN;
         search(mode.c_str(), flavor, motion, first, count);
+        print_peak_rss();
     } else {
         std::fprintf(stderr, "unknown case %s\n", mode.c_str());
         return 2;
     }
     return 0;
 }
-
