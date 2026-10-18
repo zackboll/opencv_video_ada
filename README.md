@@ -65,8 +65,10 @@ shown to reach undefined behavior. All three APIs stay available and unchanged.
 * **Why the gate is not established.** Nothing in native ECC bounds the accumulated
   translation. The Euclidean seed bound (`|t| <= 2^20`) constrains only the first iterate.
 * **OpenCV 5.0.0.** The tested 5.0.0 build sends these image types to float-coordinate
-  kernels and did not execute the overflowing addition. Its extreme-coordinate conversions
-  and other architecture, HAL and hardware paths remain unqualified.
+  kernels. It did not execute the overflowing addition for any finite warp, but a directly
+  replayed **NaN** translation warp produced an undefined out-of-range pointer computation
+  in that kernel. No ECC run was shown to produce a NaN warp. Coordinates beyond int32 and
+  other architecture, HAL and hardware paths remain unqualified.
 * **Details.** See [docs/tasks/021-translation-euclidean-safety-audit.md](docs/tasks/021-translation-euclidean-safety-audit.md)
   and [docs/task021-qualification.md](docs/task021-qualification.md).
 

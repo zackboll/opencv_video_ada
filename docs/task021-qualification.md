@@ -49,15 +49,18 @@ Setup:
 * Host: g++ 14.2.0, x86_64 with AVX2 and SSE4.1, single thread.
 
 
-Final probe, all 11 default cases per version (`== case` verdicts):
+Final probe, all 15 default cases per version (`== case` verdicts):
 
 | Case | 4.1.0 | 4.6.0 | 4.10.0 | 5.0.0 |
 |---|---|---|---|---|
 | `negative` | 0 reports, `NEGATIVE_CONTROL_OK` | same | same | same |
 | `conversion-check` | 13/13 conversions MATCH | same | same | same |
 | `level-a-euclidean-bigangle` (≈89°) | 0 model overflows, 0 reports | same | same | same |
+| `level-a-translation-far`, `level-a-euclidean-far` (`\|t\|` = 1e6) | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
 | `level-a-translation-extreme` | **2 reports**: `imgwarp.cpp:2285:41`, `sse4_1.cpp:204:21` | **2**: `2269:41`, `204:21` | **2**: `2373:41`, `204:21` | 0 (not executed) |
 | `level-a-euclidean-extreme` | **2**: `2286:41`, `205:21` | **2**: `2270:41`, `205:21` | **2**: `2374:41`, `205:21` | 0 (not executed) |
+| `level-a-nonfinite-translation` (NaN t; not model-valid) | 0 | 0 | 0 | **1**: `warp_kernels.simd.hpp:3764:17` pointer index overflow |
+| `level-a-nonfinite-euclidean` (all NaN; not model-valid) | **4**: `2285/2286:41`, `204/205:21`, `INT_MIN + INT_MIN+16` | **4**: `2269/2270`, `204/205` | **4**: `2373/2374`, `204/205` | 0 |
 | `trace-translation` | no unsafe iterate (8), max `\|t\|` 2.14 | same | same | same |
 | `trace-euclidean-identity` | no unsafe iterate (17), 2.65 | (87), 2.65 | (87), 2.65 | (10), 2.65 |
 | `trace-euclidean-seeded` | iterate 1 safe, then `StsNoConv` | same | same | same |
@@ -66,7 +69,13 @@ Final probe, all 11 default cases per version (`== case` verdicts):
 | `level-c-euclidean-seeded` | status 3 "NaN encountered", 0 reports | status 3 | status 3 | status 3 |
 
 Every case ran with exit 0, 0 non-`imgwarp` UBSan reports and 0 ASan/LSan reports, so no case
-was `RESEARCH_PROBE_FAILED`. Wall time was 15-17 s per version.
+was `RESEARCH_PROBE_FAILED`. Wall time was 17-19 s per version.
+
+The runner first classified the 5.0 `warp_kernels` report as foreign, because its
+expected-evidence pattern originally matched only `imgwarp*`. The pattern was widened to
+OpenCV's imgproc warp sources (`imgwarp`, `warp_kernels`, `warp_common`). Reports from the
+shims or the probe still fail it. All 15 cases were then rerun on every version with the
+committed probe.
 
 **Reported operands** (identical on every 4.x version):
 
@@ -186,7 +195,10 @@ export count (25) and every oracle fixture count equal the Task 020 campaign on 
   OpenCV version. Each is `SAFETY_GATE_NOT_ESTABLISHED`.
 * That any of them is unsafe. No Level B or Level C reproducer exists; the Level A matrices
   are model-valid but were never shown to be produced by ECC.
-* That the 5.0 float kernels are UB-free for coordinates beyond `2^31`.
+* That the 5.0 float kernels are UB-free for coordinates beyond `2^31`. A NaN coordinate
+  is shown **not** to be UB-free (`warp_kernels.simd.hpp:3764`).
+* That native ECC can produce a nonfinite warp. The nonfinite replays are Level A only and
+  are not model-valid.
 * Any AVX-512, NEON, AArch64, RVV, LASX, IPP, OpenCL, custom HAL, Windows or macOS result for
   the research probe. The probe is Linux/x86_64 only.
 * Any change to the Task 020 affine disposition (`KNOWN_NATIVE_UB_UNMITIGATED`). It is

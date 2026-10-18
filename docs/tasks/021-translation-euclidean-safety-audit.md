@@ -97,13 +97,23 @@ mapPtr[1] = -mapPtr[3];
 * **`asin` domain.** The argument to `asin` is always a previously stored
   `(float)sin(...)`. Correctly rounded `sinf` values lie in `[-1, 1]`, so `asin` stays in
   its domain. The principal-branch ambiguity beyond a quarter turn limits convergence
-  (Task 012); it is not an arithmetic hazard. If a NaN update reached `new_theta`, the
-  sine, cosine and translation would all become NaN. The next iteration's `rho` would then
-  raise `StsNoConv "NaN encountered"` after `warpAffine` had already consumed the NaN map.
-  The legacy path then converts `NaN*1024` through `cvRound`. On x86 that is
-  `cvtsd2si -> INT_MIN`, a defined intrinsic rather than a C++ cast, so UBSan does not flag
-  it. This ordering was not shown to cause an overflow, because the NaN row base
-  saturates to `INT_MIN` and `INT_MIN + |delta| <= 16.7e6` stays in range.
+  (Task 012); it is not an arithmetic hazard.
+* **Nonfinite updates.** If `deltaP` were NaN, the next `warpAffine` would consume a NaN
+  map before `rho` raised `StsNoConv "NaN encountered"`. On x86, `cvRound(NaN*1024)` is
+  `cvtsd2si -> INT_MIN`. What happens next depends on the model:
+  * **Translation.** Only `tx`/`ty` become NaN. The row base saturates to `INT_MIN`, and
+    `adelta = x*1024 >= 0` keeps the sum in range. The `level-a-nonfinite-translation`
+    replay on 4.x showed no overflow.
+  * **Euclidean.** `cos(NaN)` and `sin(NaN)` make **every** coefficient NaN, so `adelta`
+    and `bdelta` are also `INT_MIN`. The addition is then `INT_MIN + INT_MIN`: a signed
+    overflow, reported by `level-a-nonfinite-euclidean` on all 4.x versions.
+
+  Whether native ECC can produce a NaN update is **not established**. For 2x2 and 3x3 the
+  default `Mat::inv()` (`DECOMP_LU`) returns an all-zero matrix when the determinant is
+  exactly 0 (`lapack.cpp` `invert`). A singular Hessian therefore gives `deltaP = 0`, not
+  NaN. A NaN step needs NaN or Inf in the Hessian, the projections or `lambda`. No input in
+  the envelope was shown to produce that. Section 5 records these replays as
+  non-model-valid Level A evidence only.
 * **Large or nonfinite updates and exception ordering.** `deltaP = H^-1 * e` has no step
   bound, and `lambda_d` has no positive lower bound (Tasks 011/012 recorded a successful
   4.x translation result of (44.3, 89.5) from a (6, 4) shift). Both exceptions
@@ -215,8 +225,9 @@ linear and 97,495 for nearest.
 
 UBSan prints the first scalar-tail pixel it reaches. The first raster pixel above comes from
 the model, which visits pixels in raster order; both appear in the logs. With
-`setUseOptimized(false)` the linear reports are unchanged. On 5.0.0, every Level A replay
-gave **zero** reports in both dispatch modes, because the float kernels run instead.
+`setUseOptimized(false)` the linear reports are unchanged. On 5.0.0, every finite Level A
+replay gave **zero** reports in both dispatch modes, because the float kernels run instead
+(the nonfinite replays are in section 5).
 
 These are **addition** overflows, not out-of-range conversions. The row-base doubles
 (`2.14e9`) are representable and `cvRound` converts them exactly. No float-to-int
@@ -259,7 +270,7 @@ references it:
 ```sh
 OPENCV_PREFIX=$HOME/.cache/video-task017/install-4.10.0-san \
 OPENCV_CORE_SOURCE=$PWD/alire/cache/pins/opencv_core_4da9d35e \
-  sh scripts/research_ecc_translation_euclidean_overflow.sh           # all 11 default cases
+  sh scripts/research_ecc_translation_euclidean_overflow.sh           # all 15 default cases
 sh scripts/research_ecc_translation_euclidean_overflow.sh search-euclidean-seeded:0:180
 ```
 
@@ -291,11 +302,30 @@ iterate (`MODEL_INVARIANT_VIOLATED`). None was ever printed.
 | **Euclidean identity** | **Demonstrated** on 4.x: model-valid rigid θ=0.5, `ty=2090000` overflows Y. The θ≈89° control has no overflow | `NOT_REPRODUCED`. Trace (97x64, 6°, (2,1)): 17 (4.1.0), 87 (4.6.0/4.10.0), 10 (5.0.0) distinct iterates; max `\|t\|` 2.65. Searches: max `\|t\|` **5522.0** (4.10.0 trial 208) | `NOT_REPRODUCED`. Status 0, angle 0.10475, displacement (1.996, 1.016). 0 reports |
 | **Euclidean seeded** | Same Level A as identity. θ=0.5 lies inside the seeded angle domain, but `ty=2090000` lies **outside** the `2^20` seed domain, so this matrix is reachable only as a later iterate | `NOT_REPRODUCED`. Trace from the in-domain extreme seed `(θ=0.9, tx=2^20, ty=-2^20)`: the first iterate is safe, then the very next call raised `StsNoConv` "NaN encountered" (the image falls entirely outside), so no further matrix reached `warpAffine`. Searches: max `\|t\|` 1048575.6, the seed itself (trial 51) | `NOT_REPRODUCED`. The same seed through `opencv_video_estimate_ecc_euclidean_seeded` returned status 3 (`OPENCV_VIDEO_ERROR_OPENCV`, "NaN encountered") on every version. 0 reports |
 
+**Nonfinite replays (Level A, NOT model-valid: `is_*_valid` = NO).** These record what the
+native resampler does if a NaN optimizer update ever occurred. None was shown to occur.
+
+| Case | 4.1.0 / 4.6.0 / 4.10.0 | 5.0.0 |
+|---|---|---|
+| `level-a-nonfinite-translation` `[1 0 NaN; 0 1 NaN]`, 16383x64 | 0 model overflows, 0 reports | **1 report**: `warp_kernels.simd.hpp:3764:17: runtime error: pointer index expression with base 0x7fa84b7f9840 overflowed to 0xffffffa84b7f9840`, in `cv::opt_AVX2::warpAffineLinearInvoker_32FC1`, scalar tail |
+| `level-a-nonfinite-euclidean` (all six NaN), 97x64 | **4 reports**: `imgwarp.cpp` linear X/Y (`2285/2286`, `2269/2270`, `2373/2374`) and `sse4_1.cpp:204/205`, operands `-2147483648 + -2147483632` (linear) and `-2147483648 + -2147483136` (nearest); 6,208 of 6,208 pixels per mode | 0 reports |
+
+The 5.0.0 finding is new. It is the first UBSan-visible report in the 5.0 float-coordinate
+kernel. In the scalar tail, `cvFloor(NaN)` (`CV_DISABLE_UBSAN`, x86 result `INT_MIN`) yields
+`ix`/`iy` of `INT_MIN`, and the address arithmetic `src + srcstep*iy + ix` forms an
+out-of-range pointer. That is undefined pointer arithmetic, even though the bounds mask
+prevents the load. The report is not suppressed, so the `CV_DISABLE_UBSAN` annotation on
+`cvFloor` does not hide it. It requires a nonfinite coordinate, which the binding never
+supplies and native ECC was never shown to generate.
+
 **Negative controls.** These report zero model overflows and zero UBSan reports on every
 version, so the harness does not flag every transform:
 
 * `negative`: translation `[1 0 2; 0 1 1]` and Euclidean (θ=0.05, t=(2,1)) at 256x64;
 * `level-a-euclidean-bigangle` (θ = 1.5533 rad ≈ 89°) at 16383x64;
+* `level-a-translation-far` `[1 0 1e6; 0 1 1e6]` (16383x64) and `level-a-euclidean-far`
+  (θ=0.5, t=(-1e6, 1e6), 97x64). Both are finite model-valid warps inside the `2^20` seed
+  bound and entirely outside the image, and both are clean on 5.0.0 too;
 * the window checks at `tx = 2^20`, `2.0e6` and `2.0807e6`.
 
 **Why the seeded extreme seed cannot walk into the window.** With `|tx|` or `|ty|` near
@@ -370,17 +400,22 @@ regenerated `5521.99512` exactly.
 |---|---|---|
 | 4.1.0/4.6.0/4.10.0, default x86_64 dispatch (AVX2 linear blockline, SSE4.1 nearest blockline, scalar tails) | Yes | Level A overflow in the scalar tails; SIMD bodies wrap silently |
 | 4.1.0/4.6.0/4.10.0, `setUseOptimized(false)` (generic scalar loops, `CV_SIMD128` bodies) | Yes (Level A) | Level A overflow: linear `2285/2269/2373`, nearest `2244/2229/2329` and `2245/2230/2330` |
-| 5.0.0 default (`cv::opt_AVX2::warpAffineLinearInvoker_32FC1` / `warpAffineNearestInvoker_8UC1`) | Yes, gdb-confirmed through the real translation export | 0 reports; legacy addition not executed |
+| 5.0.0 default (`cv::opt_AVX2::warpAffineLinearInvoker_32FC1` / `warpAffineNearestInvoker_8UC1`) | Yes, gdb-confirmed through the real translation export | 0 reports for every finite matrix; legacy addition not executed. **1 pointer-index-overflow report** (`warp_kernels.simd.hpp:3764`) for the non-model-valid NaN translation replay |
 | 5.0.0 `setUseOptimized(false)` (`cv::cpu_baseline::warpAffine*Invoker_*`) | Yes, gdb-confirmed | 0 reports; legacy addition not executed |
 | AVX-512, NEON and other AArch64 kernels, RVV, LASX (4.10.0+ `imgwarp.lasx.cpp`), IPP, OpenCL, custom `cv_hal_warpAffine*` HAL, Windows/macOS toolchains | **No** | Unqualified |
 
 On 5.0.0, the float kernels compute `float sx = x*M[0] + y*M[1] + M[2]` and convert it to an
-integer. Inside the window above (`|t| ≈ 2.09e6`) the float coordinate is far within int32,
-so no out-of-range conversion follows from it. A coordinate beyond `2^31` would need
-`|t| > 2.1e9`. That is about 1000x the 4.x window, and nothing in this audit approached it.
-The `CV_DISABLE_UBSAN` scalar `cvFloor(float)` and the vector address formation are
-therefore unaudited for that regime, **not** shown to be safe. A clean run on one dispatch
-configuration cannot establish that every platform path is safe.
+integer. For every **finite** matrix tested the coordinate is far within int32: the window
+replays at `|t| ≈ 2.09e6`, and the far-outside replays at `|t| = 1e6`. None produced a
+report. A finite coordinate beyond `2^31` would need `|t| > 2.1e9`, about 1000x the 4.x
+window, and nothing in this audit approached it.
+
+The NaN translation replay shows that the 5.0 scalar tail is **not** UB-free for nonfinite
+coordinates. The undefined operation is `src + srcstep*iy + ix` with `ix = iy = INT_MIN`,
+from the UBSan-suppressed `cvFloor(NaN)`; the subsequent bounds mask blocks only the load.
+The same address formation with a finite coordinate beyond int32 is therefore expected to
+be unsafe as well. It was not executed. A clean run on one dispatch configuration cannot
+establish that every platform path is safe.
 
 ## 8. Comparison with the affine finding
 
@@ -479,12 +514,19 @@ Owner decisions carried forward:
 * `NOT_REPRODUCED` covers 1,980 bounded trials. It shows rarity, not impossibility.
 * The x86 `cvRound` sign inversion above `2^21` gives a wrong but in-range coordinate with no
   UB report. That can still steer the optimizer.
-* The OpenCV 5.0 float-kernel conversions (`CV_DISABLE_UBSAN` `cvFloor(float)`) and non-x86,
-  IPP, OpenCL and HAL paths are unqualified.
+* **Some nonfinite warps execute UB on each tested version family.** In 4.x, an all-NaN
+  Euclidean warp gives `INT_MIN + INT_MIN`; the NaN translation replay was clean. In 5.0, a
+  NaN translation forms an out-of-range pointer in the float kernel (16383x64); the all-NaN
+  Euclidean replay (97x64) was clean. Neither unsafe case was shown reachable. The only
+  barrier is the absence of a NaN optimizer step, because native ECC checks `rho` for NaN
+  only *after* the four `warpAffine` calls.
+* The OpenCV 5.0 float kernels are unqualified for finite coordinates beyond int32, and
+  non-x86, IPP, OpenCL and HAL paths are unqualified.
 * **Recommended follow-on:**
   1. a targeted adversarial search for ill-conditioned inputs that produce a single huge
      translation step (for example near-singular stripe Hessians with a partially
-     overlapping seed);
-  2. a 5.0 float-kernel audit at `|coordinate| > 2^31`;
+     overlapping seed) or a nonfinite step (Inf/NaN in `lambda` or the projections);
+  2. a 5.0 float-kernel audit at `|coordinate| > 2^31`, extending the NaN finding;
   3. an AArch64/NEON run;
-  4. a decision on Option A upstream engagement covering all three models.
+  4. a decision on Option A upstream engagement covering all three models and the 5.0
+     nonfinite-coordinate pointer formation.
