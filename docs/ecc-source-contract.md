@@ -109,6 +109,32 @@ Photometric variants do not reach zero residual because the images differ in int
 Test tolerances chosen from these runs: displacement 0.05 px at 128x128 (worst
 measured error 0.0173); `rho` is never thresholded by the binding.
 
+## Follow-up (Task 021, 2026-10-18): native `warpAffine` arithmetic
+
+The findings above remain the Task 011 record, and its qualification results stand. They
+established ECC's own integer arithmetic, memory envelope and numerical behavior. They did
+**not** audit the shared `warpAffine` fixed-point arithmetic that native ECC calls four
+times per iteration. The sanitizer runs instrumented only the binding, not OpenCV.
+
+[Task 021](tasks/021-translation-euclidean-safety-audit.md) audited that path at operand
+level:
+
+* **OpenCV 4.x signed-overflow site.** The 4.x `WarpAffineInvoker` adds `X0 + adelta[x]` in
+  signed `int`. For a translation warp `[1 0 tx; 0 1 ty]` that addition overflows when `tx`
+  lies in a narrow band just below `2^21` (about `2.0808e6 .. 2.097e6` at 16383 columns).
+* **Confirmed for a model-valid matrix.** UBSan confirmed the overflow on instrumented 4.1.0,
+  4.6.0 and 4.10.0 by direct replay of `[1 0 2090000; 0 1 0]` (Level A).
+* **Not reproduced through ECC.** No native ECC run (Level B) or call to
+  `opencv_video_estimate_ecc_translation` (Level C) reached it. The largest accumulated
+  `|t|` over 660 bounded translation trials (four versions) was 3274.
+* **OpenCV 5.0.0.** It routes ECC's types to float-coordinate kernels and does not execute
+  this addition.
+
+**Disposition: `SAFETY_GATE_NOT_ESTABLISHED`.** Nothing bounds the optimizer's accumulated
+translation, so the band is not excluded. It is also not shown reachable, so the API is not
+declared unsafe. The phrase "the arithmetic limit is far higher" above applies to ECC's own
+`2*ws` / `countNonZero` arithmetic only. It does not apply to `warpAffine` coordinates.
+
 ## Windows MSYS2 provisioning correction
 
 The Task 010 post-merge Windows run failed in "Install MSYS2 native dependencies":

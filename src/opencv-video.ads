@@ -299,6 +299,13 @@ package OpenCV.Video is
    --  Native nonconvergence (constant or uncorrelated images, translation outside
    --  the unseeded convergence basin) raises OpenCV_Error; no identity result is
    --  fabricated. A returned value does not prove correct physical alignment.
+   --
+   --  SAFETY (Task 021, 2026-10-18): native arithmetic safety NOT established
+   --  (SAFETY_GATE_NOT_ESTABLISHED). OpenCV 4.x warpAffine overflows signed 32-bit
+   --  integer arithmetic for a translation warp whose accumulated displacement lies in a
+   --  narrow band just below 2**21 pixels; nothing in native ECC bounds the accumulated
+   --  displacement. No ECC run or call of this function was shown to reach that band
+   --  (NOT_REPRODUCED, not SAFE). See docs/tasks/021-translation-euclidean-safety-audit.md.
    function Estimate_ECC_Translation
      (Template_Image : OpenCV.Core.Mat;
       Moving_Image   : OpenCV.Core.Mat;
@@ -332,6 +339,14 @@ package OpenCV.Video is
 
    --  Native nonconvergence raises OpenCV_Error; no identity is fabricated. A returned
    --  value, even with a valid rotation matrix, does not prove correct alignment.
+   --
+   --  SAFETY (Task 021, 2026-10-18): native arithmetic safety NOT established
+   --  (SAFETY_GATE_NOT_ESTABLISHED). The bounded rotation does not bound the warp
+   --  coordinate: OpenCV 4.x warpAffine overflows signed 32-bit integer arithmetic for a
+   --  rigid warp whose accumulated translation lies in a narrow band just below 2**21
+   --  pixels, and native ECC does not bound the accumulated translation. No ECC run or
+   --  call of this function was shown to reach that band (NOT_REPRODUCED, not SAFE). See
+   --  docs/tasks/021-translation-euclidean-safety-audit.md.
    function Estimate_ECC_Euclidean
      (Template_Image : OpenCV.Core.Mat;
       Moving_Image   : OpenCV.Core.Mat;
@@ -353,6 +368,13 @@ package OpenCV.Video is
    --  update). Violations raise OpenCV_Error and are never clamped. An accepted seed
    --  does not guarantee convergence; ECC may still raise on nonconvergence or end at
    --  a wrong finite optimum. Initial_Transform is not modified.
+   --
+   --  SAFETY (Task 021, 2026-10-18): native arithmetic safety NOT established
+   --  (SAFETY_GATE_NOT_ESTABLISHED). The seed domain above keeps the FIRST iterate below
+   --  the OpenCV 4.x warpAffine signed-overflow band (translation just below 2**21), but
+   --  it does not bound later optimizer updates. No ECC run or call of this function was
+   --  shown to reach that band (NOT_REPRODUCED, not SAFE). See
+   --  docs/tasks/021-translation-euclidean-safety-audit.md.
    function Estimate_ECC_Euclidean
      (Template_Image    : OpenCV.Core.Mat;
       Moving_Image      : OpenCV.Core.Mat;

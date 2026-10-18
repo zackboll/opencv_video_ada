@@ -161,6 +161,32 @@ The pixel limit is unchanged: the policy was a memory/time bound that this incre
 not invalidate. No routine test allocates a limit-sized image pair; limit violations are
 rejected before native work with allocations that ECC never touches.
 
+## Follow-up (Task 021, 2026-10-18): native `warpAffine` arithmetic
+
+The Task 012 findings and qualification stand. The statement "No out-of-bounds or
+invalid-memory access was found in the Euclidean path, and none occurred under ASan/UBSan"
+is accurate for what was run: the binding was instrumented and OpenCV was not.
+
+[Task 021](tasks/021-translation-euclidean-safety-audit.md) then audited the shared
+`warpAffine` fixed-point addition at operand level:
+
+* **Bounded rotation does not bound the coordinate.** Bounded rotation coefficients
+  (`|cos|, |sin| <= 1`) bound only the per-column delta. They do not bound the row base,
+  which carries the accumulated `tx`/`ty`.
+* **Model-valid overflow confirmed.** A rigid matrix (θ = 0.5 rad, `ty = 2090000`)
+  overflows `Y0 + bdelta[x]` in signed `int`. UBSan reported this on instrumented 4.1.0,
+  4.6.0 and 4.10.0 (Level A).
+* **Rotation alone cannot overflow.** A ~89-degree rotation with small translation
+  produced no overflow.
+* **Not reproduced through ECC.** No native ECC run (Level B) or call to
+  `opencv_video_estimate_ecc_euclidean` (Level C) reached the overflow. The largest
+  accumulated `|t|` over 600 bounded identity trials (four versions) was 5522, against a
+  window near `2.08e6`.
+* **OpenCV 5.0.0.** It does not execute this addition for ECC's types.
+
+**Disposition: `SAFETY_GATE_NOT_ESTABLISHED`.** No argument bounds the accumulated
+translation, and no execution was shown to reach the window.
+
 ## Not claimed
 
 * Recovery of arbitrary or near-180-degree rotations, or a continuous unwrapped angle.

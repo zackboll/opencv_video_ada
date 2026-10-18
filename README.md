@@ -42,6 +42,34 @@ Translation and Euclidean ECC go through the same non-homography `warpAffine` br
 not audited at operand level by Task 020. Homography ECC uses `warpPerspective` and is not
 implicated by this finding.
 
+## Safety notice: translation and Euclidean ECC native arithmetic (Task 021, 2026-10-18)
+
+`Estimate_ECC_Translation` and both `Estimate_ECC_Euclidean` overloads (identity and
+caller-seeded) are **not qualified as free of native undefined behavior**. Each has the
+independent disposition `SAFETY_GATE_NOT_ESTABLISHED`. Unlike affine, they are **not**
+shown to reach undefined behavior. All three APIs stay available and unchanged.
+
+* **The OpenCV 4.x defect also covers these models.** The fixed-point `warpAffine`
+  addition that overflows for affine ECC also overflows for a **model-valid** translation
+  warp (`[1 0 2090000; 0 1 0]`) and a model-valid rigid Euclidean warp (θ = 0.5 rad,
+  translation 2,090,000 px).
+* **What was confirmed.** UBSan confirmed these overflows on instrumented OpenCV 4.1.0,
+  4.6.0 and 4.10.0 by direct native replay. Bounded rotation coefficients do not prevent
+  them: the overflowing operand carries the accumulated translation, and the overflow band
+  is a translation just below 2^21 pixels.
+* **Not reproduced through ECC.** Neither native ECC (iteration-capped traces) nor the
+  real C exports reached that band on any version (`NOT_REPRODUCED`, not `SAFE`). The
+  largest accumulated translation over 1,980 bounded, deterministic trials was about
+  5,500 px. A seed near the `2^20` limit made native ECC stop with an ordinary "NaN
+  encountered" error.
+* **Why the gate is not established.** Nothing in native ECC bounds the accumulated
+  translation. The Euclidean seed bound (`|t| <= 2^20`) constrains only the first iterate.
+* **OpenCV 5.0.0.** The tested 5.0.0 build sends these image types to float-coordinate
+  kernels and did not execute the overflowing addition. Its extreme-coordinate conversions
+  and other architecture, HAL and hardware paths remain unqualified.
+* **Details.** See [docs/tasks/021-translation-euclidean-safety-audit.md](docs/tasks/021-translation-euclidean-safety-audit.md)
+  and [docs/task021-qualification.md](docs/task021-qualification.md).
+
 ### Moving-image-masked ECC homography alignment (Task 018)
 
 ```ada

@@ -114,6 +114,37 @@ A seed is refined, not returned unchanged: for the seed (+2.5 deg, 2.3, 0.8) aga
 the truth than the seed. With 1 iteration the same call returns a visibly different result
 (rho 0.967) than with 50 (rho 0.9933).
 
+## Follow-up (Task 021, 2026-10-18): seed bound versus native arithmetic
+
+Finding 7 above says "A large translation samples the border; it does not overflow an
+integer conversion." The Task 013 record and its qualification are preserved. Task 021
+narrows that statement:
+
+* **The conversion itself.** `saturate_cast<int>` of the row base does not overflow.
+  Above `2^21`, x86 `cvRound` returns `INT_MIN` instead (a sign inversion, defined at the
+  intrinsic level).
+* **The addition.** The next step, `X0 + adelta[x]` / `Y0 + bdelta[x]` in signed `int` in
+  OpenCV 4.x `warpAffine`, **does** overflow when a translation lies in a narrow band just
+  below `2^21` (about `2.08e6 .. 2.097e6`).
+* **Confirmed on 4.x.** UBSan reported it on instrumented 4.1.0, 4.6.0 and 4.10.0 for a
+  model-valid rigid matrix (Level A,
+  [Task 021](tasks/021-translation-euclidean-safety-audit.md)).
+
+**The accepted seed domain (`|t| <= 2^20`, `|θ| <= 1`) lies below the band**, so the first
+iterate cannot reach it. Later optimizer updates are not bounded by the seed. Results so
+far:
+
+* **Extreme seed.** `(0.9 rad, 2^20, -2^20)` through
+  `opencv_video_estimate_ecc_euclidean_seeded` returned the ordinary "NaN encountered"
+  error with no UBSan report on all four versions. The images no longer overlap, so `rho`
+  is `0/0`.
+* **Searches.** 720 bounded seeded trials (four versions) covered zero, near-correct, wrong,
+  ±1 rad, near-`2^20` and opposing seeds. No intermediate entered the window. The largest
+  translation recorded, 1048575.6, was a starting seed value, not an optimizer step.
+
+**Disposition: `SAFETY_GATE_NOT_ESTABLISHED`** (`NOT_REPRODUCED`; this is not shown to be
+safe).
+
 ## Not claimed
 
 * That an accepted seed converges, or that a finite result is correct. Wrong-but-finite results
