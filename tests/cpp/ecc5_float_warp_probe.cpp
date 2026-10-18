@@ -754,4 +754,3 @@ int main(int argc, char **argv) {
     print_peak_rss();
     return 0;
 }
-

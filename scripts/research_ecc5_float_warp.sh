@@ -114,4 +114,3 @@ echo "== NO_UPSTREAM_REPORT is not evidence of defined behavior. UBSan's pointer
 echo "== fires only when the computed address wraps; an out-of-range pointer that does not wrap"
 echo "== is formed silently. COORD_REACH classifies every case independently of UBSan."
 exit $failed
-

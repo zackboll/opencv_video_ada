@@ -577,4 +577,3 @@ sh scripts/research_ecc5_float_warp.sh search-affine-seeded:0:150
 Expected: runner exit 0. The runner refuses to run against a non-instrumented OpenCV (no
 `__ubsan_handle_pointer_overflow` import in `libopencv_imgproc`). Per-case verdicts are in the
 qualification report.
-
