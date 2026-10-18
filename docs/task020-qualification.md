@@ -18,7 +18,9 @@ or safety-qualification claim is made.
 | 39083652008 | Cross-platform Video | `b09a65a` | queued |
 | 39083652015 | Windows post-merge Video | `b09a65a` | in progress |
 
-Both were incomplete when Task 020 began and are recorded as such.
+Both were incomplete when Task 020 began. They were read once more after the evidence was
+complete, and both had finished with **success** (Cross-platform 7m40s, Windows 8m34s). No
+baseline correction was needed. Windows stays push-to-main only.
 
 ## Part 1 — Expected native-UB reproductions (research evidence, NOT sanitizer-clean tests)
 
@@ -166,6 +168,8 @@ is not part of `test.sh` or `run_sanitizers.sh`, so it has no effect on these re
 
 ## Hosted CI
 
-Recorded in the PR. The PR workflow (repository-checks, linux, macos, linux-sanitizers)
+PR [#20](https://github.com/zackboll/opencv_video_ada/pull/20) is open, non-draft, with
+auto-merge disabled. The PR workflow (repository-checks, linux, macos, linux-sanitizers)
 exercises only the normal regression scope. It does not, and must not, run the research probe.
-Windows remains push-to-main only.
+Final-head results are recorded on the PR rather than here, so this file need not chase its
+own commit. Windows remains push-to-main only and is not triggered by this PR.
