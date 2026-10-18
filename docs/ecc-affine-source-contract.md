@@ -1,5 +1,24 @@
 # ECC affine source contract (Task 014)
 
+> **Follow-up note, 2026-10-18 (Task 020).** The review recorded below is historical; it was
+> accurate as a Task 014 source review but **incomplete as a safety statement**. It says "No
+> ECC undefined behavior was identified by source review". That statement was later shown
+> wrong for the native `warpAffine` call that `findTransformECC` makes on every affine iteration.
+>
+> **Task 019** ([ecc-affine-masked-source-contract.md](ecc-affine-masked-source-contract.md))
+> found that a finite `CV_32F` intermediate warp can make OpenCV 4.x perform signed `int`
+> overflow in the fixed-point `X0 + adelta[x]` / `Y0 + bdelta[x]` additions.
+>
+> **Task 020** ([tasks/020-existing-affine-safety-audit.md](tasks/020-existing-affine-safety-audit.md),
+> [task020-qualification.md](task020-qualification.md)) reached that overflow through the
+> **seeded** export (Level C). For this identity-initialized operation it was `NOT_REPRODUCED`:
+> no reproduction in the bounded identity searches on 4.1.0, 4.6.0, 4.10.0 and 5.0.0 (trial
+> counts in the Task 020 qualification). That is not a proof of safety. Current disposition for both affine APIs: `KNOWN_NATIVE_UB_UNMITIGATED`.
+>
+> The output policy below (final finiteness only) cannot repair an unsafe intermediate. The
+> Task 014 qualification results remain valid as records of what those tests measured;
+> they did not instrument OpenCV itself.
+
 Sources reviewed: `modules/video/src/ecc.cpp` at OpenCV tags **4.1.0, 4.6.0, 4.10.0 and 5.0.0**
 (4.6.0 and 4.10.0 are byte-identical; `diff` reports no difference) and the public declarations in
 `modules/video/include/opencv2/video/tracking.hpp`. Line numbers are 4.1.0 unless stated.

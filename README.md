@@ -1,5 +1,41 @@
 # OpenCV Video for Ada
 
+## Safety notice: affine ECC native signed-overflow risk (Task 020, 2026-10-18)
+
+`Estimate_ECC_Affine` (both overloads: identity-initialized, Task 014, and caller-seeded,
+Task 015) is **not qualified as free of native undefined behavior**. Disposition:
+`KNOWN_NATIVE_UB_UNMITIGATED`. Both APIs stay available and unchanged.
+
+* Native affine ECC can generate a finite `CV_32F` intermediate warp whose inverse-map
+  `warpAffine` evaluation performs a signed 32-bit integer addition that overflows. The
+  addition is in the OpenCV 4.x fixed-point path (`X0 + adelta[x]`, `Y0 + bdelta[x]`). The
+  same arithmetic also exists in OpenCV 5.0, but there it is marked `CV_DISABLE_UBSAN`.
+* **The seeded operation is implicated through the real binding.** A single call to
+  `opencv_video_estimate_ecc_affine_seeded` (the C export used by the seeded Ada overload),
+  with a seed inside the published seed domain and a 97x64 texture pair, reaches that overflow.
+  ECC generates the bad matrix at its third iteration; UBSan reports it on instrumented
+  OpenCV 4.1.0. The call then returns an ordinary `OpenCV_Error`, so the caller sees no sign
+  that undefined behavior happened.
+* The identity-initialized operation was **not reproduced** as reaching the overflow
+  (`NOT_REPRODUCED`, not `SAFE`). It calls the same native optimizer and `warpAffine` path,
+  and no binding-side argument excludes it.
+* The binding validates the final result only. Checking the output cannot repair an unsafe
+  intermediate: the undefined operation has already happened inside OpenCV before control
+  returns. The binding's seed bounds do not prevent it either, because the optimizer's
+  later iterates are not bounded by the seed.
+* Sanitizer-clean binding tests prove nothing about upstream native safety. The repository's
+  ASan/UBSan runs instrument the shim and tests, not the prebuilt OpenCV libraries. Ordinary
+  images usually converge without reaching the overflow; that does not make the API safe.
+* Safety-sensitive consumers should not treat affine ECC as qualified for undefined behavior
+  until a mitigation is established. The candidate mitigations, the reproducer and the owner
+  decision are in [docs/tasks/020-existing-affine-safety-audit.md](docs/tasks/020-existing-affine-safety-audit.md)
+  and [docs/task020-qualification.md](docs/task020-qualification.md). The original native
+  finding is in [docs/ecc-affine-masked-source-contract.md](docs/ecc-affine-masked-source-contract.md).
+
+Translation and Euclidean ECC go through the same non-homography `warpAffine` branch but were
+not audited at operand level by Task 020. Homography ECC uses `warpPerspective` and is not
+implicated by this finding.
+
 ### Moving-image-masked ECC homography alignment (Task 018)
 
 ```ada

@@ -399,6 +399,16 @@ package OpenCV.Video is
    --  schema held, NOT that the images are reliably registered. Peak memory grows with
    --  image area (six Float32 Jacobian blocks per pixel); validation does not guarantee
    --  sufficient system memory.
+   --
+   --  SAFETY (Task 020, 2026-10-18): NOT qualified as free of native undefined behavior
+   --  (KNOWN_NATIVE_UB_UNMITIGATED). Native affine ECC can generate an intermediate warp
+   --  whose OpenCV 4.x warpAffine evaluation performs signed 32-bit integer overflow
+   --  before this function returns; OpenCV 5.0 uses different kernels whose conversions
+   --  are unverified. The binding validates only the final result and cannot prevent or
+   --  detect such an intermediate. For this identity-initialized overload the overflow was
+   --  NOT_REPRODUCED (it is not shown SAFE). See
+   --  docs/tasks/020-existing-affine-safety-audit.md and
+   --  docs/ecc-affine-masked-source-contract.md.
    function Estimate_ECC_Affine
      (Template_Image : OpenCV.Core.Mat;
       Moving_Image   : OpenCV.Core.Mat;
@@ -421,6 +431,16 @@ package OpenCV.Video is
    --  conditioning restriction is applied. An accepted seed does not guarantee
    --  convergence; ECC may still raise on nonconvergence or end at a wrong finite
    --  optimum. Initial_Transform is not modified.
+   --
+   --  SAFETY (Task 020, 2026-10-18): NOT qualified as free of native undefined behavior
+   --  (KNOWN_NATIVE_UB_UNMITIGATED). A seed INSIDE the domain above was shown, through
+   --  the real C export on an UBSan-instrumented OpenCV 4.1.0, to drive native ECC to an
+   --  intermediate warp whose warpAffine evaluation overflows signed 32-bit integer
+   --  arithmetic. The call then raised the ordinary nonconvergence OpenCV_Error. The seed
+   --  domain bounds only the first iterate, not later optimizer updates. Final-result
+   --  validation cannot repair an unsafe intermediate. See
+   --  docs/tasks/020-existing-affine-safety-audit.md and
+   --  docs/ecc-affine-masked-source-contract.md.
    function Estimate_ECC_Affine
      (Template_Image    : OpenCV.Core.Mat;
       Moving_Image      : OpenCV.Core.Mat;
