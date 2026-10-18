@@ -308,6 +308,13 @@ package OpenCV.Video is
    --  Y column delta does not make Y safe. Nothing in native ECC bounds the accumulated
    --  displacement. No ECC run or call of this function was shown to reach that band
    --  (NOT_REPRODUCED, not SAFE). See docs/tasks/021-translation-euclidean-safety-audit.md.
+   --
+   --  SAFETY (Task 022, 2026-10-19): on OpenCV 5.0.0 the float warp kernels form an
+   --  out-of-object source pointer (undefined behavior) for ANY finite warp mapping a pixel
+   --  to |coordinate| >= 2**31, not only for NaN (SAFETY_GATE_NOT_ESTABLISHED on 5.0).
+   --  Confirmed by direct native replay only; no ECC run or call of this function was
+   --  shown to reach it (NOT_REPRODUCED, not SAFE). x86_64 only; other targets unqualified.
+   --  See docs/tasks/022-opencv5-float-warp-safety-audit.md.
    function Estimate_ECC_Translation
      (Template_Image : OpenCV.Core.Mat;
       Moving_Image   : OpenCV.Core.Mat;
@@ -351,6 +358,13 @@ package OpenCV.Video is
    --  translation. No ECC run or call of this function was shown to reach those values
    --  (NOT_REPRODUCED, not SAFE). See
    --  docs/tasks/021-translation-euclidean-safety-audit.md.
+   --
+   --  SAFETY (Task 022, 2026-10-19): on OpenCV 5.0.0 the float warp kernels form an
+   --  out-of-object source pointer (undefined behavior) for ANY finite rigid warp mapping a
+   --  pixel to |coordinate| >= 2**31, not only for NaN (SAFETY_GATE_NOT_ESTABLISHED on
+   --  5.0). Confirmed by direct native replay only; no ECC run or call of this function
+   --  was shown to reach it (NOT_REPRODUCED, not SAFE). x86_64 only; other targets
+   --  unqualified. See docs/tasks/022-opencv5-float-warp-safety-audit.md.
    function Estimate_ECC_Euclidean
      (Template_Image : OpenCV.Core.Mat;
       Moving_Image   : OpenCV.Core.Mat;
@@ -380,6 +394,13 @@ package OpenCV.Video is
    --  routes), but it does not bound later optimizer updates. No ECC run or call of this
    --  function was shown to reach them (NOT_REPRODUCED, not SAFE). See
    --  docs/tasks/021-translation-euclidean-safety-audit.md.
+   --
+   --  SAFETY (Task 022, 2026-10-19): on OpenCV 5.0.0 the float warp kernels form an
+   --  out-of-object source pointer (undefined behavior) for ANY finite warp mapping a pixel
+   --  to |coordinate| >= 2**31 (SAFETY_GATE_NOT_ESTABLISHED on 5.0). The seed domain keeps
+   --  the FIRST iterate about 1800x below that, but does not bound later updates. Confirmed
+   --  by direct native replay only (NOT_REPRODUCED through ECC, not SAFE). x86_64 only.
+   --  See docs/tasks/022-opencv5-float-warp-safety-audit.md.
    function Estimate_ECC_Euclidean
      (Template_Image    : OpenCV.Core.Mat;
       Moving_Image      : OpenCV.Core.Mat;
@@ -436,6 +457,13 @@ package OpenCV.Video is
    --  NOT_REPRODUCED (it is not shown SAFE). See
    --  docs/tasks/020-existing-affine-safety-audit.md and
    --  docs/ecc-affine-masked-source-contract.md.
+   --
+   --  SAFETY (Task 022, 2026-10-19): the OpenCV 5.0.0 float kernels are now verified: they
+   --  form an out-of-object source pointer (undefined behavior) for ANY finite affine warp
+   --  mapping a pixel to |coordinate| >= 2**31 (SAFETY_GATE_NOT_ESTABLISHED on 5.0; the 4.x
+   --  disposition above is unchanged). Confirmed by direct native replay only; no ECC run
+   --  or call of this function was shown to reach it on 5.0 (NOT_REPRODUCED, not SAFE).
+   --  x86_64 only. See docs/tasks/022-opencv5-float-warp-safety-audit.md.
    function Estimate_ECC_Affine
      (Template_Image : OpenCV.Core.Mat;
       Moving_Image   : OpenCV.Core.Mat;
@@ -468,6 +496,14 @@ package OpenCV.Video is
    --  validation cannot repair an unsafe intermediate. See
    --  docs/tasks/020-existing-affine-safety-audit.md and
    --  docs/ecc-affine-masked-source-contract.md.
+   --
+   --  SAFETY (Task 022, 2026-10-19): on OpenCV 5.0.0 the float kernels form an
+   --  out-of-object source pointer (undefined behavior) for ANY finite warp mapping a pixel
+   --  to |coordinate| >= 2**31 (SAFETY_GATE_NOT_ESTABLISHED on 5.0; the 4.x disposition
+   --  above is unchanged). The seed domain keeps the FIRST iterate about 1800x below that.
+   --  The Task 020 seed n435 reached about 3.4e7 on 5.0 before ECC raised; no 5.0 run was
+   --  shown to reach 2**31 (NOT_REPRODUCED, not SAFE). x86_64 only. See
+   --  docs/tasks/022-opencv5-float-warp-safety-audit.md.
    function Estimate_ECC_Affine
      (Template_Image    : OpenCV.Core.Mat;
       Moving_Image      : OpenCV.Core.Mat;

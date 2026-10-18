@@ -79,6 +79,42 @@ shown to reach undefined behavior. All three APIs stay available and unchanged.
 * **Details.** See [docs/tasks/021-translation-euclidean-safety-audit.md](docs/tasks/021-translation-euclidean-safety-audit.md)
   and [docs/task021-qualification.md](docs/task021-qualification.md).
 
+## Safety notice: OpenCV 5.0 floating-point warp kernels (Task 022, 2026-10-19)
+
+On OpenCV 5.0.0, `Estimate_ECC_Translation`, both `Estimate_ECC_Euclidean` overloads and both
+`Estimate_ECC_Affine` overloads are **not qualified as free of native undefined behavior**.
+Each has the disposition `SAFETY_GATE_NOT_ESTABLISHED` on 5.0. All APIs stay available and
+unchanged. This notice **adds to** the Task 020 and Task 021 notices above; it does not replace
+or weaken them, and the Task 020 affine disposition (`KNOWN_NATIVE_UB_UNMITIGATED`) is
+unchanged.
+
+* **Finite warps are affected, not only NaN.** Task 021 found the 5.0 float kernel unsafe only
+  for a NaN warp. Task 022 shows the **same** undefined operation for any **finite** warp that
+  maps a pixel to a coordinate of magnitude `2^31` or more, including **model-valid**
+  translation, rigid Euclidean and general affine matrices (for example a translation of
+  `3e9` pixels).
+* **What happens.** Both kernels ECC uses (`warpAffineLinearInvoker_32FC1` for the image and
+  gradients, `warpAffineNearestInvoker_8UC1` for the mask) convert the Float32 coordinate with a
+  UBSan-suppressed `cvFloor`/`cvRound`. On x86 this gives an `INT_MIN` sentinel, and the scalar
+  tail then forms an out-of-object source pointer **before** its bounds check. The bounds check
+  still sends the pixel to the border, so no out-of-bounds read was observed (ASan clean). The
+  pointer arithmetic itself is undefined behavior, which a later check cannot undo.
+* **Confirmed by direct replay only.** UBSan confirmed it on an instrumented OpenCV 5.0.0
+  (x86_64), in both AVX2 and baseline dispatch, for both kernels (Level A).
+* **Not reproduced through ECC.** No native ECC trajectory or real binding call came close: the
+  largest coordinate any ECC run produced was about `3.4e7`, roughly 64× below `2^31`
+  (`NOT_REPRODUCED`, not `SAFE`). Nothing in native ECC bounds its later iterates, and the
+  four warps run **before** ECC's own NaN/convergence checks, so an error return does not prove
+  the unsafe path was avoided.
+* **Seeds are not the exposure.** The published seed domains keep the first iterate about 1800×
+  below the threshold; only later optimizer iterates could reach it.
+* **Platform scope.** Only x86_64 AVX2 and cpu_baseline paths were executed. NEON/AArch64, RVV,
+  LASX, IPP, OpenCL, custom HAL, Windows and macOS are unqualified. On ARM the conversion may
+  behave differently (an unverified NaN-to-0 hypothesis could turn this into a silent in-image
+  read).
+* **Details.** See [docs/tasks/022-opencv5-float-warp-safety-audit.md](docs/tasks/022-opencv5-float-warp-safety-audit.md)
+  and [docs/task022-qualification.md](docs/task022-qualification.md).
+
 ### Moving-image-masked ECC homography alignment (Task 018)
 
 ```ada
