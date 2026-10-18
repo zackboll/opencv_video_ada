@@ -81,6 +81,7 @@
 #endif
 
 #include <algorithm>
+#include <cfenv>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -114,14 +115,42 @@ Handle make_handle(const cv::Mat &src) {
     return handle;
 }
 
-// Explicit model of OpenCV 4.x saturate_cast<int>(double) == cvRound on x86-64, which is
-// _mm_cvtsd_si32 (cvtsd2si, round-to-nearest-even). For NaN or a value that rounds outside
-// int32 the instruction returns the "integer indefinite" value INT_MIN for BOTH signs; it
-// does not clamp. The model never hands an out-of-range double to the real conversion: it
-// range-checks first and calls cv::saturate_cast only for values that are representable.
-// The conversion-check mode records the observed target behavior separately.
+// Task 021-R2: the ONE predicate for "x86 cvRound(double) yields a valid int32 result".
+// OpenCV 4.x/5.0 saturate_cast<int>(double) is cvRound, which on x86-64 GCC/MSVC is
+// _mm_cvtsd_si32 (cvtsd2si) under the MXCSR rounding mode; the tested mode is
+// round-to-nearest, ties-to-even (conversion-check verifies it and fails otherwise). Under
+// that mode the accepted interval is
+//     -2147483648.5 <= v < 2147483647.5
+// The lower bound is INCLUSIVE (-2147483648.5 ties to the even -2147483648, representable);
+// the upper bound is EXCLUSIVE (2147483647.5 ties to the even 2147483648, not representable).
+// Nonfinite input is rejected by std::isfinite BEFORE any comparison: an ordered comparison
+// with a NaN operand (comisd) raises FE_INVALID on x86, and nothing here may perform an
+// invalid operation. No integer conversion is executed by this predicate.
+// (R1 used std::llround for the classification. llround rounds ties AWAY from zero, so it
+// misclassified -2147483648.5 as out of range, and on NaN/huge values it is an invalid
+// conversion with an unspecified result. Every classifier now uses this predicate.)
+enum class ConvClass { IN_RANGE, OUT_OF_RANGE, NONFINITE };
+
+ConvClass classify_x86_cvround(double v) {
+    if (!std::isfinite(v)) return ConvClass::NONFINITE;
+    return (v >= -2147483648.5 && v < 2147483647.5) ? ConvClass::IN_RANGE
+                                                     : ConvClass::OUT_OF_RANGE;
+}
+
+inline bool x86_cvround_in_range(double v) { return classify_x86_cvround(v) == ConvClass::IN_RANGE; }
+
+const char *conv_class_name(ConvClass c) {
+    return c == ConvClass::IN_RANGE ? "IN_RANGE" : c == ConvClass::NONFINITE ? "NONFINITE"
+                                                                             : "OUT_OF_RANGE";
+}
+
+// Explicit model of x86 cvRound: for an out-of-range or nonfinite input the instruction
+// returns the "integer indefinite" INT_MIN for BOTH signs (it does not clamp). The model
+// never hands such a value to a real conversion; only IN_RANGE values reach
+// cv::saturate_cast, i.e. the very cvRound OpenCV executes. conversion-check records the
+// observed hardware result separately.
 int x86_cvround_model(double v) {
-    if (!(v >= -2147483648.5 && v < 2147483647.5)) return INT32_MIN;
+    if (!x86_cvround_in_range(v)) return INT32_MIN;
     return cv::saturate_cast<int>(v);
 }
 
@@ -155,7 +184,13 @@ struct FixedPointReport {
     const char *first_kind = "NONE";   // "CONVERSION" | "ROWBASE" | "PERCOLUMN"
     char first_axis = '-';
     int first_row = -1, first_col = -1;
+    // ROWBASE / PERCOLUMN: the two valid int32 operands and their int64 sum.
     int64_t first_a = 0, first_b = 0, first_sum = 0;
+    // CONVERSION (R2): an invalid conversion has no integer operands. Record the original
+    // double, its classification and which operand it feeds; never an integer image of it.
+    const char *first_conv_operand = "";   // "X0-base" | "Y0-base" | "adelta" | "bdelta"
+    double first_conv_value = 0.0;
+    ConvClass first_conv_class = ConvClass::IN_RANGE;
     // FIRST_UB: the first SIGNED-INT ADDITION that overflows, in native execution order
     // (column tables; then per row: conv X0, add X0, conv Y0, add Y0; then per pixel: add X,
     // add Y), using the INT_MIN sentinel for an out-of-range conversion exactly as native
@@ -209,9 +244,14 @@ FixedPointReport analyze_fixed_point(const double M[6], int rows, int cols, int 
         r.first_kind = kind; r.first_axis = axis; r.first_row = y; r.first_col = x;
         r.first_a = a; r.first_b = b; r.first_sum = a + b;
     };
-    auto conv_oor = [](double v) {
-        return !std::isfinite(v) || oob_i32((int64_t)std::llround(v));
+    auto record_conv = [&](char axis, int y, int x, const char *operand, double v) {
+        if (r.first_row >= 0) return;
+        r.first_kind = "CONVERSION"; r.first_axis = axis; r.first_row = y; r.first_col = x;
+        r.first_conv_operand = operand; r.first_conv_value = v;
+        r.first_conv_class = classify_x86_cvround(v);
     };
+    // Same single predicate as x86_cvround_model (R2); no integer conversion is executed.
+    auto conv_oor = [](double v) { return !x86_cvround_in_range(v); };
     for (int y = 0; y < rows; ++y) {
         const double x_pre = (M[1] * y + M[2]) * AB_SCALE;
         const double y_pre = (M[4] * y + M[5]) * AB_SCALE;
@@ -235,10 +275,10 @@ FixedPointReport analyze_fixed_point(const double M[6], int rows, int cols, int 
                 // native int additions then use that sentinel; record when they overflow
                 // (e.g. INT_MIN + 16 + negative bdelta in a rotated Euclidean warp).
                 if (any_row || any_col) ++r.conversion_then_add_overflow;
-                if (convx_oor) record_first("CONVERSION", 'X', y, x, (int64_t)std::llround(x_pre), 0);
-                else if (convy_oor) record_first("CONVERSION", 'Y', y, x, (int64_t)std::llround(y_pre), 0);
-                else if (convax_oor) record_first("CONVERSION", 'X', y, x, (int64_t)std::llround(a_pre), 0);
-                else record_first("CONVERSION", 'Y', y, x, (int64_t)std::llround(b_pre), 0);
+                if (convx_oor) record_conv('X', y, x, "X0-base", x_pre);
+                else if (convy_oor) record_conv('Y', y, x, "Y0-base", y_pre);
+                else if (convax_oor) record_conv('X', y, x, "adelta", a_pre);
+                else record_conv('Y', y, x, "bdelta", b_pre);
             } else if (any_row) {
                 ++r.rowbase;
                 if (rowx_ovf) record_first("ROWBASE", 'X', y, x, int64_t(x86_cvround_model(x_pre)), round_delta);
@@ -263,18 +303,35 @@ FixedPointReport analyze_fixed_point(const double M[6], int rows, int cols, int 
 // column-0 pixel of an overflowing row was already flagged; trace/search verdicts are per
 // matrix. The verbose lines name the first flagged condition (FIRST_UNSAFE) and the first
 // actual UB addition (FIRST_UB).
+// R2: report the first flagged condition without fabricating integers. A CONVERSION line
+// prints the original double (%.17g, which is defined for NaN/Inf/huge values and performs
+// no conversion), its classification, the operand it feeds and the x86 integer-indefinite
+// result the instruction produces (INT_MIN, an int constant, not derived from the double).
+// ROWBASE/PERCOLUMN lines keep the R1 format: two valid int32 operands and their int64 sum.
+void print_first_unsafe(const FixedPointReport &r, const char *label, int round_delta) {
+    if (std::string(r.first_kind) == "CONVERSION") {
+        std::printf("  %s delta=%d FIRST_UNSAFE=CONVERSION axis=%c row=%d col=%d operand=%s "
+                    "pre-conversion=%.17g class=%s x86-result=%d (integer indefinite)\n",
+                    label, round_delta, r.first_axis, r.first_row, r.first_col,
+                    r.first_conv_operand, r.first_conv_value, conv_class_name(r.first_conv_class),
+                    INT32_MIN);
+        return;
+    }
+    std::printf("  %s delta=%d FIRST_UNSAFE=%s axis=%c row=%d col=%d operands %lld + %lld "
+                "int64 sum=%lld%s\n",
+                label, round_delta, r.first_kind, r.first_axis, r.first_row, r.first_col,
+                (long long)r.first_a, (long long)r.first_b, (long long)r.first_sum,
+                oob_i32(r.first_sum) ? " OVERFLOW" : "");
+}
+
 long fixed_point_overflows(const double M[6], int rows, int cols, int round_delta,
                            const char *label, bool verbose) {
     FixedPointReport r = analyze_fixed_point(M, rows, cols, round_delta);
     if (verbose && r.total() > 0) {
         find_first_ub(r, M, rows, cols, round_delta);
-        std::printf("  %s delta=%d FIRST_UNSAFE=%s axis=%c row=%d col=%d operands %lld + %lld "
-                    "int64 sum=%lld%s\n"
-                    "    counts: conversion=%ld (then add overflow=%ld) rowbase=%ld percolumn=%ld\n",
-                    label, round_delta, r.first_kind, r.first_axis, r.first_row, r.first_col,
-                    (long long)r.first_a, (long long)r.first_b, (long long)r.first_sum,
-                    oob_i32(r.first_sum) ? " OVERFLOW" : "", r.conversion,
-                    r.conversion_then_add_overflow, r.rowbase, r.percolumn);
+        print_first_unsafe(r, label, round_delta);
+        std::printf("    counts: conversion=%ld (then add overflow=%ld) rowbase=%ld percolumn=%ld\n",
+                    r.conversion, r.conversion_then_add_overflow, r.rowbase, r.percolumn);
         if (r.ub_row >= 0)
             std::printf("    FIRST_UB=%s axis=%c row=%d col=%d int32 operands %lld + %lld "
                         "int64 sum=%lld\n",
@@ -600,21 +657,108 @@ void print_peak_rss() {
 // the identity-linear translation overflow window at the widest permitted geometry.
 int conversion_check() {
     int mismatches = 0;
+    // R2: the boundary comparison is meaningful only under round-to-nearest (ties-to-even).
+    // Report the active mode explicitly and fail rather than rely on the wrong boundary.
+    const int mode = std::fegetround();
+    const char *mode_name = mode == FE_TONEAREST ? "FE_TONEAREST" : mode == FE_UPWARD ? "FE_UPWARD"
+                          : mode == FE_DOWNWARD ? "FE_DOWNWARD" : mode == FE_TOWARDZERO ? "FE_TOWARDZERO"
+                                                                                         : "UNKNOWN";
+    std::printf("  ROUNDING_MODE %s%s\n", mode_name,
+                mode == FE_TONEAREST ? "" : " (NOT round-to-nearest: boundary model does not apply)");
+    if (mode != FE_TONEAREST) ++mismatches;
 #if defined(__x86_64__) || defined(_M_X64)
-    const double probes[] = {0.0, 2147483647.0, 2147483647.49, 2147483647.5, 2147483648.0,
-                             -2147483648.0, -2147483648.5, -2147483649.0, 3e9, -3e9, 1e300,
-                             std::numeric_limits<double>::infinity(),
-                             std::numeric_limits<double>::quiet_NaN()};
-    for (double v : probes) {
-        const int hw = _mm_cvtsd_si32(_mm_set_sd(v));
-        const int model = x86_cvround_model(v);
-        std::printf("  CONVERSION v=%.17g cvtsd2si=%d model=%d %s\n", v, hw, model,
-                    hw == model ? "MATCH" : "MISMATCH");
-        if (hw != model) ++mismatches;
-    }
-#else
-    std::printf("  CONVERSION non-x86 target: model not validated\n");
+    const unsigned mxcsr_rc = (_mm_getcsr() >> 13) & 3u;   // 0 = round to nearest (even)
+    std::printf("  MXCSR_RC %u%s\n", mxcsr_rc, mxcsr_rc == 0 ? " (round-to-nearest-even)" : " (UNEXPECTED)");
+    if (mxcsr_rc != 0) ++mismatches;
 #endif
+    const double inf = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    // Each probe carries the INDEPENDENT expected classification (from the IEEE argument in
+    // the predicate's comment), the expected rounded value for in-range probes, and is
+    // checked three ways: classifier vs expectation, model vs expectation, and (on x86_64)
+    // the real cvtsd2si result vs the model.
+    struct Probe { double v; ConvClass expect; int expect_value; };
+    const Probe probes[] = {
+        {-2147483648.5, ConvClass::IN_RANGE, INT32_MIN},       // tie -> even -2147483648
+        {-2147483648.49, ConvClass::IN_RANGE, INT32_MIN},
+        {-2147483648.0, ConvClass::IN_RANGE, INT32_MIN},
+        {-2147483648.51, ConvClass::OUT_OF_RANGE, INT32_MIN},
+        {-2147483649.0, ConvClass::OUT_OF_RANGE, INT32_MIN},
+        {2147483647.0, ConvClass::IN_RANGE, INT32_MAX},
+        {2147483647.49, ConvClass::IN_RANGE, INT32_MAX},
+        {2147483647.5, ConvClass::OUT_OF_RANGE, INT32_MIN},    // tie -> even 2^31, unrepresentable
+        {2147483648.0, ConvClass::OUT_OF_RANGE, INT32_MIN},
+        {0.5, ConvClass::IN_RANGE, 0},                         // ties-to-even, not away
+        {1.5, ConvClass::IN_RANGE, 2},
+        {2.5, ConvClass::IN_RANGE, 2},
+        {-2.5, ConvClass::IN_RANGE, -2},
+        {2147483646.5, ConvClass::IN_RANGE, 2147483646},
+        {-2147483647.5, ConvClass::IN_RANGE, -2147483648},
+        {0.0, ConvClass::IN_RANGE, 0},
+        {3e9, ConvClass::OUT_OF_RANGE, INT32_MIN},
+        {-3e9, ConvClass::OUT_OF_RANGE, INT32_MIN},
+        {1e300, ConvClass::OUT_OF_RANGE, INT32_MIN},
+        {-1e300, ConvClass::OUT_OF_RANGE, INT32_MIN},
+        {inf, ConvClass::NONFINITE, INT32_MIN},
+        {-inf, ConvClass::NONFINITE, INT32_MIN},
+        {nan, ConvClass::NONFINITE, INT32_MIN},
+    };
+    for (const Probe &p : probes) {
+        const ConvClass c = classify_x86_cvround(p.v);
+        const int model = x86_cvround_model(p.v);
+        const bool class_ok = c == p.expect, model_ok = model == p.expect_value;
+#if defined(__x86_64__) || defined(_M_X64)
+        const int hw = _mm_cvtsd_si32(_mm_set_sd(p.v));   // defined intrinsic; INT_MIN if invalid
+        const bool hw_ok = hw == model;
+        std::printf("  CONVERSION v=%.17g class=%s expect=%s cvtsd2si=%d model=%d expect_value=%d %s\n",
+                    p.v, conv_class_name(c), conv_class_name(p.expect), hw, model, p.expect_value,
+                    class_ok && model_ok && hw_ok ? "MATCH" : "MISMATCH");
+#else
+        const bool hw_ok = true;
+        std::printf("  CONVERSION v=%.17g class=%s expect=%s model=%d expect_value=%d %s "
+                    "(non-x86: hardware not compared)\n",
+                    p.v, conv_class_name(c), conv_class_name(p.expect), model, p.expect_value,
+                    class_ok && model_ok ? "MATCH" : "MISMATCH");
+#endif
+        if (!class_ok || !model_ok || !hw_ok) ++mismatches;
+    }
+    // Diagnostic-reporting check on invalid inputs: drive the CONVERSION branch of
+    // analyze_fixed_point/print_first_unsafe with NaN, +/-Inf and +/-1e300 row bases and
+    // require that no floating-point exception (in particular FE_INVALID, which any invalid
+    // float-to-integer conversion such as llround or a cast would raise) is raised while
+    // classifying and logging. Nonfinite and huge values reach only isfinite, ordered
+    // comparisons with finite operands, and printf("%.17g").
+    // Sensitivity control for the FE_INVALID check: a conversion of NaN by the (defined)
+    // cvtsd2si intrinsic must raise FE_INVALID, otherwise "no FE_INVALID" below proves
+    // nothing (e.g. if exception flags were not observable on this target/compiler).
+#if defined(__x86_64__) || defined(_M_X64)
+    {
+        volatile double vnan = nan;
+        std::feclearexcept(FE_ALL_EXCEPT);
+        volatile int sink = _mm_cvtsd_si32(_mm_set_sd(vnan));
+        (void)sink;
+        const bool sensitive = std::fetestexcept(FE_INVALID) != 0;
+        std::printf("  DIAG_SENSITIVITY cvtsd2si(NaN) FE_INVALID=%d %s\n", int(sensitive),
+                    sensitive ? "OK" : "FAILED (flag check cannot detect invalid conversions)");
+        if (!sensitive) ++mismatches;
+    }
+#endif
+    const double invalid[] = {nan, inf, -inf, 1e300, -1e300};
+    for (double v : invalid) {
+        const double M[6] = {1, 0, v, 0, 1, 0};
+        std::feclearexcept(FE_ALL_EXCEPT);
+        FixedPointReport r = analyze_fixed_point(M, 1, 2, 512);
+        find_first_ub(r, M, 1, 2, 512);
+        print_first_unsafe(r, "    DIAG", 512);
+        const bool invalid_raised = std::fetestexcept(FE_INVALID) != 0;
+        const bool kind_ok = std::string(r.first_kind) == "CONVERSION" &&
+                             std::string(r.first_conv_operand) == "X0-base";
+        std::printf("  DIAG_REPORT v=%.17g FE_INVALID=%d first_kind=%s FIRST_UB=%s %s\n", v,
+                    int(invalid_raised), r.first_kind, r.ub_kind,
+                    !invalid_raised && kind_ok ? "OK" : "FAILED");
+        if (invalid_raised || !kind_ok) ++mismatches;
+    }
+    std::feclearexcept(FE_ALL_EXCEPT);
     // Predicted window for 16383 columns: tx in (~2080770, 2097152).
     const double candidates[] = {1048576.0, 2.0e6,       2.0807e6,    2.0808e6,
                                  2.09e6,    2.0971515e6, 2.0971525e6, 3.0e6};
@@ -635,8 +779,8 @@ int conversion_check() {
         int n = 0; double lo = 0, hi = 0;
         for (float t = 2097140.0f; t < 2097153.0f; t = std::nextafter(t, 3.0e6f)) {
             const double pre = double(t) * 1024.0;
-            if (!(pre >= -2147483648.5 && pre < 2147483647.5)) continue;
-            if (int64_t(std::llround(pre)) + rd > INT32_MAX) { if (!n) lo = t; hi = t; ++n; }
+            if (!x86_cvround_in_range(pre)) continue;   // R2: shared predicate, no llround
+            if (int64_t(x86_cvround_model(pre)) + rd > INT32_MAX) { if (!n) lo = t; hi = t; ++n; }
         }
         std::printf("  ROWBASE_WINDOW round_delta=%d count=%d first=%.6f last=%.6f\n", rd, n, lo, hi);
     }

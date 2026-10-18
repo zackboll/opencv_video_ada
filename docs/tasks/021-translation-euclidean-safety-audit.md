@@ -196,6 +196,20 @@ an explicit model (`x86_cvround_model`): it range-checks every double first and 
 representable values to the real conversion. It performs the final addition in `int64`, so
 its own arithmetic is defined. It never executes the overflowing addition.
 
+**Conversion interval (Task 021-R2).** Under the tested rounding mode (round to nearest,
+ties to even, MXCSR RC = 0), `cvtsd2si` yields a valid int32 exactly for
+`-2147483648.5 <= v < 2147483647.5`.
+
+* The lower bound is inclusive: the tie `-2147483648.5` rounds to the even `INT_MIN`, which is
+  representable.
+* The upper bound is exclusive: `2147483647.5` rounds to the even `2^31`, which is not.
+* Nonfinite values are out of range.
+
+A single predicate, `classify_x86_cvround`, now decides this for `x86_cvround_model`,
+`analyze_fixed_point` and the window scans. The R1 classifier used `std::llround`, which
+rounds ties away from zero and is itself an invalid conversion for NaN and huge values; R2
+removed it (qualification report, R2 section). No reported count or verdict changed.
+
 ### Translation (`[1 0 tx; 0 1 ty]`; identity linear part)
 
 `adelta[x] = x*1024`, which is at most `16383*1024 = 16_775_168` and always in range.

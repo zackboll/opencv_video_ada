@@ -277,6 +277,142 @@ The maxima and trial indices equal the original runs. The remaining 1,980-trial 
 was **not** rerun. Its per-matrix verdicts are unaffected by construction (probe comment on
 `fixed_point_overflows`).
 
+### Task 021-R2 — x86 conversion classification (research-helper correction)
+
+**Defect.** R1's `analyze_fixed_point` decided whether a conversion was out of range with
+`oob_i32(std::llround(v))`. Its `CONVERSION` report also printed
+`(int64_t)std::llround(v)` as an "operand". Both were wrong:
+
+* **Wrong rounding rule.** OpenCV's x86 `cvRound(double)` is `_mm_cvtsd_si32`
+  (`fast_math.hpp` at all four tags). It rounds under MXCSR: round to nearest, **ties to
+  even**. `llround` rounds ties **away from zero**. The two disagree at
+  `-2147483648.5`: x86 gives the representable `INT_MIN`, while `llround` gives
+  `-2147483649`, which is out of range.
+* **Invalid conversion.** For NaN, ±Inf and huge finite values, `llround` is itself an
+  invalid conversion. It raises `FE_INVALID` and its result is unspecified; on this host it
+  returned `INT64_MIN`. The R1 log lines `operands -9223372036854775808 + 0 int64 sum=…` in
+  the NaN replays were artefacts of that call, not native values.
+
+**Correction** (`tests/cpp/ecc_translation_euclidean_overflow_probe.cpp`):
+
+* A single predicate, `classify_x86_cvround`, returns `NONFINITE`, `OUT_OF_RANGE` or
+  `IN_RANGE`.
+  * `IN_RANGE` means `-2147483648.5 <= v < 2147483647.5`. The lower bound is inclusive
+    because that tie rounds to the even, representable `INT_MIN`. The upper bound is
+    exclusive because that tie rounds to the even `2^31`, which is not representable.
+  * `isfinite` is tested first, so an ordered comparison never sees a NaN; on x86 such a
+    comparison would itself raise `FE_INVALID`.
+* `x86_cvround_model`, `analyze_fixed_point` and the `ROWBASE_WINDOW` scan now all use it.
+  The window scan previously had its own copy of the interval and its own `llround`.
+* The probe no longer calls `llround`, `lround` or `lrint`, and casts no double to an
+  integer. Only `IN_RANGE` values reach `cv::saturate_cast<int>`.
+* A `CONVERSION` finding now reports the operand it feeds (`X0-base`, `Y0-base`, `adelta` or
+  `bdelta`), the pre-conversion double (printed with `%.17g`), its class, and
+  `x86-result=-2147483648 (integer indefinite)`. No integer operands or sum are fabricated.
+* `FIRST_UB` is unchanged. It still reports the first overflowing signed-int addition, with
+  two valid int32 operands and an int64 sum.
+
+**Why counts cannot change, by construction.** R1's `x86_cvround_model` already used the
+correct interval; only the separate `conv_oor` lambda used `llround`. Every int64 sum, the
+`FIRST_UB` replay and the returned metric were therefore computed from correct values.
+
+The metric is `ub_pixels = rowbase + percolumn + conversion_then_add_overflow`. Each pixel
+contributes 1 exactly when a row-base or per-column addition overflows, whatever
+`conv_oor` says. A wrong conversion flag could only move a pixel between the `conversion`
+and `rowbase`/`percolumn` buckets, or change the `FIRST_UNSAFE` label. It could never change
+a count that the controls, windows, traces or searches use.
+
+**New `conversion-check` boundary tests.** All of these were checked on all four builds.
+
+* **Rounding mode.** `fegetround() == FE_TONEAREST` and MXCSR RC = 0. Any other mode is
+  reported and fails the mode.
+* **Boundary probes.** Each of the 23 probes has an independently stated expected class and
+  value, and is compared against the classifier, the model and the real `cvtsd2si`:
+
+  | Input | Class | `cvtsd2si` |
+  |---|---|---|
+  | `-2147483648.5` | IN_RANGE (tie to even) | `-2147483648` |
+  | `-2147483648.49`, `-2147483648.0` | IN_RANGE | `-2147483648` |
+  | `-2147483648.51`, `-2147483649.0` | OUT_OF_RANGE | `INT_MIN` (indefinite) |
+  | `2147483647.0`, `2147483647.49` | IN_RANGE | `2147483647` |
+  | `2147483647.5`, `2147483648.0` | OUT_OF_RANGE | `INT_MIN` |
+  | `±Inf`, `NaN` | NONFINITE | `INT_MIN` |
+  | `±1e300`, `±3e9` | OUT_OF_RANGE | `INT_MIN` |
+  | `0.5`, `1.5`, `2.5`, `-2.5`, `2147483646.5`, `-2147483647.5`, `0` | IN_RANGE | `0`, `2`, `2`, `-2`, `2147483646`, `-2147483648`, `0` (ties to even) |
+
+  Result: **23/23 MATCH, 0 MISMATCH on 4.1.0, 4.6.0, 4.10.0 and 5.0.0.**
+* **Reporting on invalid values.** `analyze_fixed_point`, `find_first_ub` and
+  `print_first_unsafe` were run with row bases of NaN, ±Inf and ±1e300. In each case
+  `FE_INVALID` stayed clear, with `first_kind=CONVERSION`, operand `X0-base` and
+  `FIRST_UB=NONE`: **5/5 OK** on every version.
+* **Sensitivity control.** `cvtsd2si(NaN)` raised `FE_INVALID=1` (OK on every version), so
+  the flag check can detect a real invalid conversion.
+
+**Updated research campaign.** The probe was rebuilt from scratch on each version with the
+established flags (`-Wall -Wextra -Wpedantic -Werror`,
+`-fsanitize=address,undefined,float-cast-overflow`), and all 20 default cases were rerun:
+
+| Version | Exit | Cases | `EXPECTED_UPSTREAM_UB_OBSERVED` | `RESEARCH_PROBE_FAILED` | Unexpected UBSan / ASan |
+|---|---|---|---|---|---|
+| 4.1.0 | 0 | 20 | 7 | 0 | 0 / 0 |
+| 4.6.0 | 0 | 20 | 7 | 0 | 0 / 0 |
+| 4.10.0 | 0 | 20 | 7 | 0 | 0 / 0 |
+| 5.0.0 | 0 | 20 | 1 | 0 | 0 / 0 |
+
+**Before/after snapshot.** All 20 cases × 4 versions were snapshotted before and after the
+change. The snapshot covered:
+
+* verdicts;
+* every native report site and its operands;
+* every `int64 model`, `counts:`, `FIRST_UB` and window line;
+* every control and binding-status line.
+
+The diff contains only two kinds of change:
+
+1. The reformatted `CONVERSION` boundary and `DIAG_*` lines in `conversion-check`.
+2. The `FIRST_UNSAFE=CONVERSION` lines in four cases, which changed from fabricated integers
+   to the new format:
+   * `level-a-rowbase-y` (linear; `Y0-base` `2147484544`);
+   * `level-a-conversion-euclidean` (`Y0-base` `2147532800`);
+   * `level-a-nonfinite-translation` and `level-a-nonfinite-euclidean` (`X0-base` `nan`,
+     `NONFINITE`).
+
+Everything else is **identical**: all counts and breakdowns, windows, `FIRST_UB` lines,
+verdicts, and every native UBSan site with its operands. That covers:
+
+* the translation X0/Y0 row-base sites (`2213/2214:84`, `2199/2200:84`, `2299/2300:84`);
+* the Euclidean row base in both modes;
+* conversion-then-add;
+* the original per-column sites;
+* the 5.0.0 NaN-translation pointer report (`warp_kernels.simd.hpp:3764`);
+* all negative controls, which stay clean.
+
+A `setUseOptimized(false)` rerun of the five row-base, conversion and control cases, on all
+four versions, gave the same sites as R1.
+
+**Bounded search re-check (R2).** This is a subset of the campaign, rerun with the corrected
+probe. It was compared with the pre-R2 run of the same probe procedure, made at the
+starting head:
+
+| Version | `search-euclidean-identity:208:1` | `search-translation:0:120` | `search-euclidean-identity:0:24` | `search-euclidean-seeded:48:12` |
+|---|---|---|---|---|
+| 4.1.0 | 0 unsafe, max 5466.17 | 0, 3273.89 (73) | 0, 12.85 (1) | 0, 1048575.62 (51) |
+| 4.6.0 | 0, 5521.995 | 0, 3273.89 (73) | 0, 12.85 (1) | 0, 1048575.62 (51) |
+| 4.10.0 | 0, 5521.995 | 0, 3273.89 (73) | 0, 12.85 (1) | 0, 1048575.62 (51) |
+| 5.0.0 | 0, 60.77 | 0, 3273.89 (73) | 0, 13.19 (4) | 0, 1048575.62 (51) |
+
+* Every `SEARCH_SUMMARY` line is identical to the pre-R2 run.
+* There were no `SEARCH_UNSAFE` lines and no sanitizer reports.
+* Trial 208 reproduces the Part 1 maximum of **5522.0** on 4.10.0 (and on 4.6.0). On 4.1.0
+  and 5.0.0 the same trial follows a different trajectory and reaches a smaller maximum.
+* The full 1,980-trial campaign was **not** rerun, because by the argument above its
+  per-matrix verdicts cannot change.
+
+**Conclusion.** No overflow count or native finding changed. The only classification
+changes are the four `FIRST_UNSAFE=CONVERSION` report lines, which are now well defined.
+The three dispositions remain **`SAFETY_GATE_NOT_ESTABLISHED`**. The README and the public
+Ada comments are unchanged, because none of their factual statements is affected.
+
 ## Part 2 — Normal regression campaign (binding qualification, unchanged scope)
 
 Each row is an independent `git clone --no-local` of the committed head, built from source.

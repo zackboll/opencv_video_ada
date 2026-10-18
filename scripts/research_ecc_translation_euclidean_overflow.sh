@@ -108,7 +108,7 @@ for case_name in $cases; do
         verdict=NO_UPSTREAM_REPORT
     fi
     echo "== case $case_name: $verdict (exit $status, warpAffine UBSan $upstream, other UBSan $foreign, ASan $asan) log $log"
-    grep -E 'runtime error:|UNSAFE_INTERMEDIATE|MODEL_INVARIANT|first unsafe|model-valid|ROTATION_ONLY|BINDING_CALL_END|NEGATIVE_CONTROL|int64 model|SEARCH_|max.translation|CONVERSION|TRANSLATION_WINDOW|EUCLIDEAN_WINDOW|ROWBASE_|FIRST_UNSAFE|FIRST_UB|counts:|PEAK_RSS' "$log" | sed 's/^/     /'
+    grep -E 'runtime error:|UNSAFE_INTERMEDIATE|MODEL_INVARIANT|first unsafe|model-valid|ROTATION_ONLY|BINDING_CALL_END|NEGATIVE_CONTROL|int64 model|SEARCH_|max.translation|CONVERSION|DIAG_|ROUNDING_MODE|MXCSR_RC|TRANSLATION_WINDOW|EUCLIDEAN_WINDOW|ROWBASE_|FIRST_UNSAFE|FIRST_UB|counts:|PEAK_RSS' "$log" | sed 's/^/     /'
 done
 echo "== NO_UPSTREAM_REPORT is not evidence of defined arithmetic. OpenCV 5.0 routes CV_32FC1/CV_8UC1"
 echo "== through float-coordinate kernels and marks the legacy integer blockline CV_DISABLE_UBSAN."
