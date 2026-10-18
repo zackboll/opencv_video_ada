@@ -8,8 +8,14 @@ Task 015) is **not qualified as free of native undefined behavior**. Disposition
 
 * Native affine ECC can generate a finite `CV_32F` intermediate warp whose inverse-map
   `warpAffine` evaluation performs a signed 32-bit integer addition that overflows. The
-  addition is in the OpenCV 4.x fixed-point path (`X0 + adelta[x]`, `Y0 + bdelta[x]`). The
-  same arithmetic also exists in OpenCV 5.0, but there it is marked `CV_DISABLE_UBSAN`.
+  addition is in the OpenCV 4.x fixed-point path (`X0 + adelta[x]`, `Y0 + bdelta[x]`).
+  OpenCV 5.0 keeps the legacy fixed-point `warpAffine` implementations, and their block-line
+  functions are annotated `CV_DISABLE_UBSAN`. On the tested x86_64 5.0.0 build (default AVX2
+  dispatch), affine ECC's image types (`CV_32FC1` linear, `CV_8UC1` nearest) went to newer
+  floating-point-coordinate kernels instead, so the legacy overflowing addition was not
+  executed in those tests. This does **not** establish 5.0 native safety: the new kernels'
+  float-to-integer conversions for extreme coordinates (including the UBSan-suppressed
+  `cvFloor(float)`) and other architecture, HAL and hardware paths remain unqualified.
 * **The seeded operation is implicated through the real binding.** A single call to
   `opencv_video_estimate_ecc_affine_seeded` (the C export used by the seeded Ada overload),
   with a seed inside the published seed domain and a 97x64 texture pair, reaches that overflow.
