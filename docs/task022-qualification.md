@@ -112,3 +112,85 @@ coordinates reached were 227.9, 1453.5, 1048729.8, 141934.6 and 1048815.3 (52–
 
 No mitigation was applied to any OpenCV used here; section 11 of the task note lists the
 unvalidated proposals.
+
+## Part 2 — Normal regression campaign (binding qualification, unchanged scope)
+
+Each row is an independent `git clone --no-local` of head
+`920d7394c20b0a4692f60ed8f6922c015653ab8a`, built from source, run **serially**. The 4.1.0,
+4.6.0 and 5.0.0 rows use the **uninstrumented** Release installs
+`~/.cache/video-task017/install-<v>` through `PKG_CONFIG_PATH`/`LD_LIBRARY_PATH`; 4.10.0 uses
+the system package. Each row runs: repository checker, the 12 configuration tests, `sh -n` on
+every script, `git diff --check bc4d619 HEAD`, Development/Validation/Release `alr build`,
+`scripts/test.sh` (every direct-native oracle, AUnit, native boundary, fault injection and
+corruption), `scripts/run_sanitizers.sh` (ASan/UBSan/leak over the shim, boundary driver, fault
+build and every oracle), the export inventory, `lk_synthetic`, the `ecc_smoke` and
+`homography_smoke` programs, `ldd`, and a check that no GPR, workflow or regression script
+references the research probe.
+
+| OpenCV | Library loaded by `run_tests` (`ldd`) | All 15 steps | AUnit run/ok/fail/err | Translation / Euclidean / seeded oracle | Affine / seeded oracle | Homography / seeded / masked (native ok/exc) | Exports / test symbols | `lk_synthetic`, smokes | Findings |
+|---|---|---|---|---|---|---|---|---|---|
+| 4.1.0 | `install-4.1.0/lib/libopencv_video.so.4.1` | rc 0 | 198/198/0/0 | 27 / 24 / 37 PASS | 32 / 34 PASS | 28/9, 20/15, 39/14 | 25 / 0 | 4/4 tracked, PASS, PASS | 0 |
+| 4.6.0 | `install-4.6.0/lib/libopencv_video.so.406` | rc 0 | 198/198/0/0 | 27 / 24 / 37 PASS | 32 / 34 PASS | 30/7, 20/15, 39/14 | 25 / 0 | 4/4 tracked, PASS, PASS | 0 |
+| 4.10.0 | system `/usr/lib/x86_64-linux-gnu/libopencv_video.so.410` | rc 0 | 198/198/0/0 | 27 / 24 / 37 PASS | 32 / 34 PASS | 30/7, 20/15, 39/14 | 25 / 0 | 4/4 tracked, PASS, PASS | 0 |
+| 5.0.0 | `install-5.0.0/lib/libopencv_video.so.500` | rc 0 | 198/198/0/0 | 27 / 24 / 37 PASS | 32 / 34 PASS | 28/9, 19/16, 39/14 | 25 / 0 | 4/4 tracked, PASS, PASS | 0 |
+
+"Findings" counts `runtime error`, `ERROR: AddressSanitizer`, `ERROR: LeakSanitizer`,
+`SUMMARY:` and compiler `warning:` lines in the full row log: **0 of each on every row**. Each
+oracle printed its own installed `CV_VERSION`. The production archive `libopencv_video_shim.a`
+contains only `opencv_video_shim.o`, defining 25 `opencv_video_*` text symbols and 0 test
+symbols. The oracle and homography counts are **identical to the Task 021 campaign** on every
+version (including the 5.0.0 homography-seeded 19/16 split).
+
+An earlier campaign start on head `eff6be7` was **stopped**, not counted: its 4.1.0 row's
+`git diff --check` step returned 2 (`new blank line at EOF` in three new Task 022 files).
+Commit `920d739` removed those trailing blank lines (whitespace only). The rebuilt probe has the
+identical sha256 `b4ce0004…615e`, so the Part 1 evidence is unaffected. All four rows above were
+then run from scratch on `920d739`.
+
+**Instrumentation scope.** In this campaign `run_sanitizers.sh` instruments the **binding** and
+links the **uninstrumented** prebuilt OpenCV. A clean result says nothing about native OpenCV
+safety, as Part 1 shows. The research probe is not part of `test.sh`, `run_sanitizers.sh` or any
+workflow, so it cannot affect these results.
+
+**No production code changed.** No AUnit registrations were added: Task 022 is research and
+documentation only, and the probe's expected-UB cases cannot run in a sanitizer-clean suite.
+Regression equivalence is the criterion; registration count (198), export count (25) and every
+oracle fixture count equal the Task 021 campaign.
+
+## Inventory confirmation
+
+* 25 production ABI exports (checker + `nm`), 198 AUnit registrations (checker + 198 run).
+* Core pin `4da9d35ea21e1b2efe96296243ea668b488c6326` in all three Alire roots (checker).
+* Crate version `0.1.0-dev`. No dependency added.
+* `git diff --stat bc4d619 HEAD` touches only: `README.md`, `src/opencv-video.ads` (comments),
+  `docs/tasks/022-…`, `docs/task022-qualification.md`, `scripts/research_ecc5_float_warp.sh`,
+  `tests/cpp/ecc5_float_warp_probe.cpp`. `cpp/`, every `.adb`, every GPR and `.github/` are
+  byte-identical to the baseline.
+* CI topology unchanged: the PR workflow has repository-checks, linux, macos and
+  linux-sanitizers; Windows stays a separate push-to-main-only workflow (checker "CI topology"
+  PASS).
+
+## Not claimed
+
+* That any ECC operation is free of native UB on any OpenCV version. On 5.0 each is
+  `SAFETY_GATE_NOT_ESTABLISHED`.
+* That any ECC operation reaches the 5.0 finite-coordinate UB. No Level B or Level C reproducer
+  exists; the Level A matrices are model-valid but were never shown to be produced by ECC.
+* Anything about the 5.0 float kernels on targets other than x86_64 — neither that they share
+  the x86 behaviour nor that they are safe for coordinates below `2^31`. Only x86_64 AVX2 and
+  cpu_baseline were executed.
+* That an out-of-bounds **read** occurs. None was observed (ASan clean); the defect is invalid pointer
+  formation.
+* Any AArch64/NEON result, including the NaN→0 hypothesis, which is unverified.
+* That any mitigation works. None was implemented or validated.
+* Any change to the Task 020 (`KNOWN_NATIVE_UB_UNMITIGATED`) or Task 021
+  (`SAFETY_GATE_NOT_ESTABLISHED`) dispositions. They are unchanged.
+* Release readiness. No version, tag or release change was made.
+
+## Hosted CI
+
+PR #22 targets `main`, is non-draft, and has auto-merge disabled. Its workflow covers only the
+normal regression scope and does not run the research probe. Windows stays push-to-main only and
+is not triggered by this PR. Final-head results are recorded on the PR rather than here, so this
+file does not chase its own commit. A head that has not finished is reported as
+`HOSTED_CI_PENDING`, separately from the technical dispositions.
