@@ -1,5 +1,33 @@
 # Seeded affine ECC source contract (Task 015)
 
+> **Follow-up note, 2026-10-18 (Task 020).** The historical review below said the
+> `X0 + adelta[x]` overflow "was reasoned from source, not demonstrated". It also said "the seed
+> bounds make it unreachable under the 16,384-pixel geometry limit". **That second conclusion is
+> wrong.** The seed bounds constrain only the first iterate. Native ECC applies unbounded
+> Gauss-Newton updates afterwards, and later intermediate warps can be arbitrarily large.
+>
+> Task 020 demonstrated the exposure through the real C export
+> `opencv_video_estimate_ecc_affine_seeded`. The seed `[0.580653667 -0.412717313 -4.85272264
+> -0.241246387 0.386808515 -10.5655231]` is inside the published domain. With a 97x64 texture
+> pair, 100 iterations and eps 1e-8, ECC produced the third-iteration warp
+> `[-45747.7891 88966.1875 -3195937.25 -69792.625 128145.844 -4427218.5]`. UBSan on
+> instrumented OpenCV 4.1.0 then reported `imgwarp.cpp:2285/2286` and
+> `imgwarp.sse4_1.cpp:204/205` signed-integer overflow, with
+> `ecc_affine_entry -> findTransformECC -> warpAffine` on the stack. The call returned
+> `OPENCV_VIDEO_ERROR_OPENCV` ("NaN encountered").
+>
+> Seed `[0.45051536 0.286671013 23.7435341 -0.437181264 1.13443863 -37.4001312]` at 100x64
+> makes native ECC generate PR #19 Matrix B exactly at iteration 3 on OpenCV 5.0.0. Matrix B is
+> outside int32 for the 4.x arithmetic model. OpenCV 5.0 does not execute that integer path for
+> these types; see the Task 020 note.
+>
+> See [tasks/020-existing-affine-safety-audit.md](tasks/020-existing-affine-safety-audit.md),
+> [task020-qualification.md](task020-qualification.md) and
+> [ecc-affine-masked-source-contract.md](ecc-affine-masked-source-contract.md). Disposition:
+> `KNOWN_NATIVE_UB_UNMITIGATED`. The seed policy is unchanged and remains a valid input
+> contract, but it is **not** a native-safety guarantee. The Task 015 measurements below remain
+> valid records of what they measured.
+
 Scope: `cv::findTransformECC(..., MOTION_AFFINE, ...)` with a caller-supplied initial 2x3 Float32
 warp. Sources read: `modules/video/src/ecc.cpp` of the pinned local trees 4.1.0 and 5.0.0 (built
 from `opencv-4.1.0` / `opencv-5.0.0` under `~/.cache/video-task004`) and the installed 4.10.0
