@@ -81,6 +81,40 @@ shown to reach undefined behavior. All three APIs stay available and unchanged.
 
 ## Safety notice: OpenCV 5.0 floating-point warp kernels (Task 022, 2026-10-19)
 
+> **R1 correction (2026-10-19): ordinary ECC use is affected on OpenCV 5.0.** The original
+> notice below said the 5.0 hazard needed coordinates near `2^31` and was not reached by ECC.
+> **That is superseded.** On the tested OpenCV 5.0.0 x86_64 build, **all five** ECC operations
+> (`Estimate_ECC_Translation`, both `Estimate_ECC_Euclidean` overloads, both
+> `Estimate_ECC_Affine` overloads) were observed, through the real binding with ordinary
+> inputs, forming source pointers **outside the source allocation**. This is undefined behavior
+> in C++. Each is now **`KNOWN_NATIVE_UB_UNMITIGATED` on OpenCV 5.0**.
+>
+> * **Cause.** OpenCV's scalar remainder loop computes `src + srcstep*iy + ix` *before* its
+>   bounds check, for every pixel it handles. One pixel just past the image edge is enough. On
+>   the 97×64 translation fixture with a `(2,1)` shift, pixel `(96,63)` maps to source
+>   `(98,64)`, an element offset of 6306. That is 96 elements past the end of the real
+>   allocation, with an ordinary int32 coordinate.
+> * **Successful results are affected.** The translation, Euclidean and affine calls returned
+>   status OK with correct alignments while forming these pointers. The seeded calls form them
+>   on their first warp, from seeds inside the published domain.
+> * **No memory is read out of bounds.** The bounds check still routes these pixels to the
+>   border, so ASan is clean. UBSan is also silent, because the address does not wrap. The
+>   finding comes from source analysis, the measured allocation bounds and gdb captures of the
+>   actual pointer register, not from a sanitizer report.
+> * **Which widths are hit.** It occurs whenever the image width leaves a scalar remainder:
+>   width not a multiple of 16 for AVX2, or of 8 for the baseline path. Widths that are
+>   multiples avoid this loop. That is an observation, not a supported mitigation.
+> * **Scope.** OpenCV 5.0.0 on x86_64 (AVX2 and baseline dispatch) only. The 4.x dispositions
+>   above (Task 020, Task 021) are unchanged. All APIs stay available and unchanged. A fix
+>   needs a separate, owner-approved task.
+> * **Int32 boundary corrected.** "Magnitude `2^31` or more" below is inexact: `-2^31` is
+>   representable. The valid range is `-2^31 <= v < 2^31`.
+>
+> Details: [task note section R1](docs/tasks/022-opencv5-float-warp-safety-audit.md#r1--ordinary-out-of-allocation-scalar-pointer-formation-2026-10-19)
+> and [qualification Part R1](docs/task022-qualification.md#part-r1--ordinary-coordinate-pointer-formation-2026-10-19).
+
+*Original Task 022 notice (history; its exposure conclusions are superseded on 5.0 by R1 above):*
+
 On OpenCV 5.0.0, `Estimate_ECC_Translation`, both `Estimate_ECC_Euclidean` overloads and both
 `Estimate_ECC_Affine` overloads are **not qualified as free of native undefined behavior**.
 Each has the disposition `SAFETY_GATE_NOT_ESTABLISHED` on 5.0. All APIs stay available and

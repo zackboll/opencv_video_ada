@@ -315,6 +315,15 @@ package OpenCV.Video is
    --  Confirmed by direct native replay only; no ECC run or call of this function was
    --  shown to reach it (NOT_REPRODUCED, not SAFE). x86_64 only; other targets unqualified.
    --  See docs/tasks/022-opencv5-float-warp-safety-audit.md.
+   --  SAFETY (Task 022-R1, 2026-10-19; SUPERSEDES the Task 022 exposure claim above on
+   --  OpenCV 5.0): KNOWN_NATIVE_UB_UNMITIGATED on 5.0. The 5.0 scalar warp tail forms
+   --  src + srcstep*iy + ix BEFORE its bounds test, so an ordinary, int32-representable
+   --  coordinate one pixel past the image edge is enough; 2**31 is not needed. A real call of
+   --  this function (97x64, (2,1) shift, status OK) was observed under gdb forming source
+   --  pointers outside the source allocation (offset 6306, 96 elements past its one-past).
+   --  No load follows, so ASan/UBSan stay silent; a correct result does not imply defined
+   --  behaviour. Exactly -2**31 is representable (range -2**31 <= v < 2**31). x86_64 AVX2
+   --  and baseline only; 4.x disposition above unchanged. See section R1 of that file.
    function Estimate_ECC_Translation
      (Template_Image : OpenCV.Core.Mat;
       Moving_Image   : OpenCV.Core.Mat;
@@ -365,6 +374,14 @@ package OpenCV.Video is
    --  5.0). Confirmed by direct native replay only; no ECC run or call of this function
    --  was shown to reach it (NOT_REPRODUCED, not SAFE). x86_64 only; other targets
    --  unqualified. See docs/tasks/022-opencv5-float-warp-safety-audit.md.
+   --  SAFETY (Task 022-R1, 2026-10-19; SUPERSEDES the Task 022 exposure claim above on
+   --  OpenCV 5.0): KNOWN_NATIVE_UB_UNMITIGATED on 5.0. The 5.0 scalar warp tail forms
+   --  src + srcstep*iy + ix BEFORE its bounds test, so an ordinary int32 coordinate just past
+   --  the image edge is enough; 2**31 is not needed. A real call of this function (97x64,
+   --  6 degrees, status OK) was observed under gdb forming source pointers outside the
+   --  source allocation from the second iterate on. ASan/UBSan stay silent; a correct
+   --  result does not imply defined behaviour. Exactly -2**31 is representable. x86_64 AVX2
+   --  and baseline only; 4.x disposition above unchanged. See section R1 of that file.
    function Estimate_ECC_Euclidean
      (Template_Image : OpenCV.Core.Mat;
       Moving_Image   : OpenCV.Core.Mat;
@@ -401,6 +418,14 @@ package OpenCV.Video is
    --  the FIRST iterate about 1800x below that, but does not bound later updates. Confirmed
    --  by direct native replay only (NOT_REPRODUCED through ECC, not SAFE). x86_64 only.
    --  See docs/tasks/022-opencv5-float-warp-safety-audit.md.
+   --  SAFETY (Task 022-R1, 2026-10-19; SUPERSEDES the Task 022 exposure and "1800x" seed
+   --  claims above on OpenCV 5.0): KNOWN_NATIVE_UB_UNMITIGATED on 5.0. The 5.0 scalar warp
+   --  tail forms src + srcstep*iy + ix BEFORE its bounds test; the seed-domain margin was
+   --  about int32 conversion only and does not protect pointer formation. A real call of
+   --  this function with an IN-DOMAIN seed (theta 0.9, t = +/-2**20) was observed under gdb
+   --  forming source pointers outside the source allocation on its FIRST warp, before ECC
+   --  raised its ordinary "NaN encountered" error. ASan/UBSan stay silent. x86_64 AVX2 and
+   --  baseline only; 4.x disposition above unchanged. See section R1 of that file.
    function Estimate_ECC_Euclidean
      (Template_Image    : OpenCV.Core.Mat;
       Moving_Image      : OpenCV.Core.Mat;
@@ -464,6 +489,14 @@ package OpenCV.Video is
    --  disposition above is unchanged). Confirmed by direct native replay only; no ECC run
    --  or call of this function was shown to reach it on 5.0 (NOT_REPRODUCED, not SAFE).
    --  x86_64 only. See docs/tasks/022-opencv5-float-warp-safety-audit.md.
+   --  SAFETY (Task 022-R1, 2026-10-19; SUPERSEDES the Task 022 exposure claim above on
+   --  OpenCV 5.0): KNOWN_NATIVE_UB_UNMITIGATED on 5.0 as well. The 5.0 scalar warp tail
+   --  forms src + srcstep*iy + ix BEFORE its bounds test, so an ordinary int32 coordinate
+   --  just past the image edge is enough; 2**31 is not needed. A real call of this function
+   --  (97x64, status OK) was observed under gdb forming source pointers outside the source
+   --  allocation from the second iterate on. ASan/UBSan stay silent; a correct result does
+   --  not imply defined behaviour. x86_64 AVX2 and baseline only; the 4.x (Task 020)
+   --  disposition above is unchanged. See section R1 of that file.
    function Estimate_ECC_Affine
      (Template_Image : OpenCV.Core.Mat;
       Moving_Image   : OpenCV.Core.Mat;
@@ -504,6 +537,14 @@ package OpenCV.Video is
    --  The Task 020 seed n435 reached about 3.4e7 on 5.0 before ECC raised; no 5.0 run was
    --  shown to reach 2**31 (NOT_REPRODUCED, not SAFE). x86_64 only. See
    --  docs/tasks/022-opencv5-float-warp-safety-audit.md.
+   --  SAFETY (Task 022-R1, 2026-10-19; SUPERSEDES the Task 022 exposure and "1800x" seed
+   --  claims above on OpenCV 5.0): KNOWN_NATIVE_UB_UNMITIGATED on 5.0 as well. The 5.0
+   --  scalar warp tail forms src + srcstep*iy + ix BEFORE its bounds test; the seed-domain
+   --  margin was about int32 conversion only and does not protect pointer formation. A real
+   --  call of this function with the IN-DOMAIN Task 020 seed n435 was observed under gdb
+   --  forming source pointers outside the source allocation on its FIRST warp, before ECC
+   --  raised "NaN encountered". ASan/UBSan stay silent. x86_64 AVX2 and baseline only; the
+   --  4.x (Task 020) disposition above is unchanged. See section R1 of that file.
    function Estimate_ECC_Affine
      (Template_Image    : OpenCV.Core.Mat;
       Moving_Image      : OpenCV.Core.Mat;

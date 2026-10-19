@@ -7,6 +7,19 @@ registrations are all **unchanged**. No production Ada, C++, dependency or CI-to
 was made: the only edits are the new opt-in research harness, documentation, and dated
 consumer notices.
 
+> **R1 correction (2026-10-19) — read this first.** Sections 1–14 below are the original Task 022
+> audit, kept as historical record. **Task 022-R1 supersedes their exposure conclusions.** The
+> original audit tied the scalar-tail pointer hazard to coordinates outside int32 (about `2^31`)
+> and so found no ECC reachability. That was too narrow. `src + srcstep*iy + ix`
+> (`warp_common.scalar.hpp:12`) is formed before the bounds test for **every** scalar-tail pixel,
+> including ordinary int32 coordinates just past the image edge. R1 shows that **every one of the
+> five ECC operations, called through the real binding with ordinary inputs on the tested OpenCV
+> 5.0.0 x86_64 build, forms source pointers outside the actual source allocation**: the 97×64
+> translation fixture at offset 6306 (96 elements past the allocation's one-past position).
+> Neither ASan nor UBSan reports anything. The int32 boundary was also misstated: exactly `-2^31`
+> is representable (section R1.6). See **section R1** at the end of this file; the corrected
+> dispositions are in R1.8. The extreme-coordinate UBSan findings below remain valid.
+
 This task asks whether OpenCV 5.0.0's newer **floating-point** `warpAffine` kernels are safe
 for the finite intermediate transforms ECC can generate, especially for very large,
 nonfinite or outside-the-image coordinates. Tasks 020/021 audited the **legacy 4.x
@@ -577,3 +590,303 @@ sh scripts/research_ecc5_float_warp.sh search-affine-seeded:0:150
 Expected: runner exit 0. The runner refuses to run against a non-instrumented OpenCV (no
 `__ubsan_handle_pointer_overflow` import in `libopencv_imgproc`). Per-case verdicts are in the
 qualification report.
+
+---
+
+## R1 — Ordinary out-of-allocation scalar pointer formation (2026-10-19)
+
+Sections 1–14 above are unchanged, historical text. Where they conflict with this section,
+this section governs. Starting PR head `0977d07c72dbd7f44aecf54eb3de0860751e1f79` (verified
+against local branch, fetched remote and PR #22 head; worktree clean). OpenCV 5.0.0 source
+`~/.cache/video-task017/opencv-5.0.0`; instrumented build `install-5.0.0-san`, imgproc sha256
+`73c4d0d9…7292` (unchanged from Task 022).
+
+### R1.1 What the original audit got wrong
+
+The original audit (sections 5, 8, 9, 13) modelled the hazard as **conversion first,
+pointer second**: an out-of-range Float32 becomes `INT_MIN`, and only that sentinel puts
+`srcptr` outside the object. It therefore measured ECC exposure as "distance to `2^31`",
+found 64× headroom, and concluded `NOT_REPRODUCED`. That is not the C++ rule. The scalar
+tail is
+
+```cpp
+int ix = cvFloor(sx), iy = cvFloor(sy);                    // warp_common.scalar.hpp:133-134
+const float *srcptr = src + srcstep * iy + ix;             // :12, UNCONDITIONAL
+if (((unsigned)ix < (unsigned)(srccols-1)) &
+    ((unsigned)iy < (unsigned)(srcrows-1))) { /* load */ } // :139, AFTER the pointer exists
+else { /* border: per-tap checks, no load through srcptr if outside */ }
+```
+
+Under C++ `[expr.add]/4`, `P + J` is defined only if the result stays inside the array
+object `P` points into, or exactly one past its end. A pointer that lands even one element
+past the one-past position is undefined to **form**, whether or not anyone dereferences it.
+A later bounds test cannot repair it. A perfectly representable `ix = 98, iy = 64` is enough.
+The conversion range is irrelevant to this hazard.
+
+### R1.2 Allocation bounds (what "outside" is measured against)
+
+The C++ object is the heap block, not the Mat's `rows × cols` view. On glibc/Linux this
+build's `fastMalloc` takes the non-memalign path (`alloc.cpp:86-99`: memalign is disabled on
+glibc; `:160-164`). It returns `alignPtr(malloc(n + 8 + 64) + 8, 64)`. The ASan runtime
+(`__sanitizer_get_allocated_begin/size`) reports that malloc'd chunk exactly, and the probe
+compares against it. For the ECC sources (`ecc.cpp:436, 448-449, 478`; all `Mat(hd, wd, type)`,
+contiguous, template-sized):
+
+| Source (64 rows × 97 cols, contiguous) | elem | srcstep (elements) | logical extent | last valid / one-past (logical) | **ASan chunk, element range relative to `src`** |
+|---|---|---|---|---|---|
+| `CV_32FC1` (`imageFloat`, `gradientX/Y`) | 4 B | 97 | 6208 | 6207 / 6208 | **`[-16, 6210)`** (24904 B) |
+| `CV_8UC1` (`preMask`) | 1 B | 97 | 6208 | 6207 / 6208 | **`[-64, 6216)`** (6280 B) |
+
+So the real object extends a few elements past `rows*cols` and starts before `src`. The
+"one-past" that matters is the chunk's (6210 linear, 6216 nearest), not 6208. Exactly where
+`src` falls inside the chunk depends on the address `malloc` returns. The probe therefore
+also prints a **placement-independent** range: `datastart − 71 B .. datalimit + 64 B`, the
+widest any `fastMalloc` placement can produce. A pointer outside that range is outside the
+object for **every** run (`ANY_ALIGNMENT`); one inside it is outside only for the observed
+layout (`THIS_LAYOUT_ONLY`).
+
+### R1.3 The `(2,1)` counterexample, both kernels
+
+`M = [1 0 2; 0 1 1]` (exact Float32), `WARP_INVERSE_MAP`, destination pixel `(x=96, y=63)`.
+At width 97, AVX2 `uf = 16`, so the vector loop covers `x = 0..95` and `x = 96` is the **only**
+scalar-tail column. The baseline `uf = 8` likewise leaves only `x = 96`.
+
+| Kernel | mapped `(sx,sy)` | `ix, iy` | srcstep | mathematical offset | chunk range | beyond one-past | verdict | ASan / UBSan |
+|---|---|---|---|---|---|---|---|---|
+| `warpAffineLinearInvoker_32FC1` (`cvFloor`) | (98, 64) | 98, 64 | 97 | **6306** | `[-16, 6210)` | **96 elements** | `PTR_OUTSIDE_ALLOCATION (ANY_ALIGNMENT)` | 0 / 0 |
+| `warpAffineNearestInvoker_8UC1` (`cvRound`) | (98, 64) | 98, 64 | 97 | **6306** | `[-64, 6216)` | **90 elements** | `PTR_OUTSIDE_ALLOCATION (ANY_ALIGNMENT)` | 0 / 0 |
+
+The arithmetic: `97·64 + 98 = 6306`. The logical last index is 6207 and the logical one-past
+6208, so 6306 is 98 past the logical one-past. More importantly it is 96 (linear) / 90
+(nearest) elements past the **real chunk's** one-past, and beyond the placement-independent
+bound (6224 / 6272). The coordinate is int32-representable; no conversion sentinel is involved.
+
+Border handling is correct. `(unsigned)98 < 96` is false, so the load branch is skipped. In
+`CV_WARP_SCALAR_FETCH_PIXEL_C1`, every tap with `ix+dx >= 97` or `iy+dy >= 64` takes the
+`BORDER_CONSTANT` branch and stores `bval`. **No load through `srcptr` happens**, and ASan is
+correctly silent. UBSan's `pointer-overflow` check only fires when the address computation
+wraps (unsigned overflow of the full address), and `src + 25224 B` does not wrap, so UBSan is
+silent too. Both silences are expected and are not evidence of validity.
+
+### R1.4 Native execution evidence (the expression is really evaluated)
+
+Source-level reasoning alone could leave room for "the optimiser deleted the unused pointer".
+That is irrelevant to the abstract machine (UB is a property of the source program), but it
+was checked anyway against the **unmodified** instrumented build:
+
+* **Disassembly.** In all four scalar tails (`opt_AVX2` and `cpu_baseline`, linear and
+  nearest), the pointer is materialised by a `lea` immediately after the `imul`/`add` of
+  `srcstep*iy + ix`, before the `jns`/`jae` of the bounds test. Sites (imgproc file offsets):
+  `opt_AVX2` linear `0x6a64bdb lea (%rdi,%rax,1),%r14`, `opt_AVX2` nearest
+  `0x68c37fb lea (%r11,%rdx,1),%r12`, `cpu_baseline` linear `0x448acb3 lea (%rdi,%rax,1),%r14`,
+  `cpu_baseline` nearest `0x42f9cef lea (%rcx,%rdx,1),%rbp`. The `(2,1)` value is not
+  constant-folded or sunk past the guard.
+* **gdb register capture.** A breakpoint on the instruction after each `lea` records the actual
+  `srcptr` register. In the real-binding translation run (R1.5), the AVX2 linear site was hit
+  1344 times (21 calls × 64 rows, `x = 96` every time). 18 of those hits had
+  `srcptr = src + 6306·4`, outside the chunk recorded at kernel entry with
+  `__sanitizer_get_allocated_begin`. The nearest site was hit 448 times, 6 outside at offset
+  6306. Under `cv::setUseOptimized(false)` on the `(2,1)` case, the `cpu_baseline` sites were hit
+  64 times each, with maximum offset 6306 for both kernels.
+* **Width dependence** (`r1-sweep`, AVX2 native hit counts / defined-model verdicts, `(+2,+1)`):
+
+| width | 32 | 33 | 64 | 96 | 97 | 98 | 128 | 129 |
+|---|---|---|---|---|---|---|---|---|
+| AVX2 native tail hits (L / N) | 0 / 0 | 64 / 64 | 0 / 0 | 0 / 0 | 64 / 64 | 128 / 128 | 0 / 0 | 64 / 64 |
+| AVX2 tail verdict, linear | no tail | OUTSIDE (any) | no tail | no tail | OUTSIDE (any) | OUTSIDE (any), 2 px | no tail | OUTSIDE (any) |
+| AVX2 tail verdict, nearest | no tail | OUTSIDE (layout) | no tail | no tail | OUTSIDE (any) | OUTSIDE (any), 2 px | no tail | OUTSIDE (any) |
+| baseline (`uf = 8`, `setUseOptimized(false)`) | no tail | same as AVX2 | no tail | no tail | same | same | no tail | same |
+
+Widths that are multiples of 16 (AVX2) or 8 (baseline) execute **no** scalar tail. The vector
+body never forms such a pointer: it keeps lane offsets as `v_int32` values
+(`warp_kernels.simd.hpp:26-38`) and forms `src + addr[i]` only per lane, inside an in-bounds
+test (`warp_common.vector.hpp:176-179`, and `:6-32` only when `inner_mask` is all-true). A clean
+result at a vector-only width therefore says nothing about the scalar path. No width was
+changed to avoid a finding. Every run was ASan 0 / UBSan 0.
+
+**Evidence types used** (kept distinct): source-level reasoning (R1.1); mathematical allocation-
+range analysis in defined int64 arithmetic against ASan's chunk bounds (R1.2–R1.3, all
+`PTR_RANGE` lines); native debugger observation of the unmodified binary (this section). **No**
+temporary instrumented OpenCV copy was built, so no optimizer-equivalence question arises.
+**No** sanitizer diagnostic covers the ordinary cases (UBSan 0, ASan 0).
+
+### R1.5 Level B and Level C: ordinary ECC reaches it
+
+The task's priority question. All five operations, ordinary deterministic fixtures, OpenCV
+5.0.0 AVX2 default dispatch, x86_64.
+
+**Level B (native `findTransformECC`, every intermediate, defined model).** `trace-*` cases:
+
+| Operation (fixture) | First out-of-allocation iteration | Stored Float32 warp entering it | AVX2-tail pixel | mapped → `ix,iy` | offset | Iterations with OOB / traced |
+|---|---|---|---|---|---|---|
+| translation (97×64, `(2,1)` shift) | **2** | `[1 0 2.14121246 0 1 1.13584876]` | (96,63) | (98.14, 64.14) → 98, 64 | 6306 | 7 / 8 |
+| Euclidean (97×64, 6°, (2,1)) | **2** | `[0.99701291 -0.07723467 1.71546364 0.07723467 0.99701291 2.64753723]` | (96,55) | (93.18, 64.90) → 93, 64 | 6301 | 9 / 10 |
+| affine (97×64) | **2** | `[1.01463938 0.00125975 3.07565260 -0.01523841 1.03348875 1.63136744]` | (96,62) | (100.56, 64.24) → 100, 64 | 6308 | 99 / 100 |
+| Euclidean seeded (θ=0.9, t=±2^20, in-domain) | **1** (the seed) | `[0.62161 -0.78333 1048576 0.78333 0.62161 -1048576]` | (96,0) | → 1048635, −1048501 | −100655962 | 1 / 1 |
+| affine seeded (n435 seed, 100×64) | **1** (the seed) | `[0.45051536 0.28667101 23.7435341 -0.43718126 1.13443863 -37.4001312]` | (96,0) | (66.99, −79.37) → 66, −80 | −7934 | 3 / 3 |
+
+The identity first iterate is always pointer-safe: identity is the R1 pointer-safe control.
+The first real update already moves the bottom-right scalar-tail pixel one row below the
+image, and that suffices.
+
+**Level C (real exported C ABI, genuine Core-owned Mat handles, validated inputs,
+`observe:level-c-*`).** These are native register captures, not the model:
+
+| C export | Final status | AVX2 linear tail: outside / in-chunk | AVX2 nearest tail: outside / in-chunk | Example native out-of-allocation `srcptr` |
+|---|---|---|---|---|
+| `opencv_video_estimate_ecc_translation` | **0 (OK)**, displacement (2.0119, 1.0128) | **18** / 1262 | **6** / 442 | `ix=98 iy=64`, offset 6306 |
+| `opencv_video_estimate_ecc_euclidean` | **0 (OK)**, angle 0.1047 | **267** / 1589 | **98** / 542 | `ix=91 iy=64`, offset 6299 |
+| `opencv_video_estimate_ecc_euclidean_seeded` | 3 (ECC "NaN encountered") | **128** / 0 | **64** / 0 | `ix≈1.05e6 iy≈−1.05e6` |
+| `opencv_video_estimate_ecc_affine` | **0 (OK)** | **597** / 18539 | **198** / 6202 | `ix=100 iy=65`, offset 6405 |
+| `opencv_video_estimate_ecc_affine_seeded` | 3 (ECC "NaN encountered") | **2048** / 0 | **768** / 0 | `ix=−384944 iy=−702989` |
+
+The first linear call of each process is consumed by the gdb bootstrap breakpoint, so its
+hits are `UNMATCHED` and never classified. All counts are lower bounds. UBSan 0, ASan 0, LSan 0
+in every run. The three successful calls show that **a correct, converged alignment result is
+produced by an execution that formed out-of-allocation pointers**. The two seeded calls form
+them on the very first warp, from a seed inside the published domain, before ECC's own NaN
+check raises (`ecc.cpp:523-526` precede `:582`).
+
+### R1.6 Negative coordinates and the int32 boundary (Issue B)
+
+**Negative displacement `(-2,-1)`.** It underruns at the top-left. At width 97 the AVX2 tail
+pixel `(96,0)` maps to `(94,-1)`, offset `−3`, which is inside the linear chunk `[-16, …)`
+and the nearest chunk `[-64, …)`. That is `PTR_WITHIN_PARENT_OUTSIDE_ROI`: outside the
+logical image but inside the allocation (the fastMalloc alignment header). So **not every
+out-of-image coordinate is outside the allocation**, and the probe does not classify it as
+unsafe. A tail pixel further left does underrun. At width 111 the AVX2 tail is `x = 96..110`;
+pixel `(96,0)` maps to `(94,-1)` with srcstep 111, giving offset `−17`. That is one element
+before this layout's chunk begin (`−16`) but within the placement-independent range:
+`PTR_OUTSIDE_ALLOCATION (THIS_LAYOUT_ONLY)`. The pointer precedes the allocation for the
+observed address, and whether that holds in another run depends on `malloc` placement. Under
+the strict reading of `srcstep * iy` with `size_t srcstep` and `iy < 0`, the intermediate
+`src + srcstep*iy` adds about `2^64` and is outside the object for every `iy < 0` pixel. The
+probe reports this separately (`PTR_P1_UNSIGNED`) and **no verdict depends on it**.
+
+**ROI.** With a noncontiguous source at `(5,3)` in a `113 × 72` parent (srcstep 113), the
+`(2,1)` corner offset is `113·64 + 98 = 7330`, inside the parent chunk `[-360, 7794)`.
+`(-2,-1)` gives `−19`, also inside: `PTR_WITHIN_PARENT_OUTSIDE_ROI` for both. Out-of-image is
+not out-of-allocation when a parent exists. ECC's own sources are not ROIs (R1.2).
+
+**Float32 → int32 boundary, corrected.** The representable interval is
+`−2147483648 <= v < 2147483648`:
+
+| Float32 coordinate | Classification |
+|---|---|
+| `-2147483648` (`-2^31`, `0xcf000000`) | **In range**; converts exactly to `INT_MIN` (a valid conversion, not the sentinel) |
+| next Float32 below, `-2147483904` | Out of range → x86 integer-indefinite `INT_MIN` |
+| `2147483520` (`2^31 − 128`, last below `2^31`) | In range |
+| `2147483648` (`2^31`) | Out of range → `INT_MIN` |
+
+Corrections to the historical text:
+
+* Section 4 already stated the correct interval, and the probe's `classify_coord` implements
+  `v >= 2^31 || v < -2^31`. `conversion-check` treats `-2^31` as in range (17/17 match).
+* The blanket wording in the headline, the section 5 table header, the dispositions table,
+  README and Ada notices ("`|coordinate| >= 2^31`", "magnitude `2^31` or more") is **wrong at
+  exactly `-2^31`** and is superseded. A valid `-2^31` conversion gives the same integer as the
+  sentinel. It is a different event (no invalid conversion), yet it still yields an
+  out-of-object pointer. Conversion validity and pointer validity are separate questions.
+* "Every finite warp reaching the threshold executes the same unsafe scalar path" is also
+  superseded. Whether any pixel executes the scalar tail, and which mapped pixel it handles,
+  depends on kernel, dispatch width and destination column.
+
+### R1.7 Reclassified controls
+
+| Control (historical result kept) | Sanitizer-negative? | Pointer-range-negative? | R1 class |
+|---|---|---|---|
+| `negative` (`(2,1)`, rigid, affine at 97×64) | yes (0 reports) | **no**: tail offsets 6306 / 6300 / −569, all `ANY_ALIGNMENT` | **source-level unsafe, sanitizer-silent** |
+| `level-a-far-control` (`\|t\| = 1e6`) | yes | **no**: offset −95999904 | source-level unsafe, sanitizer-silent |
+| `level-a-matrix-b` (Task 020 matrix) | yes | **no**: offset −46756234 | source-level unsafe, sanitizer-silent |
+| `level-a-boundary-below` (`2^31−128`) | yes | **no** | source-level unsafe, sanitizer-silent. Its tail pixel `x = 16368` maps to `2147483520 + 16368`, which rounds in Float32 above `2^31` (out of range), so its tail index is the sentinel. Its `NEGATIVE_CONTROL_OK` checked only pixel `(0,0)` |
+| `conversion-check` | yes | n/a (no warp) | conversion control only |
+| **`r1-identity-control` (new)** | yes | **yes**: worst offset 6207 = last element | **genuine pointer-range-negative control** |
+
+These four cases are kept, with their original fixtures and historical verdicts. They are
+**no longer described as pointer-safety controls**. The runner's `controls` list now means
+"zero UBSan reports required" only. `pointer_controls` (just `r1-identity-control`) must be
+pointer-range-negative or the runner fails.
+
+### R1.8 Corrected dispositions (OpenCV 5.0.0, x86_64 AVX2 + cpu_baseline as tested)
+
+Per kernel:
+
+| Kernel | Ordinary int32 coordinates (R1) | Extreme / nonfinite (Task 022, unchanged) |
+|---|---|---|
+| `warpAffineLinearInvoker_32FC1` | **`DIRECT_NATIVE_UB_CONFIRMED`** (source + allocation analysis + native register capture; no sanitizer report) | `DIRECT_NATIVE_UB_CONFIRMED` (UBSan `:3764`) |
+| `warpAffineNearestInvoker_8UC1` | **`DIRECT_NATIVE_UB_CONFIRMED`** (same evidence, separately captured) | `DIRECT_NATIVE_UB_CONFIRMED` (UBSan `:439`) |
+
+Per ECC operation, each evaluated on its own Level B and Level C evidence:
+
+| API / C export | Level A | Level B | Level C | **R1 disposition on 5.0** |
+|---|---|---|---|---|
+| `opencv_video_estimate_ecc_translation` | confirmed | reproduced (iter 2) | **reproduced**: status 0 call forms 24 OOB pointers | **`KNOWN_NATIVE_UB_UNMITIGATED`** |
+| `opencv_video_estimate_ecc_euclidean` | confirmed | reproduced (iter 2) | **reproduced**: status 0, 365 OOB | **`KNOWN_NATIVE_UB_UNMITIGATED`** |
+| `opencv_video_estimate_ecc_euclidean_seeded` | confirmed | reproduced (iter 1, in-domain seed) | **reproduced**: status 3, 192 OOB before the error | **`KNOWN_NATIVE_UB_UNMITIGATED`** |
+| `opencv_video_estimate_ecc_affine` | confirmed | reproduced (iter 2) | **reproduced**: status 0, 795 OOB | **`KNOWN_NATIVE_UB_UNMITIGATED`** (5.0; 4.x Task 020 disposition unchanged) |
+| `opencv_video_estimate_ecc_affine_seeded` | confirmed | reproduced (iter 1, in-domain seed) | **reproduced**: status 3, 2816 OOB before the error | **`KNOWN_NATIVE_UB_UNMITIGATED`** (5.0; 4.x unchanged) |
+
+**What the promotion rests on.** For each operation separately:
+
+1. The native path is the scalar tail of the selected kernel: dispatch from `CV_CPU_DISPATCH`,
+   the tail confirmed by width and breakpoint counts.
+2. The expression is evaluated: a `lea` before the guard, its register captured live during
+   the binding call.
+3. The allocation bounds are the ASan-reported malloc chunk of the exact `src_data`, read at
+   kernel entry.
+4. The captured address lies outside those bounds.
+
+It does **not** rest on a sanitizer diagnostic; none fires for these cases. Examples include
+the offset-6306 pointers in translation, beyond even the placement-independent bound, and
+offsets near ±1e8 in the seeded cases.
+
+**Unchanged.** Task 020 (4.x affine `KNOWN_NATIVE_UB_UNMITIGATED`) and Task 021 (4.x
+translation/Euclidean `SAFETY_GATE_NOT_ESTABLISHED`) are 4.x findings about a different kernel.
+Neither is altered. On 4.x the translation and Euclidean operations remain
+`SAFETY_GATE_NOT_ESTABLISHED`. R1's promotion applies to OpenCV 5.0.0 only, and only to the
+tested x86_64 AVX2/baseline paths.
+
+**Scope limits.** Not verified: NEON/AArch64, SSE4.1-only dispatch, RVV, LASX, IPP, OpenCL,
+custom HAL, Windows, macOS, other compilers, other OpenCV 5.x builds. The gdb offsets in
+`observe()` are tied to imgproc sha256 `73c4d0d9…7292`, and the runner refuses any other build.
+On a different allocator or with `OPENCV_ENABLE_MEMALIGN=1`, the chunk geometry changes, but the
+6306 pointer is ~96 elements beyond the logical one-past, far outside any plausible `fastMalloc`
+padding (≤ 64 bytes). No out-of-bounds **read** was observed (ASan clean): this is invalid
+pointer formation, not a memory access.
+
+### R1.9 Corrections to consumer-facing claims
+
+* "The pointer hazard begins around `2^31`": **false**. It begins one pixel past the image edge
+  in the scalar tail.
+* "An int32-representable coordinate guarantees a valid source pointer": **false** (R1.3).
+* "A clean sanitizer report establishes valid pointer formation": **false**. All ordinary cases
+  are clean and source-level unsafe.
+* "A small in-domain seed keeps the first iterate safe" (section 13, "1820×"): **false for
+  pointer formation**. It was true only of the conversion range. Both seeded operations form
+  OOB pointers on their first warp.
+* "Every out-of-image coordinate is outside the backing allocation": **false**. See
+  `(-2,-1)` at width 97 and the ROI cases (R1.6).
+
+### R1.10 What was not done (stop conditions)
+
+No production Ada/C++ change, no API disabled, no C ABI gate, no seed-validation change, no
+OpenCV patch, no sanitizer weakened, probe not added to CI, Core pin and crate version
+unchanged, no upstream issue/PR. Mitigation (section 11; option 1, "form the pointer only after
+the in-bounds test", is the minimal fix) needs a **separate owner-approved task**.
+
+### R1.11 Reproduction
+
+```sh
+P=$HOME/.cache/video-task017/install-5.0.0-san
+C=$PWD/alire/cache/pins/opencv_core_4da9d35e
+OPENCV_PREFIX=$P OPENCV_CORE_SOURCE=$C sh scripts/research_ecc5_float_warp.sh   # 28 default cases
+OPENCV_PREFIX=$P OPENCV_CORE_SOURCE=$C sh scripts/research_ecc5_float_warp.sh r1 \
+    r1-sweep:97:neg r1-sweep:111:neg r1-sweep:33                                # R1 Level A
+OPENCV_PREFIX=$P OPENCV_CORE_SOURCE=$C sh scripts/research_ecc5_float_warp.sh \
+    observe:level-c-translation observe:level-c-euclidean observe:level-c-affine \
+    observe:level-c-euclidean-seeded observe:level-c-affine-n435                # Level C native
+```
+
+Expected: runner exit 0. `SOURCE_LEVEL_UNSAFE_SANITIZER_SILENT` is the expected finding, not a
+pass. A run fails if a sanitizer-negative control reports, if `r1-identity-control` leaves the
+allocation, or if any foreign UBSan, ASan or LSan error occurs.

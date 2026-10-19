@@ -10,8 +10,16 @@ three Alire roots, crate `0.1.0-dev`. All unchanged.
 **No normal production code was changed.** `cpp/` and every Ada body are byte-identical to the
 baseline; the Ada spec and README changes are comments and dated notices only.
 
-**Technical dispositions** (independent; full reasoning in
-[the task note](tasks/022-opencv5-float-warp-safety-audit.md)):
+> **R1 correction (2026-10-19).** The table below is the **original** Task 022 result, kept as
+> history. It is superseded on 5.0 by section **Part R1** at the end of this file. On the tested
+> OpenCV 5.0.0 x86_64 build, all five ECC operations, called through the real binding with
+> ordinary inputs, form scalar-tail source pointers outside the source allocation. Each is now
+> `KNOWN_NATIVE_UB_UNMITIGATED` on 5.0. This rests on native register capture and allocation
+> analysis; there is **no** sanitizer report. "`|coord| >= 2^31`" is also wrong at exactly
+> `-2^31`, which is representable.
+
+**Technical dispositions (original Task 022, superseded on 5.0 by Part R1)** (independent; full
+reasoning in [the task note](tasks/022-opencv5-float-warp-safety-audit.md)):
 
 | Subject | Disposition |
 |---|---|
@@ -194,3 +202,110 @@ normal regression scope and does not run the research probe. Windows stays push-
 is not triggered by this PR. Final-head results are recorded on the PR rather than here, so this
 file does not chase its own commit. A head that has not finished is reported as
 `HOSTED_CI_PENDING`, separately from the technical dispositions.
+
+## Part R1 — Ordinary-coordinate pointer formation (2026-10-19)
+
+Starting head `0977d07c72dbd7f44aecf54eb3de0860751e1f79`: local branch, `origin` after fetch and
+the PR #22 head all agreed. PR #22 open, non-draft, unmerged, auto-merge off; worktree clean. No
+new branch or PR. The full analysis is in
+[task note section R1](tasks/022-opencv5-float-warp-safety-audit.md#r1--ordinary-out-of-allocation-scalar-pointer-formation-2026-10-19).
+
+**Setup.** Same instrumented OpenCV 5.0.0 as Part 1 (imgproc sha256
+`73c4d0d95b3dd0ad5f52b3d7f094677b3bbbe347ac10e1f9e72e87f8a15e7292`, imports
+`__ubsan_handle_pointer_overflow`). Rebuilt probe sha256
+`fd3bb1efabaaae5799142e3fa359355fe43ea9b4646414f702b4fadb94711d74`, built with `-Werror` and 0
+warnings. Host, compiler and runtime options as in Part 1, plus gdb 16.3 for the opt-in
+`observe:` cases.
+
+**New probe diagnostic.** `pointer_range()` / `pixel_pointer()` compute each scalar-tail index
+in defined int64 arithmetic and compare `srcstep*iy + ix` against the **ASan-reported malloc
+chunk** of the exact source (`__sanitizer_get_allocated_begin/size`), not against `rows*cols`.
+They form no invalid pointer, do no pointer subtraction across objects, and cast no float to
+int. Classes: `PTR_WITHIN_ALLOCATION`, `PTR_ONE_PAST`, `PTR_WITHIN_PARENT_OUTSIDE_ROI`,
+`PTR_OUTSIDE_ALLOCATION` (tagged `ANY_ALIGNMENT` or `THIS_LAYOUT_ONLY` against the
+placement-independent `fastMalloc` bound), `UNDETERMINED`.
+
+### Default runner (all 28 original cases), with the new pointer column
+
+**`RUNNER_EXIT=0`.** 10 `EXPECTED_UPSTREAM_UB_OBSERVED` (the same 10 cases and UBSan sites as
+Part 1), **12 `SOURCE_LEVEL_UNSAFE_SANITIZER_SILENT`**, 6 `NO_UPSTREAM_REPORT`. 0 foreign UBSan,
+0 ASan, 0 LSan, every exit 0.
+
+| Cases | UBSan verdict (unchanged) | R1 pointer verdict |
+|---|---|---|
+| `conversion-check` | NO_UPSTREAM_REPORT | not evaluated (no warp) |
+| `negative`, `level-a-far-control`, `level-a-matrix-b`, `level-a-boundary-below` (sanitizer-negative controls) | NO_UPSTREAM_REPORT (0 reports, control satisfied) | **`PTR_OUTSIDE_ALLOCATION`**, so source-level unsafe and sanitizer-silent |
+| `level-a-boundary-above`, `level-a-overflow-to-inf`, `level-a-nonfinite-affine-coeff` | NO_UPSTREAM_REPORT (silent, as in Part 1) | **`PTR_OUTSIDE_ALLOCATION`** |
+| the 10 UBSan-reporting Level A cases | EXPECTED_UPSTREAM_UB_OBSERVED | `PTR_OUTSIDE_ALLOCATION` |
+| `trace-translation/euclidean/euclidean-seeded/affine/affine-n435` | NO_UPSTREAM_REPORT | **`PTR_OUTSIDE_ALLOCATION`**, first at iteration 2/2/1/2/1 |
+| `level-c-*` (5) | NO_UPSTREAM_REPORT | not evaluated by the model (native capture below) |
+
+The original Part 1 counts (10 / 18) are preserved above. R1 only splits the 18 silent cases
+into 12 source-level unsafe and 6 not evaluated or conversion-only.
+
+### Opt-in R1 cases
+
+`sh scripts/research_ecc5_float_warp.sh r1 r1-sweep:97:neg r1-sweep:111:neg r1-sweep:33
+observe:level-c-translation observe:level-c-euclidean observe:level-c-affine
+observe:level-c-euclidean-seeded observe:level-c-affine-n435` gave **`EXIT=0`**. Every case had
+UBSan 0 and ASan 0.
+
+| Case | Dispatch | Scalar tail runs | Pointer verdict (AVX2 tail) | Key pointer |
+|---|---|---|---|---|
+| `r1-identity-control` | AVX2 | yes (`x=96`) | **`POINTER_RANGE_NEGATIVE`** (control satisfied) | worst offset 6207 = last element |
+| `r1-ordinary-positive` `(2,1)` | AVX2 | yes | **`PTR_OUTSIDE_ALLOCATION (ANY_ALIGNMENT)`** L and N | (96,63) → (98,64), offset 6306; chunk L `[-16,6210)`, N `[-64,6216)` |
+| `r1-ordinary-positive-baseline` | `cpu_baseline` (`useOptimized=0`) | yes | `PTR_OUTSIDE_ALLOCATION (ANY_ALIGNMENT)` L and N | same, offset 6306 |
+| `r1-ordinary-negative` `(-2,-1)` | AVX2 | yes | `PTR_WITHIN_PARENT_OUTSIDE_ROI` | (96,0) → (94,-1), offset −3, inside the chunk header |
+| `r1-ordinary-negative-baseline` | `cpu_baseline` | yes | `PTR_WITHIN_PARENT_OUTSIDE_ROI` | offset −3 |
+| `r1-sweep:111:neg` | AVX2 | yes (`x=96..110`) | `PTR_OUTSIDE_ALLOCATION (THIS_LAYOUT_ONLY)` linear | (96,0) → (94,-1), offset −17, chunk begin −16 |
+| `r1-sweep:97:neg` | AVX2 | yes | `PTR_WITHIN_PARENT_OUTSIDE_ROI` | offset −3 |
+| `r1-sweep:33` `(2,1)` | AVX2 | yes (`x=32`) | L `ANY_ALIGNMENT`, N `THIS_LAYOUT_ONLY` | — |
+| `r1-roi-positive` / `r1-roi-negative` | AVX2 | yes | `PTR_WITHIN_PARENT_OUTSIDE_ROI` | offsets 7330 / −19 inside parent chunk `[-360,7794)` |
+
+**Width sweep** (`(2,1)`, native AVX2 tail hits L/N, and the same with `useOptimized=0`):
+widths 32, 64, 96 and 128 give 0 / 0, with no scalar tail and no verdict. Widths 33, 97 and
+129 give 64 / 64, and 98 gives 128 / 128, all `PTR_OUTSIDE_ALLOCATION`. Baseline (`uf = 8`) is
+identical for these widths.
+
+**Native observation (`observe:`; gdb register capture at the post-`lea` instruction of the
+unmodified `opt_AVX2` kernels, chunk read at kernel entry).** All five real C exports, with
+genuine Core handles:
+
+| C export | status | linear: outside / in-chunk | nearest: outside / in-chunk |
+|---|---|---|---|
+| `estimate_ecc_translation` | 0 | 18 / 1262 | 6 / 442 |
+| `estimate_ecc_euclidean` | 0 | 267 / 1589 | 98 / 542 |
+| `estimate_ecc_euclidean_seeded` (θ 0.9, t ±2^20) | 3 | 128 / 0 | 64 / 0 |
+| `estimate_ecc_affine` | 0 | 597 / 18539 | 198 / 6202 |
+| `estimate_ecc_affine_seeded` (n435) | 3 | 2048 / 0 | 768 / 0 |
+
+The first linear call per process is not classified (`UNMATCHED`; it is consumed by the gdb
+bootstrap breakpoint), so these counts are lower bounds. 0 sanitizer reports in every run.
+
+### Corrected dispositions (5.0.0, x86_64 as tested)
+
+| Subject | Disposition | Evidence basis |
+|---|---|---|
+| `warpAffineLinearInvoker_32FC1`, ordinary int32 coordinates | **`DIRECT_NATIVE_UB_CONFIRMED`** | source + allocation analysis + native register capture; **no** sanitizer report |
+| `warpAffineNearestInvoker_8UC1`, ordinary int32 coordinates | **`DIRECT_NATIVE_UB_CONFIRMED`** | same, captured separately |
+| Both kernels, extreme/nonfinite (Part 1) | `DIRECT_NATIVE_UB_CONFIRMED` (unchanged) | UBSan `:3764` / `:439` |
+| Translation ECC on 5.0 | **`KNOWN_NATIVE_UB_UNMITIGATED`** | Level B iter 2; Level C status 0 with 24 OOB |
+| Euclidean ECC on 5.0 | **`KNOWN_NATIVE_UB_UNMITIGATED`** | Level B iter 2; Level C status 0 with 365 OOB |
+| Euclidean seeded ECC on 5.0 | **`KNOWN_NATIVE_UB_UNMITIGATED`** | Level B iter 1 (in-domain seed); Level C status 3, 192 OOB |
+| Affine ECC on 5.0 | **`KNOWN_NATIVE_UB_UNMITIGATED`** | Level B iter 2; Level C status 0 with 795 OOB |
+| Affine seeded ECC on 5.0 | **`KNOWN_NATIVE_UB_UNMITIGATED`** | Level B iter 1 (in-domain seed); Level C status 3, 2816 OOB |
+| Affine ECC on 4.x (Task 020) | `KNOWN_NATIVE_UB_UNMITIGATED`, **unchanged** | — |
+| Translation/Euclidean ECC on 4.x (Task 021) | `SAFETY_GATE_NOT_ESTABLISHED`, **unchanged** | — |
+
+Each operation was promoted on its own Level C capture; none was promoted by analogy.
+
+### R1 regression and inventory
+
+R1 changes only `tests/cpp/ecc5_float_warp_probe.cpp`, `scripts/research_ecc5_float_warp.sh`,
+`README.md`, `src/opencv-video.ads` (comments only) and these two docs. No build input of the
+production library, tests or examples changed: `cpp/`, every `.adb`, every GPR, the Alire
+manifests and `.github/` are byte-identical to `0977d07`. The Part 2 four-version campaign
+(on `920d739`, identical production sources) therefore stays valid as the regression evidence.
+In addition, the normal OpenCV 5.0 regression (`scripts/test.sh`) was re-run on the R1 head; see
+the R1 regression note below. An unchanged binding regression proves nothing about native
+pointer safety.
