@@ -109,6 +109,11 @@ shown to reach undefined behavior. All three APIs stay available and unchanged.
 >   needs a separate, owner-approved task.
 > * **Int32 boundary corrected.** "Magnitude `2^31` or more" below is inexact: `-2^31` is
 >   representable. The valid range is `-2^31 <= v < 2^31`.
+> * **Upstream fix exists but does not protect 5.0.0 (R2, 2026-10-20).** OpenCV PR
+>   [#30137](https://github.com/opencv/opencv/pull/30137) (merge commit `120e9a76…`) was merged
+>   into the `5.x` development branch. It forms the pointer only after the bounds check. It is
+>   **not** in OpenCV 5.0.0 or in any published release, and it has **not** been qualified with
+>   this binding. OpenCV 5.0.0 users remain affected.
 >
 > Details: [task note section R1](docs/tasks/022-opencv5-float-warp-safety-audit.md#r1--ordinary-out-of-allocation-scalar-pointer-formation-2026-10-19)
 > and [qualification Part R1](docs/task022-qualification.md#part-r1--ordinary-coordinate-pointer-formation-2026-10-19).

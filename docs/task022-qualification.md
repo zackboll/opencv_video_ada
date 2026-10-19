@@ -351,3 +351,38 @@ per the R1 stop conditions. Choosing a response needs a separate, owner-approved
   section 11 option 1).
 
 None of these was implemented or validated here.
+
+## Part R2 — Upstream fix provenance note (2026-10-20)
+
+Documentation only. Starting head `726122f69a4772dc0c8d06a91b4ed58ec0eae297` (local, fetched
+remote and PR #22 head matched; worktree clean). Hosted CI on that head: run
+[39200367823](https://github.com/zackboll/opencv_video_ada/actions/runs/39200367823) (Cross-platform
+Video, `pull_request`): **success** in all four jobs (repository-checks, linux, macos,
+linux-sanitizers). That run exercises the normal regression scope only. It is not a native safety
+qualification.
+
+* **Upstream identity.** [opencv/opencv#30137](https://github.com/opencv/opencv/pull/30137),
+  "Fix pointer overflow in scalar warp kernels". Merged 2026-10-05T11:48:55Z into `5.x`. Head
+  `75db43c8940d1b107c3bca84e35d4d025f3505e9`, merge commit
+  `120e9a766cbb1725ef08be2d60d0ac2605a5dede`. Only `modules/imgproc/src/warp_common.scalar.hpp`
+  changed. All of these were verified through the GitHub API.
+* **It addresses the R1 defect.** It removes the unconditional `srcptr` from
+  `CV_WARP_SCALAR_SHUFFLE_DEF_*` and forms it only inside the in-bounds load path. Border taps now
+  use `src[(iy+dy)*srcstep + (ix+dx)]`, computed after the per-tap test. This is the exact
+  construction R1 identified (5.0.0 `warp_common.scalar.hpp:12`), and the file at tag `5.0.0` is
+  byte-identical to the audited copy and to the merge's first parent.
+* **Not in 5.0.0, and not in any published release.** The fix descends from `5.0.0` (ahead 693,
+  behind 0) and is contained in `5.x`. The only published 5.x releases are `5.0.0-alpha` and
+  `5.0.0`.
+* **Not built, executed or qualified during Task 022.** No production OpenCV dependency, install
+  prefix or source pin changed. The Part 2 and Part R1 regression results remain evidence for the
+  original, unmodified OpenCV 5.0.0 (and 4.1.0/4.6.0/4.10.0) only.
+* **Findings unchanged.** The Task 022-R1 Level A/B/C findings and all dispositions stand. All
+  five 5.0.0 ECC operations remain `KNOWN_NATIVE_UB_UNMITIGATED` on the verified x86_64 build.
+  The Task 020/021 4.x dispositions are unchanged.
+* **Recommended Task 023.** Qualify the upstream correction (scope: task note section R2.5).
+  Build from the merge commit or a descendant; confirm pointer formation only after coordinate
+  validation; replay the R1 positive and negative ordinary cases and all five real-binding ECC
+  cases for both the Float32 linear and UInt8 nearest kernels; compare native outputs and the
+  oracles; run the complete regression suite; audit AArch64/NEON separately; and establish whether
+  a fixed release exists before any version-based gating. **Not executed here.**

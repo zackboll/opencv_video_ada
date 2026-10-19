@@ -19,6 +19,10 @@ consumer notices.
 > Neither ASan nor UBSan reports anything. The int32 boundary was also misstated: exactly `-2^31`
 > is representable (section R1.6). See **section R1** at the end of this file; the corrected
 > dispositions are in R1.8. The extreme-coordinate UBSan findings below remain valid.
+>
+> **R2 (2026-10-20).** Upstream OpenCV PR #30137 (merged into `5.x`, merge commit
+> `120e9a76…`) removes the unconditional scalar pointer. It is **not** in OpenCV 5.0.0 and was not
+> qualified here; 5.0.0 dispositions are unchanged. See section R2 at the end of this file.
 
 This task asks whether OpenCV 5.0.0's newer **floating-point** `warpAffine` kernels are safe
 for the finite intermediate transforms ECC can generate, especially for very large,
@@ -890,3 +894,121 @@ OPENCV_PREFIX=$P OPENCV_CORE_SOURCE=$C sh scripts/research_ecc5_float_warp.sh \
 Expected: runner exit 0. `SOURCE_LEVEL_UNSAFE_SANITIZER_SILENT` is the expected finding, not a
 pass. A run fails if a sanitizer-negative control reports, if `r1-identity-control` leaves the
 allocation, or if any foreign UBSan, ASan or LSan error occurs.
+
+---
+
+## R2 — Upstream OpenCV fix provenance and remaining qualification (2026-10-20)
+
+Documentation only. R2 adds provenance for an upstream correction found during independent
+review. It changes **no** finding, measurement or disposition from sections 1–14 or R1.
+
+### R2.1 The upstream change (verified from GitHub on 2026-10-20)
+
+| Item | Verified value |
+|---|---|
+| Upstream PR | [opencv/opencv#30137 — "Fix pointer overflow in scalar warp kernels"](https://github.com/opencv/opencv/pull/30137) |
+| State | merged, 2026-10-05T11:48:55Z |
+| Destination branch | `5.x` |
+| PR head commit | `75db43c8940d1b107c3bca84e35d4d025f3505e9` |
+| Merge commit | [`120e9a766cbb1725ef08be2d60d0ac2605a5dede`](https://github.com/opencv/opencv/commit/120e9a766cbb1725ef08be2d60d0ac2605a5dede) (parents `0f18b2fb…` and `75db43c8…`) |
+| Files changed | `modules/imgproc/src/warp_common.scalar.hpp` only (+23 / −23) |
+
+These values come from `gh pr view 30137 -R opencv/opencv` and the commit and compare APIs. The
+patch text was read from the PR's file list.
+
+### R2.2 What the patch changes
+
+The patch compares directly against the tested release. `warp_common.scalar.hpp` at tag `5.0.0`
+(commit `40738fb1…`) is byte-identical to the copy this audit compiled
+(`~/.cache/video-task017/opencv-5.0.0`). It is also identical to the merge's first parent
+`0f18b2fb…`, so the PR diff is exactly the 5.0.0 → fixed delta for this file.
+
+1. **Unconditional pointer removed.** `CV_WARP_SCALAR_SHUFFLE_DEF_C1/C3/C4` no longer declare
+   `const dtype_ptr *srcptr = src + srcstep*iy + ix[*cn]`. In 5.0.0 this was line 12, the R1
+   site. The `dtype_ptr` parameter is dropped from the `_8U/_16U/_32F` wrappers.
+2. **Pointer formed only on the in-bounds path.** `CV_WARP_SCALAR_SHUFFLE_LOAD_C1/C3/C4` now begin
+   with `const auto *srcptr = src + srcstep * iy + ix[*cn];`. `CV_WARP_SCALAR_SHUFFLE` expands
+   them only inside `if ((unsigned)ix < (unsigned)(srccols-1) & (unsigned)iy < (unsigned)(srcrows-1))`
+   (fixed file lines 139–141). That path guarantees the pointer and all four linear taps are
+   inside the image.
+3. **Border fetch uses global offsets after the check.** `CV_WARP_SCALAR_FETCH_PIXEL_C1/C3/C4`
+   previously read `srcptr[dy*srcstep + dx]`, relative to the possibly invalid `srcptr`. They now
+   read `src[(iy + dy)*srcstep + (ix + dx)[*cn]]`, computed only inside the per-tap
+   `(unsigned)(ix+dx) < srccols & (unsigned)(iy+dy) < srcrows` test.
+4. **Scope.** These macros are shared by every scalar `warpAffine`, `warpPerspective` and `remap`
+   tail in `warp_kernels.simd.hpp`. The ECC sites are `CV_WARP_SCALAR_SHUFFLE(LINEAR, C1, 32F)`
+   and `CV_WARP_SCALAR_SHUFFLE(NEAREST, C1, 8U)`, so both kernels implicated by R1 are covered.
+
+**Relationship to the R1 counterexample (source reasoning only).** For `M=[1 0 2; 0 1 1]`, 97×64,
+destination `(96,63)` maps to `ix=98, iy=64`. `98 < 96` is false, so the patched code takes the
+border branch. `(unsigned)(98+1) >= 98` sends it to `BORDER_CONSTANT` with `continue`, and **no**
+source pointer or offset is computed. In 5.0.0 the same pixel formed `src + 6306`, 96 elements
+past the end of the allocation. Applied to the R1.5 Level B/C cases, the patch would remove
+scalar-tail pointer formation for every out-of-image pixel. It would also remove the
+extreme/NaN case in sections 5–9: the `INT_MIN` sentinel as `unsigned` is `2^31`, which fails
+the in-bounds test, so no pointer is formed.
+
+**What the patch does not change.**
+
+* `cvFloor(float)` is still marked `CV_DISABLE_UBSAN`, and `cvRound(float)` is unchanged
+  (`core/fast_math.hpp`). An out-of-range or NaN coordinate still converts to `INT_MIN` on x86.
+  The patch makes that value harmless for pointer formation, but the conversion itself, and its
+  behaviour on other architectures (section 12 item 2), is unchanged.
+* The vector bodies (`warp_common.vector.hpp`, `warp_kernels.simd.hpp`) are not modified.
+  `warp_kernels.simd.hpp` differs between 5.0.0 and the merge for unrelated reasons; that
+  difference was not audited.
+* The non-constant border branch (`borderInterpolate_fast`; section 12 item 4) is untouched.
+* OpenCV 4.x is unaffected either way. `warp_common.scalar.hpp` does not exist on the `4.x`
+  branch or at tag `4.14.0`. The Task 020/021 4.x fixed-point defects are separate and are not
+  addressed by this PR.
+
+### R2.3 Tested release versus upstream `5.x`
+
+* The merge commit is a descendant of tag `5.0.0` (compare `5.0.0...120e9a76`: ahead 693,
+  behind 0). `5.x` contains it (compare `120e9a76...5.x`: ahead 207, behind 0, on 2026-10-20).
+* **OpenCV 5.0.0 does not contain the fix.** Its file is the pre-fix version (R2.2).
+* At verification time the published 5.x tags were only `5.0.0-alpha` and `5.0.0` (the release
+  was published 2026-06-06). **No published OpenCV release contains PR #30137.** Users of the
+  only 5.x release are not protected by it.
+* The audit's installs (`install-5.0.0`, `install-5.0.0-san`) and every Task 022 / R1 result are
+  for 5.0.0. No upstream `5.x` source was built or executed.
+
+### R2.4 Dispositions (unchanged by R2)
+
+**OpenCV 5.0.0 remains `KNOWN_NATIVE_UB_UNMITIGATED` for all five existing ECC operations in the
+verified x86_64 environment** (translation; Euclidean identity and seeded; affine identity and
+seeded; R1.8). Both kernels remain `DIRECT_NATIVE_UB_CONFIRMED` for ordinary and extreme
+coordinates. Task 020 (4.x affine `KNOWN_NATIVE_UB_UNMITIGATED`) and Task 021 (4.x
+translation/Euclidean `SAFETY_GATE_NOT_ESTABLISHED`) are unchanged.
+
+**The upstream fix has not been validated through this binding.** It was not built, linked,
+executed, sanitized, gdb-observed or oracle-compared here. The source reading in R2.2 is not a
+qualification, and no disposition is assigned to any patched OpenCV.
+
+### R2.5 Remaining qualification requirements
+
+Before any claim about a patched OpenCV:
+
+1. Build OpenCV from `120e9a766cbb1725ef08be2d60d0ac2605a5dede` (or a recorded descendant, or a
+   later release once one exists), instrumented and uninstrumented, with the 5.0.0 build options.
+2. Confirm from disassembly and gdb that the scalar-tail pointer is formed only after the
+   coordinate test, in `opt_AVX2` and `cpu_baseline`, for both `warpAffineLinearInvoker_32FC1`
+   and `warpAffineNearestInvoker_8UC1`. The R1 `observe:` offsets are tied to the 5.0.0 build
+   hash and must be re-derived.
+3. Replay the R1 ordinary positive and negative cases (`r1`, `r1-sweep` widths) and the original
+   extreme/NaN Level A cases. Expect `POINTER_RANGE_NEGATIVE` and no `:3764`/`:439` UBSan reports;
+   any remaining finding must be explained.
+4. Replay all five real-binding Level C cases under native observation.
+5. Compare native outputs and the existing ECC oracles against 5.0.0; the patch should be
+   output-neutral.
+6. Run the complete binding regression suite against the patched library.
+7. Audit AArch64/NEON (and other dispatch targets) separately, including the conversion
+   behaviour the patch leaves unchanged.
+8. Determine whether a released OpenCV version contains the fix before proposing any
+   version-based gate or minimum-version policy.
+
+### R2.6 Recommended next task
+
+**Task 023 — Qualify the existing upstream OpenCV scalar warp pointer fix (opencv/opencv#30137).**
+Scope it as R2.5, research only, with the same stop conditions as R1.10. Task 023 was **not**
+executed as part of R2.
