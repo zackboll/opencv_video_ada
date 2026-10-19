@@ -23,6 +23,17 @@
 #   search-euclidean-seeded:FIRST:COUNT  search-affine:FIRST:COUNT
 #   search-affine-seeded:FIRST:COUNT
 #
+# R1 (2026-10-19), also opt-in and never in the default set:
+#   r1                                   all R1 ordinary-coordinate cases (r1_cases below)
+#   r1-sweep:WIDTH[:neg[:baseline]]      (2,1) or (-2,-1) translation at one width, 32..4096
+#   observe:CASE                         run CASE under gdb and classify every scalar-tail
+#                                        srcptr the AVX2 kernels actually form (needs gdb and
+#                                        the exact instrumented imgproc build; see observe())
+# Every default case now also prints a PTR_RANGE verdict: the defined (no invalid pointer
+# formed) classification of each scalar-tail src + srcstep*iy + ix against the ASan-reported
+# source allocation. SOURCE_LEVEL_UNSAFE_SANITIZER_SILENT marks an out-of-allocation pointer
+# that no sanitizer reported.
+#
 # OPENCV_CORE_SOURCE is the pinned Core crate (alire/cache/pins/opencv_core_<pin>), used only
 # for its shim sources and the Core bridge header; nothing from it is vendored.
 # Output goes to obj/research/ (ignored by git).
@@ -42,11 +53,28 @@ level-a-nonfinite-affine-coeff
 trace-translation trace-euclidean trace-euclidean-seeded trace-affine trace-affine-n435
 level-c-translation level-c-euclidean level-c-euclidean-seeded level-c-affine
 level-c-affine-n435'
-# Cases whose zero-report outcome is a required negative control.
-controls='conversion-check negative level-a-far-control level-a-matrix-b level-a-boundary-below'
+# R1 (2026-10-19) opt-in ordinary-coordinate cases. Run them by naming them (or `r1`); the
+# Task 022 default set above is unchanged. r1-sweep:WIDTH[:neg[:baseline]] takes 32..4096.
+r1_cases='r1-identity-control r1-ordinary-positive r1-ordinary-negative
+r1-ordinary-positive-baseline r1-ordinary-negative-baseline r1-roi-positive r1-roi-negative'
+# Cases whose zero-UBSan-report outcome is required. These are SANITIZER-NEGATIVE controls
+# only: R1 shows that `negative` itself forms out-of-allocation scalar-tail pointers (see the
+# PTR_RANGE lines), so a clean sanitizer result here is NOT evidence of pointer safety.
+controls='conversion-check negative level-a-far-control level-a-matrix-b level-a-boundary-below
+r1-identity-control'
+# The one POINTER-RANGE-negative control: every scalar-tail pointer must stay in the chunk.
+pointer_controls='r1-identity-control'
 cases=${*:-$all_cases}
+# Expand the `r1` keyword wherever it appears.
+expanded=
 for case_name in $cases; do
-    case "$case_name" in level-a-sweep-*:*|search-*:*:*) continue ;; esac
+    if [ "$case_name" = r1 ]; then expanded="$expanded $r1_cases"
+    else expanded="$expanded $case_name"; fi
+done
+cases=$expanded
+for case_name in $cases; do
+    case "$case_name" in level-a-sweep-*:*|search-*:*:*|r1-sweep:*|observe:*) continue ;; esac
+    printf '%s\n' $r1_cases | grep -qx -- "$case_name" && continue
     printf '%s\n' $all_cases | grep -qx -- "$case_name" ||
         { echo "error: unknown case $case_name" >&2; exit 1; }
 done
@@ -86,7 +114,95 @@ nm -D "$imgproc" | grep -q '__ubsan_handle_pointer_overflow' ||
 echo "== imgproc imports __ubsan_handle_pointer_overflow (instrumented OpenCV confirmed)"
 
 failed=0
+# R1 native observation (opt-in, `observe:CASE`): run CASE under gdb and record, at the
+# instruction immediately after each scalar tail's `lea` that materialises
+# srcptr = src + srcstep*iy + ix, the actual srcptr register, and at each kernel entry the
+# ASan chunk of src_data. The instruction offsets are specific to ONE build, so the sha256
+# of libopencv_imgproc is checked first; any other build is refused, not guessed.
+r1_imgproc_sha=73c4d0d95b3dd0ad5f52b3d7f094677b3bbbe347ac10e1f9e72e87f8a15e7292
+observe() {
+    target=$1
+    [ "$(sha256sum "$imgproc" | cut -d' ' -f1)" = "$r1_imgproc_sha" ] ||
+        { echo "error: observe needs imgproc sha256 $r1_imgproc_sha (offsets are build-specific)" >&2; return 1; }
+    command -v gdb > /dev/null || { echo 'error: observe needs gdb' >&2; return 1; }
+    lam='::{lambda(cv::Range const&)#1}::operator()(cv::Range const&) const'
+    lin="cv::opt_AVX2::warpAffineLinearInvoker_32FC1(float const*, unsigned long, int, int, float*, unsigned long, int, int, double const*, int, double const*)"
+    near="cv::opt_AVX2::warpAffineNearestInvoker_8UC1(unsigned char const*, unsigned long, int, int, unsigned char*, unsigned long, int, int, double const*, int, double const*)"
+    script="$out/observe-$target.gdb"
+    cat > "$script" <<EOF
+set pagination off
+set height 0
+set breakpoint pending on
+set print thread-events off
+handle SIGSEGV nostop noprint pass
+break cv::opt_AVX2::warpAffineLinearInvoker_32FC1
+run
+delete
+break *('$lin$lam' + 55231)
+commands
+silent
+printf "NAT L src=%#lx srcptr=%#lx off=%ld ix=%ld iy=%ld\\n", \$rdi, \$r14, ((long)\$r14-(long)\$rdi)/4, \$rcx, \$r8
+continue
+end
+break *('$near$lam' + 31839)
+commands
+silent
+printf "NAT N src=%#lx srcptr=%#lx off=%ld ix=%ld iy=%ld\\n", \$r11, \$r12, (long)\$r12-(long)\$r11, \$r8, \$rax
+continue
+end
+break cv::opt_AVX2::warpAffineLinearInvoker_32FC1
+commands
+silent
+set \$cb = (unsigned long)__sanitizer_get_allocated_begin((void*)src_data)
+printf "ENT L src=%#lx chunk=%#lx size=%lu\\n", src_data, \$cb, (unsigned long)__sanitizer_get_allocated_size((void*)\$cb)
+continue
+end
+break cv::opt_AVX2::warpAffineNearestInvoker_8UC1
+commands
+silent
+set \$cb = (unsigned long)__sanitizer_get_allocated_begin((void*)src_data)
+printf "ENT N src=%#lx chunk=%#lx size=%lu\\n", src_data, \$cb, (unsigned long)__sanitizer_get_allocated_size((void*)\$cb)
+continue
+end
+continue
+EOF
+    olog="$out/observe-$target.log"
+    ASAN_OPTIONS=detect_leaks=0 gdb -batch -nx -x "$script" --args "$binary" "$target" > "$olog" 2>&1 || true
+    echo "== observe $target: $(grep -oE 'BINDING_CALL_END status=[0-9]+' "$olog" || echo 'no binding call') log $olog"
+    # The first linear call precedes its entry record (the bootstrap breakpoint consumes it),
+    # so its tail hits are reported as UNMATCHED and never classified.
+    python3 - "$olog" <<'PY'
+import re, sys
+ent, res, shapes = {}, {}, {}
+for line in open(sys.argv[1]):
+    m = re.match(r'ENT ([LN]) src=(0x[0-9a-f]+) chunk=(0x[0-9a-f]+) size=(\d+)', line)
+    if m:
+        ent[m.group(1)] = (int(m.group(2), 16), int(m.group(3), 16), int(m.group(4)))
+        continue
+    m = re.match(r'NAT ([LN]) src=(0x[0-9a-f]+) srcptr=(0x[0-9a-f]+) off=(-?\d+) ix=(-?\d+) iy=(-?\d+)', line)
+    if not m:
+        continue
+    k, src, p = m.group(1), int(m.group(2), 16), int(m.group(3), 16)
+    r = res.setdefault(k, {})
+    if k not in ent or ent[k][0] != src:
+        r['UNMATCHED'] = r.get('UNMATCHED', 0) + 1
+        continue
+    _, cb, sz = ent[k]
+    c = 'PTR_OUTSIDE_ALLOCATION' if p < cb or p > cb + sz else ('PTR_ONE_PAST' if p == cb + sz else 'IN_CHUNK')
+    r[c] = r.get(c, 0) + 1
+    if c == 'PTR_OUTSIDE_ALLOCATION':
+        key = (k, int(m.group(5)), int(m.group(6)), int(m.group(4)))
+        shapes[key] = shapes.get(key, 0) + 1
+name = {'L': 'opt_AVX2::warpAffineLinearInvoker_32FC1', 'N': 'opt_AVX2::warpAffineNearestInvoker_8UC1'}
+for k in sorted(res):
+    print('     NATIVE_OBSERVED %s %s' % (name[k], ' '.join('%s=%d' % kv for kv in sorted(res[k].items()))))
+for key, n in sorted(shapes.items(), key=lambda kv: -kv[1])[:4]:
+    print('     NATIVE_OUTSIDE %s ix=%d iy=%d element_offset=%d hits=%d' % (name[key[0]], key[1], key[2], key[3], n))
+print('     NATIVE_OUTSIDE distinct_shapes=%d' % len(shapes))
+PY
+}
 for case_name in $cases; do
+    case "$case_name" in observe:*) observe "${case_name#observe:}" || failed=1; continue ;; esac
     log="$out/$(printf '%s' "$case_name" | tr ':' '-').log"
     status=0
     ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
@@ -98,19 +214,34 @@ for case_name in $cases; do
     asan=$(grep -c 'ERROR: AddressSanitizer\|ERROR: LeakSanitizer' "$log" || true)
     is_control=0
     if printf '%s\n' $controls | grep -qx -- "$case_name"; then is_control=1; fi
+    # R1: source-level pointer-range verdict, independent of UBSan. Counts the scalar-tail
+    # pointers (AVX2 or baseline scope) the defined model places outside the ASan chunk.
+    oob=$(grep -c 'scope=\(avx2\|baseline\)-scalar-tail .*worst=PTR_OUTSIDE_ALLOCATION' "$log" || true)
+    if [ "$oob" -gt 0 ]; then ptr=PTR_OUTSIDE_ALLOCATION
+    elif grep -q 'PTR_RANGE' "$log"; then ptr=POINTER_RANGE_NEGATIVE
+    else ptr=POINTER_RANGE_NOT_EVALUATED; fi
+    is_ptr_control=0
+    if printf '%s\n' $pointer_controls | grep -qx -- "$case_name"; then is_ptr_control=1; fi
     if [ "$status" -ne 0 ] || [ "$foreign" -ne 0 ] || [ "$asan" -ne 0 ]; then
         verdict=RESEARCH_PROBE_FAILED; failed=1
     elif [ "$is_control" -eq 1 ] && [ "$upstream" -ne 0 ]; then
         verdict=NEGATIVE_CONTROL_REPORTED; failed=1
+    elif [ "$is_ptr_control" -eq 1 ] && [ "$ptr" != POINTER_RANGE_NEGATIVE ]; then
+        verdict=POINTER_CONTROL_OUTSIDE_ALLOCATION; failed=1
     elif [ "$upstream" -gt 0 ]; then
         verdict=EXPECTED_UPSTREAM_UB_OBSERVED
+    elif [ "$ptr" = PTR_OUTSIDE_ALLOCATION ]; then
+        verdict=SOURCE_LEVEL_UNSAFE_SANITIZER_SILENT
     else
         verdict=NO_UPSTREAM_REPORT
     fi
-    echo "== case $case_name: $verdict (exit $status, warp UBSan $upstream, other UBSan $foreign, ASan $asan) log $log"
-    grep -E 'runtime error:|DISPATCH|COORD_REACH|FIRST_UNSAFE|model-valid|SOURCE|UNSAFE_INTERMEDIATE|first unsafe|BINDING_CALL_END|published|NEGATIVE_CONTROL|CONVERSION_MODEL|BOUNDARY|SEARCH_|PEAK_RSS' "$log" | sed 's/^/     /'
+    echo "== case $case_name: $verdict pointer=$ptr (exit $status, warp UBSan $upstream, other UBSan $foreign, ASan $asan) log $log"
+    grep -E 'runtime error:|DISPATCH|COORD_REACH|FIRST_UNSAFE|model-valid|SOURCE|UNSAFE_INTERMEDIATE|first unsafe|BINDING_CALL_END|published|NEGATIVE_CONTROL|CONVERSION_MODEL|BOUNDARY|SEARCH_|PEAK_RSS|PIXEL_PTR|scope=(avx2|baseline)-scalar-tail|FIRST_OUT_OF_ALLOCATION|TRACE_SUMMARY' "$log" | sed 's/^/     /'
 done
 echo "== NO_UPSTREAM_REPORT is not evidence of defined behavior. UBSan's pointer-overflow check"
 echo "== fires only when the computed address wraps; an out-of-range pointer that does not wrap"
 echo "== is formed silently. COORD_REACH classifies every case independently of UBSan."
+echo "== R1: SOURCE_LEVEL_UNSAFE_SANITIZER_SILENT means the defined pointer-range model places a"
+echo "== scalar-tail src+srcstep*iy+ix outside the ASan-reported source allocation while no"
+echo "== sanitizer fired. The runner exits 0 for it: it is the EXPECTED finding, not a pass."
 exit $failed

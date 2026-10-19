@@ -20,6 +20,13 @@
 // One case per process (UBSan reports a given source location only once per process).
 // The case list is in main() and in the runner script.
 //
+// R1 (2026-10-19): the scalar tail forms src + srcstep*iy + ix BEFORE its bounds test for
+// EVERY pixel it handles, so an ordinary int32 coordinate one pixel past the image edge
+// already forms an out-of-allocation pointer (C++ UB) that no sanitizer reports (no load
+// follows; the address does not wrap). pointer_range() classifies each scalar-tail pointer
+// against the ASan-reported source allocation in defined arithmetic, and the r1-* cases and
+// the runner's observe: mode cover it. See section R1 of the task note.
+//
 // The probe's own coordinate model uses only defined float arithmetic and isfinite and
 // ordered comparisons. It performs NO float-to-int C++ cast, llround or pointer arithmetic
 // to predict an unsafe native operation, so any UBSan report originates inside OpenCV. The
@@ -78,6 +85,13 @@ Handle make_handle(const cv::Mat &src) {
     return handle;
 }
 
+// R1 (2026-10-19): ground-truth allocation bounds from the AddressSanitizer runtime. These
+// report the actual malloc'd chunk (OpenCV's fastMalloc buffer, including its alignment
+// header), which is the C++ object for pointer-arithmetic validity -- distinct from the Mat's
+// logical rows*cols extent. They READ metadata only; they form and dereference nothing.
+extern "C" const void *__sanitizer_get_allocated_begin(const void *p);
+extern "C" size_t __sanitizer_get_allocated_size(const void *p);
+
 uint32_t float_bits(float v) {
     uint32_t u;
     std::memcpy(&u, &v, sizeof u);
@@ -95,9 +109,13 @@ uint32_t float_bits(float v) {
 // 61-64). Conversion is cvFloor(float) (linear) / cvRound(float) (nearest) in the scalar
 // tail (warp_common.scalar.hpp:131-134), and v_floor / v_round in the vector body
 // (warp_kernels.simd.hpp:40-49). On x86 these lower to cvttss2si / cvtss2si and AVX2
-// vcvt(t)ps2dq, which return the integer-indefinite INT_MIN for any |v| >= 2^31 and for
-// NaN/Inf. float32 spacing at 2^31 is 128 and both +-2^31 are representable, so the
-// in-range test is exactly -2^31 <= v < 2^31 for floor and round-to-nearest-even alike.
+// vcvt(t)ps2dq, which return the integer-indefinite INT_MIN for any v outside
+// [-2^31, 2^31) and for NaN/Inf. (R1 correction: the earlier wording "|v| >= 2^31" was wrong
+// at exactly -2^31, which converts VALIDLY to INT_MIN -- the same integer as the sentinel,
+// but not an invalid conversion.) float32 spacing at 2^31 is 128 and both +-2^31 are
+// representable, so the in-range test is exactly -2^31 <= v < 2^31 for floor and
+// round-to-nearest-even alike. Conversion validity is NOT pointer validity: see the R1
+// pointer_range() model below, which shows in-range coordinates forming invalid pointers.
 enum class Conv { IN_RANGE = 0, OUT_OF_RANGE_FINITE = 1, NONFINITE = 2 };
 
 const char *conv_name(Conv c) {
@@ -166,6 +184,205 @@ void print_matrix_bits(const float w[6]) {
     std::printf("  stored bits=[0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x]\n",
                 unsigned(float_bits(w[0])), unsigned(float_bits(w[1])), unsigned(float_bits(w[2])),
                 unsigned(float_bits(w[3])), unsigned(float_bits(w[4])), unsigned(float_bits(w[5])));
+}
+
+// ---------------------------------------------------------------------------------------
+// R1 (2026-10-19): defined source-pointer-range analysis.
+//
+// The 5.0 scalar tail declares, UNCONDITIONALLY and BEFORE its bounds test,
+//     const dtype_ptr *srcptr = src + srcstep*iy + ix;      (warp_common.scalar.hpp:12)
+// with ix/iy from cvFloor (linear) or cvRound (nearest) (:131-134); the test
+//     (unsigned)ix < (unsigned)(srccols-1) & (unsigned)iy < (unsigned)(srcrows-1)   (:139)
+// runs only afterwards. Forming a pointer outside the array object is undefined in C++
+// ([expr.add]) whether or not it is dereferenced, and a later test cannot repair it. The
+// vector body forms no such pointer: it keeps lane offsets as v_int32 integers and only
+// forms src + addr[i] when every lane is inside (warp_common.vector.hpp:26-32, 176-179).
+//
+// Nothing here casts float to int or forms a native-shaped pointer. The index is predicted
+// in int64 (floor / round-half-even for in-range coordinates, the INT_MIN sentinel for the
+// rest, as the x86 intrinsics return), and its byte offset is compared with the ACTUAL
+// backing chunk reported by the ASan runtime -- not with rows*cols. On glibc/Linux OpenCV's
+// fastMalloc is malloc(size + 8 + 64) plus alignment, so the chunk starts before and ends
+// after the logical image; for a ROI the chunk is the parent's.
+enum class Ptr {
+    WITHIN_ALLOCATION = 0,          // inside the chunk and inside the logical image
+    ONE_PAST = 1,                   // exactly the chunk's one-past position (valid to form)
+    WITHIN_PARENT_OUTSIDE_ROI = 2,  // inside the chunk, outside the logical image
+    OUTSIDE_ALLOCATION = 3,         // before the chunk or beyond its one-past: UB to form
+    UNDETERMINED = 4                // chunk not resolvable (non-ASan build)
+};
+
+const char *ptr_name(Ptr p) {
+    switch (p) {
+        case Ptr::WITHIN_ALLOCATION: return "PTR_WITHIN_ALLOCATION";
+        case Ptr::ONE_PAST: return "PTR_ONE_PAST";
+        case Ptr::WITHIN_PARENT_OUTSIDE_ROI: return "PTR_WITHIN_PARENT_OUTSIDE_ROI";
+        case Ptr::OUTSIDE_ALLOCATION: return "PTR_OUTSIDE_ALLOCATION";
+        default: return "UNDETERMINED";
+    }
+}
+
+// Kernel index for one axis in defined arithmetic. std::floor / std::nearbyint (default
+// FE_TONEAREST, checked by conversion-check) of an IN_RANGE float is exactly representable
+// in int64, so the conversion below is defined.
+int64_t mapped_index(float coord, bool linear) {
+    if (classify_coord(coord) != Conv::IN_RANGE) return INT32_MIN;
+    return int64_t(linear ? std::floor(coord) : std::nearbyint(coord));
+}
+
+// Worst classification over one set of destination pixels. `robust` counts out-of-allocation
+// pointers that are outside for EVERY placement fastMalloc could choose (see pointer_range).
+struct PtrScope {
+    Ptr worst = Ptr::WITHIN_ALLOCATION;
+    int64_t off = 0, ix = 0, iy = 0;
+    float sx = 0, sy = 0;
+    int x = -1, y = -1;
+    long outside = 0, robust = 0, pixels = 0;
+    bool worst_robust = false;
+    void add(Ptr p, bool rob, int64_t o, int64_t ix_, int64_t iy_, float sx_, float sy_, int x_,
+             int y_) {
+        ++pixels;
+        if (p == Ptr::OUTSIDE_ALLOCATION) ++outside;
+        if (rob) ++robust;
+        // Prefer a worse class; within OUTSIDE_ALLOCATION prefer an alignment-independent one.
+        if (x < 0 || int(p) > int(worst) ||
+            (p == worst && p == Ptr::OUTSIDE_ALLOCATION && rob && !worst_robust)) {
+            worst = p; worst_robust = rob; off = o; ix = ix_; iy = iy_; sx = sx_; sy = sy_;
+            x = x_; y = y_;
+        }
+    }
+};
+
+// First destination column the scalar tail handles for unroll factor uf (the vector loop
+// runs `for (; x <= dstcols - uf; x += uf)`). uf = 16 for AVX2 and 8 for the SSE2 baseline.
+int scalar_tail_first_x(int dst_cols, int uf) {
+    return dst_cols >= uf ? dst_cols - dst_cols % uf : 0;
+}
+
+void print_scope(const char *label, const char *scope, const PtrScope &s) {
+    if (s.pixels == 0) {
+        std::printf("  PTR_RANGE %s scope=%s pixels=0 (no scalar-tail pixel at this width)\n",
+                    label, scope);
+        return;
+    }
+    std::printf("  PTR_RANGE %s scope=%s pixels=%ld outside=%ld outside_any_alignment=%ld "
+                "worst=%s%s dst=(x=%d,y=%d) mapped=(%.9g,%.9g) mapped_ix=%lld mapped_iy=%lld "
+                "mathematical_element_offset=%lld\n",
+                label, scope, s.pixels, s.outside, s.robust, ptr_name(s.worst),
+                s.worst == Ptr::OUTSIDE_ALLOCATION ? (s.worst_robust ? "(ANY_ALIGNMENT)"
+                                                                     : "(THIS_LAYOUT_ONLY)")
+                                                   : "",
+                s.x, s.y, double(s.sx), double(s.sy), (long long)s.ix, (long long)s.iy,
+                (long long)s.off);
+}
+
+// Classify the scalar-tail srcptr of every destination pixel of a warp whose source is the
+// exact Mat the kernel receives and whose output is dst_rows x dst_cols (ECC: equal sizes).
+// The coordinates use the kernel's float expression x*M0 + y*M1 + M2. The probe is built
+// without -mfma, so no contraction occurs here; the -O2 -mfma AVX2 kernel may contract to an
+// FMA, which can only move a coordinate that lies within one ulp of an integer.
+// Returns the worst class within the AVX2 scalar tail.
+// verbose=false prints only the AVX2 and baseline scalar-tail verdict lines (Level B traces).
+Ptr pointer_range(const char *label, const cv::Mat &src, const float M[6], bool linear,
+                  int dst_rows, int dst_cols, bool verbose = true) {
+    const int64_t elem = int64_t(src.elemSize1());
+    const int64_t step_el = int64_t(src.step[0]) / elem;   // kernel srcstep, in elements
+    const unsigned char *base = src.data;
+    const void *chunk = __sanitizer_get_allocated_begin(base);
+    const int64_t chunk_bytes = chunk ? int64_t(__sanitizer_get_allocated_size(chunk)) : 0;
+    // uintptr_t differences: no pointer subtraction across (possibly) distinct objects.
+    const int64_t lo = chunk ? int64_t(reinterpret_cast<uintptr_t>(chunk)) -
+                                   int64_t(reinterpret_cast<uintptr_t>(base))
+                             : 0;
+    const int64_t hi = lo + chunk_bytes;   // one-past the chunk, bytes relative to src
+    // Placement-independent bound. fastMalloc (alloc.cpp:160-164, glibc/Linux without
+    // memalign) returns alignPtr(malloc(n + 8 + 64) + 8, 64): the user data starts 8..71 bytes
+    // into the chunk and the chunk ends 1..64 bytes after the Mat's datalimit. A pointer below
+    // datastart-71 or above datalimit+64 is therefore outside the chunk for EVERY placement.
+    const int64_t ds = int64_t(reinterpret_cast<uintptr_t>(src.datastart)) -
+                       int64_t(reinterpret_cast<uintptr_t>(base));
+    const int64_t dl = int64_t(reinterpret_cast<uintptr_t>(src.datalimit)) -
+                       int64_t(reinterpret_cast<uintptr_t>(base));
+    const int64_t robust_lo = ds - 71, robust_hi = dl + 64;
+    if (verbose) std::printf("  PTR_SOURCE %s kernel=%s source_rows=%d source_cols=%d "
+                "source_step_elements=%lld elem_bytes=%lld submatrix=%d continuous=%d "
+                "logical_element_count=%lld\n",
+                label, linear ? "warpAffineLinearInvoker_32FC1" : "warpAffineNearestInvoker_8UC1",
+                src.rows, src.cols, (long long)step_el, (long long)elem, int(src.isSubmatrix()),
+                int(src.isContinuous()), (long long)(int64_t(src.rows) * src.cols));
+    if (verbose) std::printf("  PTR_ALLOC %s allocation_begin=%p allocation_bytes=%lld "
+                "allocation_element_count=%lld allocation_element_range=[%lld,%lld) "
+                "(relative to src.data; source=ASan chunk)\n",
+                label, chunk, (long long)chunk_bytes, (long long)(chunk_bytes / elem),
+                (long long)(lo / elem), (long long)(hi / elem));
+    const int tail16 = scalar_tail_first_x(dst_cols, 16), tail8 = scalar_tail_first_x(dst_cols, 8);
+    // `src + srcstep * iy + ix` parses as (src + srcstep*iy) + ix and srcstep is size_t
+    // (warp_kernels.simd.hpp:368, :3690). Two pointers are formed, and each must be valid:
+    //   P1 = src + srcstep*iy   -- for iy < 0 the operand srcstep*(size_t)iy is the huge
+    //        unsigned value 2^64 - srcstep*|iy|, so P1 is outside the array for ANY layout
+    //        ([expr.add]/4), even though the generated code wraps to src - srcstep*|iy|;
+    //   P2 = P1 + ix            -- signed int operand.
+    auto classify = [&](int64_t byte, bool in_image, bool &rob) {
+        if (chunk == nullptr) { rob = false; return Ptr::UNDETERMINED; }
+        Ptr p;
+        if (byte < lo || byte > hi) p = Ptr::OUTSIDE_ALLOCATION;
+        else if (byte == hi) p = Ptr::ONE_PAST;
+        else p = in_image ? Ptr::WITHIN_ALLOCATION : Ptr::WITHIN_PARENT_OUTSIDE_ROI;
+        rob = p == Ptr::OUTSIDE_ALLOCATION && (byte < robust_lo || byte > robust_hi);
+        return p;
+    };
+    // Primary classification: the EFFECTIVE pointer src + srcstep*iy + ix (what the generated
+    // code computes). Secondary, reported separately so no conclusion depends on it: under the
+    // strict unsigned reading, every pixel with iy < 0 also forms an out-of-array P1.
+    PtrScope all, avx2, base8;
+    long neg_iy_avx2 = 0, neg_iy_base8 = 0, neg_iy_all = 0;
+    for (int y = 0; y < dst_rows; ++y)
+        for (int x = 0; x < dst_cols; ++x) {
+            const float sx = float(x) * M[0] + float(y) * M[1] + M[2];
+            const float sy = float(x) * M[3] + float(y) * M[4] + M[5];
+            const int64_t ix = mapped_index(sx, linear), iy = mapped_index(sy, linear);
+            const int64_t off = step_el * iy + ix;   // |off| < 2^48: no int64 overflow
+            const bool in_image = ix >= 0 && ix < src.cols && iy >= 0 && iy < src.rows;
+            bool rob = false;
+            const Ptr p = classify(off * elem, in_image, rob);
+            all.add(p, rob, off, ix, iy, sx, sy, x, y);
+            if (iy < 0) ++neg_iy_all;
+            if (x >= tail16) {
+                avx2.add(p, rob, off, ix, iy, sx, sy, x, y);
+                if (iy < 0) ++neg_iy_avx2;
+            }
+            if (x >= tail8) {
+                base8.add(p, rob, off, ix, iy, sx, sy, x, y);
+                if (iy < 0) ++neg_iy_base8;
+            }
+        }
+    if (verbose) std::printf("  PTR_P1_UNSIGNED %s negative_iy_pixels avx2-scalar-tail=%ld "
+                "baseline-scalar-tail=%ld all=%ld (strict reading only: src + size_t(srcstep)*iy "
+                "with iy<0 adds ~2^64; not used for the primary verdict)\n",
+                label, neg_iy_avx2, neg_iy_base8, neg_iy_all);
+    if (verbose) std::printf("  PTR_ALLOC_BOUND %s mat_element_range=[%lld,%lld) "
+                "placement_independent_element_range=[%lld,%lld]\n",
+                label, (long long)(ds / elem), (long long)(dl / elem),
+                (long long)(robust_lo / elem), (long long)(robust_hi / elem));
+    if (verbose) std::printf("  PTR_TAIL %s dst=%dx%d avx2_uf=16 scalar_tail_x=[%d,%d) baseline_uf=8 "
+                "scalar_tail_x=[%d,%d)\n",
+                label, dst_cols, dst_rows, tail16, dst_cols, tail8, dst_cols);
+    print_scope(label, "avx2-scalar-tail", avx2);
+    print_scope(label, "baseline-scalar-tail", base8);
+    if (verbose) print_scope(label, "all-pixels(hypothetical-fully-scalar)", all);
+    for (const PtrScope *s : {&avx2, &base8}) {
+        if (!verbose || s->worst != Ptr::OUTSIDE_ALLOCATION) continue;
+        const bool representable = classify_coord(s->sx) == Conv::IN_RANGE &&
+                                   classify_coord(s->sy) == Conv::IN_RANGE;
+        std::printf("    SOURCE_LEVEL_OUT_OF_ALLOCATION %s scope=%s: the scalar tail forms "
+                    "src + srcstep*iy + ix outside the source array BEFORE its bounds test "
+                    "(%s index, %s); the border branch then performs no load\n",
+                    label, s == &avx2 ? "avx2-scalar-tail" : "baseline-scalar-tail",
+                    representable ? "int32-representable" : "INT_MIN-sentinel",
+                    s->worst_robust ? "outside for any fastMalloc placement"
+                                    : "outside for THIS allocation layout only");
+    }
+    return avx2.worst;
 }
 
 
@@ -240,7 +457,44 @@ struct LevelAOptions {
     bool linear = true;
     bool nearest = true;
     bool roi = false;
+    // R1: report the exact srcptr of one named destination pixel (in addition to the scans).
+    int probe_x = -1, probe_y = -1;
 };
+
+// R1: the exact source pointer of ONE destination pixel, in defined arithmetic (same model as
+// pointer_range), printed with every quantity the task asks for.
+void pixel_pointer(const char *label, const cv::Mat &src, const float M[6], bool linear, int x,
+                   int y) {
+    const int64_t elem = int64_t(src.elemSize1());
+    const int64_t step_el = int64_t(src.step[0]) / elem;
+    const float sx = float(x) * M[0] + float(y) * M[1] + M[2];
+    const float sy = float(x) * M[3] + float(y) * M[4] + M[5];
+    const int64_t ix = mapped_index(sx, linear), iy = mapped_index(sy, linear);
+    const int64_t off = step_el * iy + ix;
+    const void *chunk = __sanitizer_get_allocated_begin(src.data);
+    const int64_t bytes = chunk ? int64_t(__sanitizer_get_allocated_size(chunk)) : 0;
+    const int64_t lo = chunk ? int64_t(reinterpret_cast<uintptr_t>(chunk)) -
+                                   int64_t(reinterpret_cast<uintptr_t>(src.data))
+                             : 0;
+    const int64_t hi = lo + bytes, b = off * elem;
+    const char *verdict = !chunk ? "UNDETERMINED"
+                          : (b < lo || b > hi) ? "PTR_OUTSIDE_ALLOCATION"
+                          : b == hi ? "PTR_ONE_PAST"
+                          : (ix >= 0 && ix < src.cols && iy >= 0 && iy < src.rows)
+                              ? "PTR_WITHIN_ALLOCATION"
+                              : "PTR_WITHIN_PARENT_OUTSIDE_ROI";
+    std::printf("  PIXEL_PTR %s dst=(x=%d,y=%d) mapped=(%.9g,%.9g) mapped_ix=%lld mapped_iy=%lld "
+                "source_step_elements=%lld mathematical_element_offset=%lld "
+                "logical_last_index=%lld logical_one_past=%lld "
+                "allocation_element_range=[%lld,%lld) beyond_one_past_by=%lld "
+                "before_begin_by=%lld verdict=%s\n",
+                label, x, y, double(sx), double(sy), (long long)ix, (long long)iy,
+                (long long)step_el, (long long)off,
+                (long long)(int64_t(src.rows - 1) * step_el + src.cols - 1),
+                (long long)(int64_t(src.rows - 1) * step_el + src.cols), (long long)(lo / elem),
+                (long long)(hi / elem), (long long)(off - hi / elem > 0 ? off - hi / elem : 0),
+                (long long)(lo / elem - off > 0 ? lo / elem - off : 0), verdict);
+}
 
 void level_a(const char *name, const std::string &model, const float coeff[6], int rows,
              int cols, LevelAOptions opt) {
@@ -263,6 +517,8 @@ void level_a(const char *name, const std::string &model, const float coeff[6], i
                         : parent(cv::Rect(0, 0, cols, rows)).clone();
         std::printf("  SOURCE linear continuous=%d step=%zu bytes\n", int(image.isContinuous()),
                     image.step[0]);
+        pointer_range("linear", image, coeff, true, rows, cols);
+        if (opt.probe_x >= 0) pixel_pointer("linear", image, coeff, true, opt.probe_x, opt.probe_y);
         std::printf("  NATIVE_CALL_BEGIN warpAffine CV_32FC1 INTER_LINEAR+WARP_INVERSE_MAP\n");
         std::fflush(stdout);
         cv::warpAffine(image, dst, map, cv::Size(cols, rows),
@@ -275,6 +531,8 @@ void level_a(const char *name, const std::string &model, const float coeff[6], i
                        : parent(cv::Rect(0, 0, cols, rows)).clone();
         std::printf("  SOURCE nearest continuous=%d step=%zu bytes\n", int(mask.isContinuous()),
                     mask.step[0]);
+        pointer_range("nearest", mask, coeff, false, rows, cols);
+        if (opt.probe_x >= 0) pixel_pointer("nearest", mask, coeff, false, opt.probe_x, opt.probe_y);
         std::printf("  NATIVE_CALL_BEGIN warpAffine CV_8UC1 INTER_NEAREST+WARP_INVERSE_MAP\n");
         std::fflush(stdout);
         cv::warpAffine(mask, dst, map, cv::Size(cols, rows),
@@ -299,7 +557,12 @@ long trace(const char *name, int motionType, const std::string &model, const flo
     print_matrix("  seed=", seed);
     std::printf("  seed model-valid=%s seed-domain=%s\n", model_valid(model, seed) ? "YES" : "NO",
                 seed_domain(model, seed));
-    long first_unsafe = -1;
+    // R1: a source shaped exactly like ECC's imageFloat/preMask (Mat(hd, wd, type), contiguous,
+    // same size as the template). The mapped coordinates depend only on the warp and geometry,
+    // not on pixel values, so these stand in for the real intermediates the kernel receives.
+    cv::Mat img32(rows, cols, CV_32FC1, cv::Scalar(0));
+    cv::Mat mask8(rows, cols, CV_8UC1, cv::Scalar(1));
+    long first_unsafe = -1, first_oob = -1;
     double max_reach = 0.0;
     cv::Mat previous;
     for (int k = 0; k < iterations; ++k) {
@@ -329,6 +592,14 @@ long trace(const char *name, int motionType, const std::string &model, const flo
                     outcome.c_str(), k, double(reach.max_abs_finite));
         print_matrix("", w);
         if (!model_valid(model, w)) std::printf("    MODEL_INVARIANT_VIOLATED\n");
+        // R1: ordinary (int32-representable) out-of-allocation pointer formation, per kernel.
+        const Ptr pl = pointer_range("    iter-linear", img32, w, true, rows, cols, false);
+        const Ptr pn = pointer_range("    iter-nearest", mask8, w, false, rows, cols, false);
+        if ((pl == Ptr::OUTSIDE_ALLOCATION || pn == Ptr::OUTSIDE_ALLOCATION) && first_oob < 0) {
+            first_oob = k + 1;
+            std::printf("    FIRST_OUT_OF_ALLOCATION_ITERATION=%d linear=%s nearest=%s\n", k + 1,
+                        ptr_name(pl), ptr_name(pn));
+        }
         if (reach.worst != Conv::IN_RANGE) {
             std::printf("    UNSAFE_INTERMEDIATE iteration=%d\n", k + 1);
             print_reach("   ", reach);
@@ -338,6 +609,9 @@ long trace(const char *name, int motionType, const std::string &model, const flo
     }
     std::printf("  first unsafe iteration=%ld max|finite_coord| reached=%.9g (2^31=%.9g)\n",
                 first_unsafe, max_reach, double(kTwoPow31));
+    std::printf("  TRACE_SUMMARY %s first_conversion_unsafe_iteration=%ld "
+                "first_out_of_allocation_iteration=%ld\n",
+                name, first_unsafe, first_oob);
     return first_unsafe;
 }
 
@@ -654,6 +928,69 @@ int main(int argc, char **argv) {
         return bad == 0 ? 0 : 1;
     }
     if (mode == "conversion-check") return conversion_check() == 0 ? 0 : 1;
+
+    // ---- R1 (2026-10-19): ordinary int32-representable out-of-allocation pointer formation.
+    // Exact Float32 translations: 2, 1, -2, -1 are exact. WARP_INVERSE_MAP: src = M * dst.
+    const float r1_pos[6] = {1, 0, 2, 0, 1, 1};      // (+2,+1): bottom-right corner overruns
+    const float r1_neg[6] = {1, 0, -2, 0, 1, -1};    // (-2,-1): top-left corner underruns
+    LevelAOptions r1_both = both;
+    if (mode == "r1-ordinary-positive" || mode == "r1-ordinary-positive-baseline" ||
+        mode == "r1-ordinary-negative" || mode == "r1-ordinary-negative-baseline") {
+        const bool neg = mode.find("negative") != std::string::npos;
+        const bool baseline = mode.find("baseline") != std::string::npos;
+        if (baseline) cv::setUseOptimized(false);   // forces cv::cpu_baseline
+        // The scalar-tail pixel nearest the overrunning/underrunning corner.
+        r1_both.probe_x = 96;
+        r1_both.probe_y = neg ? 0 : 63;
+        level_a(neg ? "r1-ordinary-negative" : "r1-ordinary-positive", "translation",
+                neg ? r1_neg : r1_pos, 64, 97, r1_both);
+        std::printf("R1_ORDINARY_DONE\n");
+    } else if (mode == "r1-roi-positive" || mode == "r1-roi-negative") {
+        // Noncontiguous ROI at (5,3) inside a (cols+16)x(rows+8) parent: the out-of-image
+        // srcptr may still be inside the parent allocation.
+        const bool neg = mode == "r1-roi-negative";
+        LevelAOptions roi = both;
+        roi.roi = true;
+        roi.probe_x = 96;
+        roi.probe_y = neg ? 0 : 63;
+        level_a(neg ? "r1-roi-negative" : "r1-roi-positive", "translation", neg ? r1_neg : r1_pos,
+                64, 97, roi);
+        std::printf("R1_ORDINARY_DONE\n");
+    } else if (mode == "r1-sweep") {
+        // One width per process. AVX2 uf=16: widths divisible by 16 have NO scalar tail.
+        const int w = argc > 2 ? std::atoi(argv[2]) : 97;
+        if (w < 32 || w > 4096) {
+            std::fprintf(stderr, "r1-sweep width outside the 32..4096 budget\n");
+            return 2;
+        }
+        // argv[3] == "neg" uses (-2,-1); the probe pixel is then the FIRST AVX2 scalar-tail
+        // column of row 0 (smallest offset), else the last column of the last row.
+        const bool neg = argc > 3 && std::string(argv[3]) == "neg";
+        if (argc > 4 && std::string(argv[4]) == "baseline") cv::setUseOptimized(false);
+        r1_both.probe_x = neg ? std::min(scalar_tail_first_x(w, 16), w - 1) : w - 1;
+        r1_both.probe_y = neg ? 0 : 63;
+        level_a(neg ? "r1-sweep-negative" : "r1-sweep", "translation", neg ? r1_neg : r1_pos, 64,
+                w, r1_both);
+        std::printf("R1_ORDINARY_DONE\n");
+    } else if (mode == "r1-identity-control") {
+        // Genuine pointer-range-negative control: identity over a contiguous source. Every
+        // scalar-tail srcptr is inside the image (worst offset = last element).
+        r1_both.probe_x = 96;
+        r1_both.probe_y = 63;
+        level_a("r1-identity-control", "translation", identity, 64, 97, r1_both);
+        cv::Mat a(64, 97, CV_32FC1, cv::Scalar(0)), b(64, 97, CV_8UC1, cv::Scalar(1));
+        const bool ok = pointer_range("check-linear", a, identity, true, 64, 97, false) !=
+                            Ptr::OUTSIDE_ALLOCATION &&
+                        pointer_range("check-nearest", b, identity, false, 64, 97, false) !=
+                            Ptr::OUTSIDE_ALLOCATION;
+        std::printf("%s\n", ok ? "POINTER_RANGE_NEGATIVE_CONTROL_OK"
+                               : "POINTER_RANGE_NEGATIVE_CONTROL_FAILED");
+        return ok ? 0 : 1;
+    }
+    if (mode.rfind("r1-", 0) == 0) {
+        print_peak_rss();
+        return 0;
+    }
     if (mode == "level-a-far-control" || mode == "level-a-matrix-b") {
         const bool far = mode == "level-a-far-control";
         const float *m = far ? far_control : matrix_b;
