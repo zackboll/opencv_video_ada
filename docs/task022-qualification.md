@@ -306,6 +306,48 @@ R1 changes only `tests/cpp/ecc5_float_warp_probe.cpp`, `scripts/research_ecc5_fl
 production library, tests or examples changed: `cpp/`, every `.adb`, every GPR, the Alire
 manifests and `.github/` are byte-identical to `0977d07`. The Part 2 four-version campaign
 (on `920d739`, identical production sources) therefore stays valid as the regression evidence.
-In addition, the normal OpenCV 5.0 regression (`scripts/test.sh`) was re-run on the R1 head; see
-the R1 regression note below. An unchanged binding regression proves nothing about native
-pointer safety.
+In addition, the full 15-step OpenCV 5.0 regression was re-run on a clean clone of the R1
+documentation head; see the R1 regression note below. An unchanged binding regression proves
+nothing about native pointer safety.
+
+### R1 regression note (OpenCV 5.0, clean clone of `faff7cb`)
+
+A fresh `git clone --no-local` of `faff7cb9e606542eca87ee5418ff3b184997b485` was run against
+the **uninstrumented** `install-5.0.0` with the same 15 steps as Part 2. Result: **all 15 steps
+rc 0**. AUnit 198/198/0/0, `Ran 12 tests` (configuration). Oracles translation 27, Euclidean 24,
+Euclidean seeded 37, affine 32, affine seeded 34. Homography 28/9, seeded 19/16, masked 39/14.
+31 minimum-eigenvalue entries. `lk_synthetic` 4/4 tracked, ECC and homography smokes PASS.
+Exports 25, test symbols 0; `ldd` resolves to `install-5.0.0/lib/*.so.500`, with
+`Native_Version := "5.0.0"`. 0 `runtime error`, 0 ASan, 0 LSan, 0 `SUMMARY:`, 0 compiler
+`warning:`. `proberefs` rc 0 (the research probe is referenced by no GPR, workflow or regression
+script). These numbers are **identical** to the Part 2 5.0.0 row.
+
+The 4.1.0, 4.6.0 and 4.10.0 rows were **not re-run** for R1. That is justified because no build
+input of the production library, its tests or examples changed since `920d739`: `git diff
+920d739 HEAD` over `cpp/`, every `.adb`, every GPR, the three Alire manifests, `.github/`,
+`tests/src`, `examples/src` and the regression scripts is **empty**, and the `src/opencv-video.ads`
+diff has 0 non-comment lines. The Part 2 rows therefore remain the regression evidence for those
+versions.
+
+Inventory at the R1 head: 25 production ABI exports, 198 AUnit registrations, Core pin
+`4da9d35ea21e1b2efe96296243ea668b488c6326`, crate `0.1.0-dev`, CI topology unchanged
+(`check_repository.py` PASS, including "CI topology"). `git diff --check` clean, and
+`sh -n scripts/research_ecc5_float_warp.sh` clean.
+
+**This regression proves nothing about native pointer safety.** The binding suite links the
+uninstrumented OpenCV and does not run the research probe. The same ECC calls that pass here
+form out-of-allocation pointers inside OpenCV (Part R1 Level C).
+
+### R1 owner decision required before any mitigation
+
+The five 5.0 operations are `KNOWN_NATIVE_UB_UNMITIGATED` and remain available and unchanged,
+per the R1 stop conditions. Choosing a response needs a separate, owner-approved task:
+
+* document-only (the current state);
+* gate OpenCV 5.0 ECC in the shim;
+* route around the scalar tail (for example, pad to a vector-multiple width; unvalidated, and
+  dispatch-width dependent);
+* carry or upstream an OpenCV fix (form the pointer only after the in-bounds test, task note
+  section 11 option 1).
+
+None of these was implemented or validated here.
